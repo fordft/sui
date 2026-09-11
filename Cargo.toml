@@ -44,7 +44,11 @@ inherits = "release"
 [workspace.metadata.dist]
 cargo-dist-version = "0.33.0"
 ci = ["github"]
-installers = ["shell"]
+installers = ["shell", "homebrew"]
+# One tap, one formula: brew install fordft/tap/sui-ai (macOS + Linux)
+tap = "fordft/homebrew-tap"
+formula = "sui-ai"
+publish-jobs = ["homebrew"]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
