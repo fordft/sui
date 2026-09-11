@@ -331,6 +331,98 @@ pub fn load(ov: Overrides) -> Result<Config> {
     })
 }
 
+/// TUI state persisted in the global config under [ui]. Secrets never
+/// appear here — auth stays env/keyring/session.
+#[derive(Debug, serde::Deserialize, serde::Serialize, Default, Clone)]
+pub struct UiSettings {
+    pub workspace: Option<String>,
+    /// "solo" | "mission"
+    pub mode: Option<String>,
+    pub solo_profile: Option<String>,
+    pub orchestrator_profile: Option<String>,
+    pub worker_profile: Option<String>,
+    /// None = auditor uses the orchestrator profile.
+    pub auditor_profile: Option<String>,
+    pub worker_count: Option<usize>,
+    pub acceptance: Vec<String>,
+}
+
+fn global_path() -> Result<PathBuf> {
+    std::env::home_dir()
+        .map(|h| h.join(".config/sui/config.toml"))
+        .context("no home dir")
+}
+
+/// Load the [ui] section of the global config (absent → defaults).
+pub fn load_ui() -> UiSettings {
+    global_path()
+        .ok()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.parse::<toml::Value>().ok())
+        .and_then(|v| v.get("ui")?.clone().try_into().ok())
+        .unwrap_or_default()
+}
+
+/// Write the [ui] section, preserving every other table in the file.
+pub fn save_ui(ui: &UiSettings) -> Result<()> {
+    let p = global_path()?;
+    let mut doc: toml::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    doc.as_table_mut()
+        .context("config root not a table")?
+        .insert("ui".into(), toml::Value::try_from(ui).context("serialize ui settings")?);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&p, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+/// Persist a profile's non-secret fields into [profiles.<name>] of the
+/// global config. `key_env` names the env var holding the key — the key
+/// itself is never written by this function.
+pub fn save_profile(
+    name: &str,
+    base_url: &str,
+    model: &str,
+    key_env: Option<&str>,
+) -> Result<()> {
+    let p = global_path()?;
+    let mut doc: toml::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    let root = doc.as_table_mut().context("config root not a table")?;
+    let profs = root
+        .entry("profiles")
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let entry = profs
+        .as_table_mut()
+        .context("profiles not a table")?
+        .entry(name)
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let t = entry.as_table_mut().context("profile not a table")?;
+    t.insert("base_url".into(), toml::Value::String(base_url.to_string()));
+    t.insert("model".into(), toml::Value::String(model.to_string()));
+    match key_env {
+        Some(k) => {
+            t.insert("key_env".into(), toml::Value::String(k.to_string()));
+            t.remove("api_key");
+        }
+        None => {
+            t.remove("key_env");
+        }
+    }
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&p, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
 fn unix_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

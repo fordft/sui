@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod config;
 pub mod context;
+pub mod events;
 pub mod journal;
 pub mod mission;
 pub mod permission;
 pub mod provider;
 pub mod tools;
+pub mod tui;
 pub mod types;

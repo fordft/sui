@@ -195,6 +195,100 @@ impl Provider {
     }
 }
 
+/// A model entry from a provider's catalog (GET {base}/models).
+/// Fields are reported values — None where the provider doesn't publish.
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub context_length: Option<u64>,
+    /// USD per token, as reported (OpenRouter shape).
+    pub price_in: Option<f64>,
+    pub price_out: Option<f64>,
+    /// Provider-claimed tool support (OpenRouter supported_parameters).
+    /// NOT a Sui certification — display as catalog metadata only.
+    pub tools_claimed: Option<bool>,
+}
+
+/// GET {base}/models. Auth header when a key is present. No path munging —
+/// whatever the user configured is where we go.
+pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut req = client.get(&url);
+    if let Some(k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.context("list models")?;
+    if !resp.status().is_success() {
+        bail!("GET /models → http {}", resp.status().as_u16());
+    }
+    let body: Value = resp.json().await.context("parse /models")?;
+    let mut out = vec![];
+    for m in body["data"].as_array().into_iter().flatten() {
+        let Some(id) = m["id"].as_str() else { continue };
+        let tools_claimed = m["supported_parameters"]
+            .as_array()
+            .map(|a| a.iter().any(|p| p.as_str() == Some("tools")));
+        out.push(ModelInfo {
+            id: id.to_string(),
+            context_length: m["context_length"].as_u64(),
+            price_in: m["pricing"]["prompt"].as_str().and_then(|s| s.parse().ok()),
+            price_out: m["pricing"]["completion"].as_str().and_then(|s| s.parse().ok()),
+            tools_claimed,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// Capability status from an actual test request — not catalog claims.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapStatus {
+    Verified,
+    Unverified,
+    Unsupported,
+}
+
+/// One small live request with a trivial tool: verifies streaming, tool
+/// calling, and usage reporting in a single round trip. Costs one tiny
+/// request — the UI must warn before invoking.
+pub async fn probe(base_url: &str, api_key: Option<&str>, model: &str) -> Result<Probe> {
+    let p = Provider::new(base_url, api_key.map(String::from), model.to_string(), None);
+    let msgs = vec![Message::User {
+        content: "Reply with the word ok.".into(),
+    }];
+    let tools = vec![json!({
+        "type": "function",
+        "function": {"name": "noop", "description": "does nothing",
+            "parameters": {"type": "object", "properties": {}}}
+    })];
+    let mut streamed = false;
+    let out = p
+        .stream_chat(&msgs, &tools, |_| {
+            streamed = true;
+        })
+        .await?;
+    Ok(Probe {
+        streaming: if streamed { CapStatus::Verified } else { CapStatus::Unsupported },
+        tool_calls: if !out.tool_calls.is_empty() || out.finish_reason.as_deref() == Some("tool_calls") {
+            CapStatus::Verified
+        } else {
+            CapStatus::Unverified
+        },
+        usage: if out.usage.is_some() { CapStatus::Verified } else { CapStatus::Unverified },
+        model: out.returned_model.unwrap_or_else(|| model.to_string()),
+    })
+}
+
+pub struct Probe {
+    pub streaming: CapStatus,
+    pub tool_calls: CapStatus,
+    pub usage: CapStatus,
+    pub model: String,
+}
+
 /// Normalize usage across providers. OpenAI nests cached tokens under
 /// prompt_tokens_details; DeepSeek reports prompt_cache_hit/miss_tokens.
 /// Missing fields stay None — unknown is not zero.

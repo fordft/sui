@@ -5,9 +5,17 @@ use std::io::IsTerminal;
 use std::time::Duration;
 use sui::{agent, config, context, journal, permission, provider, tools};
 
+#[derive(clap::Subcommand)]
+enum Sub {
+    /// Terminal UI: setup, provider/model roles, chat, mission view
+    Tui,
+}
+
 #[derive(Parser)]
 #[command(name = "sui", about = "cache-first multi-agent coding harness (v0: fast path)")]
 struct Cli {
+    #[command(subcommand)]
+    sub: Option<Sub>,
     /// OpenAI-compatible base URL (e.g. http://localhost:8000/v1)
     #[arg(long)]
     base_url: Option<String>,
@@ -33,6 +41,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.sub, Some(Sub::Tui)) {
+        return sui::tui::run().await;
+    }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
     let cfg = config::load(config::Overrides {
         base_url: cli.base_url,

@@ -7,7 +7,10 @@ description = "cache-first multi-agent coding harness"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 futures-util = "0.3"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }

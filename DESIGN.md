@@ -205,7 +205,44 @@ reuse (tool schemas are cache-relevant; the report measures, not infers).
 Fresh repair sessions trade prior-history reuse for bounded context — kept
 deliberately; repair cost/success is measured before any second strategy.
 
-Deferred: TUI, auto mode-selection, pools >2, indexing, compaction.
+Deferred: auto mode-selection, pools >2, indexing, compaction.
+
+## TUI (v0.3)
+
+`sui tui` — Ratatui/Crossterm shell over the frozen core. The UI renders
+typed events and emits user commands; it never re-implements the agent
+loop and never mutates request payloads (tab switches, scrolling, and
+status numbers stay out of model context — append-only history and frozen
+prefixes are unchanged).
+
+- **First run**: no profiles → Setup opens a provider editor instead of
+  demanding hand-edited TOML. Three provider kinds: DeepSeek
+  (`api.deepseek.com`), OpenRouter (`openrouter.ai/api/v1`), custom
+  OpenAI-compatible. Model entry searches `GET {base}/models` (OpenRouter
+  catalog shows ctx/price/tool-claims when published) with a manual-entry
+  fallback. The exact request endpoint is previewed; no `/v1` guessing.
+- **Roles**: Solo profile; Mission orchestrator/workers/auditor (auditor
+  defaults to the orchestrator profile). Any provider may fill any role;
+  no profile is hardcoded to a vendor. Worker concurrency 1–2 (cap kept).
+- **Keys**: masked entry; env-var or session-only storage by default,
+  optional OS keyring when available (falls back cleanly headless).
+  Keys never hit journals, chat, or TOML.
+- **Screens**: Chat (streaming, multiline, paste, scroll, unicode-safe) /
+  Tasks (plan + per-task status) / Changes (files, audit, accepted SHA) /
+  Usage (per-agent requests + provider-reported cache tokens; unknown
+  costs render `—`, never 0) / Settings (providers, roles, workspace,
+  worker count, acceptance commands). Sidebar lists agents + run state;
+  collapses under ~90 cols.
+- **Control**: permission prompts are in-TUI modals (y/a/n) wired through
+  the same Gate; Stop and Ctrl-C fire a shared `Notify` + flag consumed by
+  the existing cancellation path (process-group cleanup intact). Terminal
+  is restored on quit, error, and panic.
+- **Test connection** runs one small live request reporting
+  streaming/tools/usage as Verified/Unverified/Unsupported — catalog
+  metadata is never treated as end-to-end verification.
+- Rendering is event-driven with a ~30fps cap; the chat buffer is bounded
+  (journal remains the durable record). Live provider status stays
+  `UNVERIFIED` until certified with real credentials.
 
 ## Build order
 

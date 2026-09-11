@@ -252,6 +252,8 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
         context_reserve: 8_192,
         control_max_turns: 10,
         worker_max_turns: 10,
+        events: None,
+        cancel: None,
     }
 }
 

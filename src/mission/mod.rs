@@ -12,6 +12,7 @@ pub mod worktree;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,9 @@ pub struct MissionCfg {
     pub context_reserve: usize,
     pub control_max_turns: usize,
     pub worker_max_turns: usize,
+    /// UI wiring: events out, shared cancel in. None = headless.
+    pub events: Option<crate::events::Sink>,
+    pub cancel: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
 }
 
 #[derive(Default)]
@@ -95,7 +99,9 @@ struct Cap {
     last_error: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mk_agent(
+    cfg: &MissionCfg,
     prof: &Profile,
     workspace: &Path,
     system: &str,
@@ -142,6 +148,9 @@ fn mk_agent(
     );
     a.set_quiet(true);
     a.set_system(system.to_string());
+    if let (Some(sink), Some((n, f))) = (&cfg.events, &cfg.cancel) {
+        a.wire_ui(sink.clone(), n.clone(), f.clone());
+    }
     Ok(a)
 }
 
@@ -155,6 +164,7 @@ fn control_agent(
     check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>,
 ) -> Result<(Agent, Arc<Mutex<Cap>>)> {
     let mut a = mk_agent(
+        cfg,
         &cfg.control,
         workspace,
         prompts::CONTROL_SYSTEM,
@@ -259,6 +269,7 @@ async fn spawn_task(
     let task_base = base_for(cfg, c, base, integ_branch)?;
     worktree::add(&cfg.repo, &wt, &branch, &task_base)?;
     let mut agent = mk_agent(
+        cfg,
         &cfg.worker,
         &wt,
         &prompts::worker_system(),
@@ -347,6 +358,7 @@ async fn repair_task(
 ) -> Result<TaskOut> {
     let wt = worktree::worktrees_dir(&cfg.run_dir).join(&c.id);
     let mut agent = mk_agent(
+        cfg,
         &cfg.worker,
         &wt,
         &prompts::worker_system(),
@@ -516,9 +528,15 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     let flow = {
         let body = body(&cfg, &mut report, &mut journal);
         tokio::pin!(body);
+        let n = cfg.cancel.as_ref().map(|(n, _)| n.clone());
         tokio::select! {
             r = &mut body => r?,
             _ = tokio::signal::ctrl_c() => {
+                cancelled = true;
+                Flow::Failed("cancelled".into())
+            }
+            _ = async move { if let Some(n) = n { n.notified().await } else { std::future::pending().await } } => {
+                if let Some((_, f)) = &cfg.cancel { f.store(true, Ordering::Relaxed); }
                 cancelled = true;
                 Flow::Failed("cancelled".into())
             }
@@ -535,6 +553,12 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
             journal.log("mission", json!({ "state": "Failed", "why": why }));
             report.outcome = format!("failed: {why}");
         }
+    }
+    if let Some(tx) = &cfg.events {
+        let _ = tx.send(crate::events::UiEvent::RunDone {
+            outcome: report.outcome.clone(),
+            accepted_sha: report.accepted_sha.clone(),
+        });
     }
 
     // usage aggregation: bucket request events by role
@@ -594,6 +618,9 @@ async fn body(
         ($s:expr) => {{
             journal.log("mission", json!({ "state": format!("{:?}", $s) }));
             eprintln!("· mission: {:?}", $s);
+            if let Some(tx) = &cfg.events {
+                let _ = tx.send(crate::events::UiEvent::MissionState(format!("{:?}", $s)));
+            }
         }};
     }
     macro_rules! fail {
@@ -645,6 +672,10 @@ async fn body(
         }
     };
     journal.log("plan", serde_json::to_value(&plan).unwrap_or_default());
+    if let Some(tx) = &cfg.events {
+        let _ = tx.send(crate::events::UiEvent::TaskRows(
+            serde_json::to_value(&plan.tasks).unwrap_or_default()));
+    }
     report.plan = Some(plan.clone());
 
     // ── integration candidate up front; workers may depend on its tip ──
@@ -729,6 +760,7 @@ async fn body(
                                 report.tasks.push(json!({
                                     "id": newc.id, "status": "ok_after_escalation",
                                     "sha": out.sha, "changed": out.changed }));
+                                if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
                             }
                             _ => fail!(format!(
                                 "task {} still failed after escalation",
@@ -745,6 +777,7 @@ async fn body(
                 report.tasks.push(json!({
                     "id": contract.id, "status": "ok",
                     "sha": out.sha, "changed": out.changed }));
+                if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
             }
             // serialize integration: merge each passing task immediately
             state!(S::Integrating);
@@ -771,6 +804,7 @@ async fn body(
                                         "id": newc.id,
                                         "status": "ok_after_escalation",
                                         "sha": o4.sha, "changed": o4.changed }));
+                                    if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
                                 }
                                 _ => fail!(format!("merge conflict persists for {}", contract.id)),
                             }
@@ -824,6 +858,9 @@ async fn body(
             Err(e) => fail!(format!("audit error: {e:#}")),
         };
         report.audit = Some(payload.clone());
+        if let Some(tx) = &cfg.events {
+            let _ = tx.send(crate::events::UiEvent::AuditResult(payload.clone()));
+        }
         if verdict == "PASS" {
             break;
         }
@@ -880,6 +917,12 @@ async fn body(
     // the branch ref survives worktree cleanup and identifies the code.
     let sha = worktree::git_rev(&cfg.repo, &integ_branch).unwrap_or_default();
     report.accepted_sha = Some(sha.clone());
+    if let Some(tx) = &cfg.events {
+        let files: Vec<String> = report.tasks.iter()
+            .flat_map(|t| t["changed"].as_array().into_iter().flatten()
+                .filter_map(|v| v.as_str().map(String::from))).collect();
+        let _ = tx.send(crate::events::UiEvent::ChangeSet { files, sha: Some(sha.clone()) });
+    }
     journal.log(
         "accepted",
         json!({

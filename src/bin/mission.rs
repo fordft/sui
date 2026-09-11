@@ -321,6 +321,8 @@ async fn main() -> Result<()> {
         context_reserve: 8_192,
         control_max_turns: 40,
         worker_max_turns: 50,
+        events: None,
+        cancel: None,
     };
 
     let mut rows: Vec<TrialRow> = vec![];

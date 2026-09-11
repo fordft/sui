@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::context::{self, LayerHashes};
+use crate::events::{Sink, UiEvent};
 use crate::journal::Journal;
 use crate::permission::Gate;
 use crate::provider::Provider;
@@ -64,6 +66,9 @@ pub struct Agent {
     known: Vec<String>,
     interceptor: Option<Interceptor>,
     quiet: bool,
+    events: Option<Sink>,
+    cancel: Option<Arc<tokio::sync::Notify>>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -93,6 +98,29 @@ impl Agent {
             known,
             interceptor: None,
             quiet: false,
+            events: None,
+            cancel: None,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Wire a UI: typed events out, shared cancellation in (Stop button /
+    /// mission-level cancel), and gate decisions as interactive modals.
+    pub fn wire_ui(
+        &mut self,
+        sink: Sink,
+        cancel: Arc<tokio::sync::Notify>,
+        stop: Arc<AtomicBool>,
+    ) {
+        self.events = Some(sink.clone());
+        self.cancel = Some(cancel);
+        self.stop = stop.clone();
+        self.gate.set_ui(sink, stop);
+    }
+
+    fn emit(&self, e: UiEvent) {
+        if let Some(tx) = &self.events {
+            let _ = tx.send(e);
         }
     }
 
@@ -183,6 +211,8 @@ impl Agent {
             }
 
             let quiet = self.quiet;
+            let ev = self.events.clone();
+            let aid = self.ident.agent_id.clone();
             let outcome = tokio::select! {
                 r = tokio::time::timeout(
                     self.limits.request_timeout,
@@ -191,12 +221,18 @@ impl Agent {
                             print!("{d}");
                             let _ = std::io::stdout().flush();
                         }
+                        if let Some(tx) = &ev {
+                            let _ = tx.send(UiEvent::Delta {
+                                agent: aid.clone(),
+                                text: d.to_string(),
+                            });
+                        }
                     }),
                 ) => match r {
                     Ok(inner) => inner,
                     Err(_) => Err(anyhow!("request deadline exceeded")),
                 },
-                _ = tokio::signal::ctrl_c() => {
+                _ = cancel_wait(self.cancel.clone()) => {
                     eprintln!("\n· interrupted");
                     self.journal.log("interrupted", json!({ "request_id": req_id, "phase": "request" }));
                     return Ok(());
@@ -214,9 +250,28 @@ impl Agent {
                             Some(error_class(&e)),
                         ),
                     );
+                    self.emit(UiEvent::Error {
+                        agent: self.ident.agent_id.clone(),
+                        msg: format!("{e:#}"),
+                    });
                     return Err(e);
                 }
             };
+
+            if let Some(u) = &outcome.usage {
+                self.emit(UiEvent::Usage {
+                    agent: self.ident.agent_id.clone(),
+                    model: outcome
+                        .returned_model
+                        .clone()
+                        .unwrap_or_else(|| self.ident.model.clone()),
+                    input: u.input_tokens,
+                    cached: u.cache_read_tokens,
+                    written: u.cache_write_tokens,
+                    output: u.output_tokens,
+                    complete: u.complete,
+                });
+            }
 
             if !outcome.content.is_empty() {
                 println!();
@@ -334,16 +389,32 @@ impl Agent {
                     )
                 } else {
                     eprintln!("» {summary}");
+                    self.emit(UiEvent::ToolStart {
+                        agent: self.ident.agent_id.clone(),
+                        name: name.to_string(),
+                        summary: summary.clone(),
+                    });
                     let args = plan.as_ref().expect("batch_ok implies parsed");
-                    match tools::execute(&self.tools, name, args, async {
-                        let _ = tokio::signal::ctrl_c().await;
-                    })
+                    match tools::execute(&self.tools, name, args, cancel_wait(self.cancel.clone()))
                     .await
                     {
                         Ok(r) => (r, true),
                         Err(e) => (format!("status: error\nerror: {e:#}"), true),
                     }
                 };
+                if executed || result.starts_with("status: denied") {
+                    self.emit(UiEvent::ToolDone {
+                        agent: self.ident.agent_id.clone(),
+                        name: name.to_string(),
+                        ms: t_tool.elapsed().as_millis(),
+                        ok: executed && !result.starts_with("status: error"),
+                        result: if result.len() > 2000 {
+                            format!("{}…", &result[..2000])
+                        } else {
+                            result.clone()
+                        },
+                    });
+                }
                 self.journal.log(
                     "tool",
                     json!({
@@ -435,6 +506,25 @@ impl Agent {
             "finish_reason": finish_reason,
             "error_class": error,
         })
+    }
+}
+
+/// Cancellation wait: Ctrl-C (real signal) OR the UI/stop notify.
+fn cancel_wait(
+    notify: Option<Arc<tokio::sync::Notify>>,
+) -> impl std::future::Future<Output = ()> {
+    async move {
+        match notify {
+            Some(n) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = n.notified() => {}
+                }
+            }
+            None => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
     }
 }
 

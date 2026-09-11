@@ -1,0 +1,399 @@
+//! `sui tui` — terminal UI over the v0.2 core.
+//!
+//! One event loop: crossterm input + core UiEvents + internal control
+//! replies, folded through App (pure state) → Effects executed here.
+//! Rendering is capped at ~30fps and only happens when state is dirty.
+
+pub mod app;
+pub mod draw;
+pub mod text;
+
+use anyhow::{Context, Result};
+use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use futures_util::StreamExt;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use std::io::{stdout, IsTerminal};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+use crate::agent::{Agent, Identity, Limits};
+use crate::config::{self, Profile};
+use crate::context;
+use crate::events::{Sink, UiEvent};
+use crate::journal::Journal;
+use crate::mission;
+use crate::permission::Gate;
+use crate::provider::{self, ModelInfo, Provider};
+use crate::tools::ToolContext;
+use app::*;
+
+/// Internal replies from async effects back into the app.
+enum Ctl {
+    Models(Result<Vec<ModelInfo>, String>),
+    ProbeDone(String, Result<provider::Probe, String>),
+    ProfileSaved(String),
+    Diff(String),
+    Status(String),
+}
+
+/// Restore the terminal no matter how we leave (drop, panic, error).
+struct Term;
+impl Drop for Term {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut s = stdout();
+        let _ = execute!(s, LeaveAlternateScreen, DisableBracketedPaste);
+    }
+}
+
+fn run_dir() -> PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let d = std::env::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(format!(".local/share/sui/runs/tui-{ts}-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+/// A long-lived solo agent: one conversation session (append-only
+/// history keeps the provider cache warm across chat turns).
+pub struct Solo {
+    tx: UnboundedSender<String>,
+    sig: String, // profile+model signature; change → respawn
+}
+impl Solo {
+    pub fn send(&self, msg: String) {
+        let _ = self.tx.send(msg);
+    }
+}
+
+pub fn spawn_solo(
+    prof: Profile,
+    workspace: PathBuf,
+    jdir: PathBuf,
+    sink: Sink,
+    cancel: Arc<tokio::sync::Notify>,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+) -> Solo {
+    let (tx, mut rx) = unbounded_channel::<String>();
+    let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
+    tokio::spawn(async move {
+        let mut agent = Agent::new(
+            Provider::new(&prof.base_url, prof.api_key.clone(), prof.model.clone(), prof.prompt_cache_key.clone()),
+            ToolContext {
+                workspace,
+                bash_timeout: Duration::from_secs(120),
+                bash_timeout_max: Duration::from_secs(600),
+            },
+            Gate::new(false), // interactive approvals in the TUI
+            match Journal::open_named(&jdir, "solo") {
+                Ok(j) => j,
+                Err(e) => {
+                    let _ = sink.send(UiEvent::RunDone {
+                        outcome: format!("journal init: {e:#}"),
+                        accepted_sha: None,
+                    });
+                    return;
+                }
+            },
+            Limits {
+                max_turns: 60,
+                context_budget: 120_000,
+                context_reserve: 8_192,
+                request_timeout: Duration::from_secs(300),
+            },
+            Identity {
+                session_id: format!("tui-{}", std::process::id()),
+                agent_id: "solo".into(),
+                role: "worker".into(),
+                base_url: prof.base_url.clone(),
+                model: prof.model.clone(),
+                cache_key_fingerprint: prof
+                    .prompt_cache_key
+                    .as_ref()
+                    .map(|k| context::sha256_hex(k.as_bytes())),
+            },
+        );
+        agent.set_quiet(true);
+        agent.wire_ui(sink.clone(), cancel, flag);
+        while let Some(msg) = rx.recv().await {
+            let r = agent.run_turn(&msg).await;
+            match r {
+                Ok(()) => {
+                    let _ = sink.send(UiEvent::RunDone { outcome: "done".into(), accepted_sha: None });
+                }
+                Err(e) => {
+                    let _ = sink.send(UiEvent::Error { agent: "solo".into(), msg: format!("{e:#}") });
+                    let _ = sink.send(UiEvent::RunDone { outcome: format!("error: {e:#}"), accepted_sha: None });
+                }
+            }
+        }
+    });
+    Solo { tx, sig }
+}
+
+pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
+    let (base_url, key, model) = app.resolve(name)?;
+    Some(Profile {
+        name: name.into(),
+        base_url,
+        model,
+        api_key: key,
+        prompt_cache_key: None,
+        pricing: None,
+    })
+}
+
+pub async fn run() -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("sui tui needs a terminal");
+    }
+    let workspace = config::load_ui()
+        .workspace
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    // terminal init + panic-safe restore
+    enable_raw_mode().context("raw mode")?;
+    let mut out = stdout();
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste).context("alt screen")?;
+    let _guard = Term;
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |i| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableBracketedPaste);
+        default_hook(i);
+    }));
+
+    let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
+    let mut app = App::new(workspace.clone());
+    let jdir = run_dir();
+
+    let (ev_tx, mut ev_rx) = unbounded_channel::<UiEvent>();
+    let (ctl_tx, mut ctl_rx) = unbounded_channel::<Ctl>();
+    let mut keys = EventStream::new();
+    let mut solo: Option<Solo> = None;
+    let mut dirty = true;
+    let mut last_draw = Instant::now() - Duration::from_millis(100);
+    let mut quit = false;
+
+    while !quit {
+        // draw at most ~30fps, only when dirty
+        if dirty && last_draw.elapsed() >= Duration::from_millis(33) {
+            term.draw(|f| draw::draw(f, &app))?;
+            last_draw = Instant::now();
+            dirty = false;
+        }
+        tokio::select! {
+            biased;
+            ev = keys.next() => {
+                if let Some(Ok(Event::Key(k))) = ev {
+                    if k.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    // raw mode: Ctrl+C arrives as a key event
+                    if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && matches!(k.code, crossterm::event::KeyCode::Char('c'))
+                    {
+                        if app.running { app.stop(); } else { quit = true; }
+                        dirty = true;
+                        continue;
+                    }
+                    app.key(k);
+                    dirty = true;
+                } else if let Some(Ok(Event::Paste(s))) = ev {
+                    app.paste(&s);
+                    dirty = true;
+                } else if let Some(Ok(Event::Resize(..))) = ev {
+                    dirty = true;
+                }
+            }
+            ev = ev_rx.recv() => {
+                if let Some(e) = ev {
+                    app.apply_event(e);
+                    dirty = true;
+                }
+            }
+            c = ctl_rx.recv() => {
+                if let Some(c) = c {
+                    match c {
+                        Ctl::Models(r) => match r {
+                            Ok(ms) => app.models_loaded(ms, None),
+                            Err(e) => app.models_loaded(vec![], Some(e)),
+                        },
+                        Ctl::ProbeDone(n, r) => app.probe_done(&n, r),
+                        Ctl::ProfileSaved(n) => {
+                            app.profiles = config::profiles(None).unwrap_or_default();
+                            app.status = format!("saved profile {n}");
+                        }
+                        Ctl::Diff(s) => app.diff_text = s,
+                        Ctl::Status(s) => app.status = s,
+                    }
+                    dirty = true;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // heartbeat: keep elapsed/running displays fresh
+                if app.running { dirty = true; }
+            }
+        }
+
+        // lazy diff load when the Changes tab becomes visible
+        if app.tab == Tab::Changes && app.diff_stale {
+            app.diff_stale = false;
+            let ws = workspace.clone();
+            let tx = ctl_tx.clone();
+            tokio::spawn(async move {
+                let out = tokio::process::Command::new("git")
+                    .arg("-C").arg(&ws)
+                    .args(["status", "--porcelain"])
+                    .output().await;
+                let diff = tokio::process::Command::new("git")
+                    .arg("-C").arg(&ws)
+                    .args(["diff", "--stat", "HEAD"])
+                    .output().await;
+                let mut s = String::new();
+                if let Ok(o) = out { s.push_str(&String::from_utf8_lossy(&o.stdout)); }
+                if let Ok(o) = diff { s.push_str(&String::from_utf8_lossy(&o.stdout)); }
+                let _ = tx.send(Ctl::Diff(s));
+            });
+        }
+
+        // execute queued effects
+        for e in std::mem::take(&mut app.effects) {
+            match e {
+                Effect::Quit => quit = true,
+                Effect::Stop => {} // notify+flag already fired in app.stop()
+                Effect::SendTask { task, mode } => match mode {
+                    Mode::Solo => {
+                        let pname = app.role_profile(Role::Solo);
+                        let prof = pname.as_deref().and_then(|n| resolve_to_profile(&app, n));
+                        match prof {
+                            Some(p) => {
+                                let sig = format!("{}:{}:{}", p.name, p.base_url, p.model);
+                                if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
+                                    solo = Some(spawn_solo(
+                                        p,
+                                        workspace.clone(),
+                                        jdir.clone(),
+                                        ev_tx.clone(),
+                                        app.cancel.clone(),
+                                        app.stop_flag.clone(),
+                                    ));
+                                }
+                                let _ = solo.as_ref().unwrap().tx.send(task);
+                            }
+                            None => {
+                                app.apply_event(UiEvent::Error {
+                                    agent: "ui".into(),
+                                    msg: "no solo profile configured — Settings → roles".into(),
+                                });
+                                app.running = false;
+                            }
+                        }
+                    }
+                    Mode::Mission => {
+                        let control = app
+                            .role_profile(Role::Orchestrator)
+                            .and_then(|n| resolve_to_profile(&app, &n));
+                        let worker = app
+                            .role_profile(Role::Worker)
+                            .and_then(|n| resolve_to_profile(&app, &n));
+                        match (control, worker) {
+                            (Some(control), Some(worker)) => {
+                                let cfg = mission::MissionCfg {
+                                    repo: workspace.clone(),
+                                    run_dir: jdir.clone(),
+                                    control,
+                                    worker,
+                                    objective: task,
+                                    max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
+                                    session: format!("tui-{}", std::process::id()),
+                                    keep_worktrees: false, // accepted branch survives cleanup
+                                    request_timeout: Duration::from_secs(300),
+                                    task_timeout: Duration::from_secs(900),
+                                    context_budget: 120_000,
+                                    context_reserve: 8_192,
+                                    control_max_turns: 40,
+                                    worker_max_turns: 50,
+                                    events: Some(ev_tx.clone()),
+                                    cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
+                                };
+                                tokio::spawn(async move {
+                                    let _ = mission::run(cfg).await;
+                                });
+                            }
+                            _ => {
+                                app.apply_event(UiEvent::Error {
+                                    agent: "ui".into(),
+                                    msg: "mission needs orchestrator + worker profiles — Settings".into(),
+                                });
+                                app.running = false;
+                            }
+                        }
+                    }
+                },
+                Effect::SaveProfile { name, base_url, model, key_env, key, remember } => {
+                    match config::save_profile(&name, &base_url, &model, key_env.as_deref()) {
+                        Ok(()) => {
+                            if let Some(k) = key {
+                                if remember && app.keyring_ok {
+                                    let n = name.clone();
+                                    let tx = ctl_tx.clone();
+                                    let _ = keyring::Entry::new("sui", &n).and_then(|e| e.set_password(&k));
+                                    let _ = tx.send(Ctl::Status(format!("{n}: key stored in OS keyring")));
+                                    app.session_keys.insert(name.clone(), k);
+                                } else {
+                                    app.session_keys.insert(name.clone(), k);
+                                    let _ = ctl_tx.send(Ctl::Status(format!("{name}: session-only key")));
+                                }
+                            }
+                            let _ = ctl_tx.send(Ctl::ProfileSaved(name));
+                        }
+                        Err(e) => app.status = format!("save failed: {e:#}"),
+                    }
+                }
+                Effect::SaveUi => {
+                    if let Err(e) = config::save_ui(&app.ui) {
+                        app.status = format!("save ui: {e:#}");
+                    }
+                }
+                Effect::FetchModels { base_url, key, .. } => {
+                    let tx = ctl_tx.clone();
+                    tokio::spawn(async move {
+                        let r = provider::list_models(&base_url, key.as_deref())
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(Ctl::Models(r));
+                    });
+                }
+                Effect::Probe { name, base_url, model, key } => {
+                    let tx = ctl_tx.clone();
+                    tokio::spawn(async move {
+                        let r = provider::probe(&base_url, key.as_deref(), &model)
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(Ctl::ProbeDone(name, r));
+                    });
+                }
+                Effect::KeyringStore { profile, key } => {
+                    let _ = keyring::Entry::new("sui", &profile).and_then(|e| e.set_password(&key));
+                }
+            }
+        }
+    }
+    Ok(())
+}
