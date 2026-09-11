@@ -1,0 +1,61 @@
+# sui configuration — copy to sui.toml in your project dir,
+# or ~/.config/sui/config.toml for global defaults.
+# Precedence: CLI flags > env vars > project sui.toml > global config > defaults.
+
+[provider]
+# Any OpenAI-compatible endpoint:
+#   OpenAI      https://api.openai.com/v1
+#   DeepSeek    https://api.deepseek.com/v1
+#   OpenRouter  https://openrouter.ai/api/v1
+#   vLLM/SGLang http://localhost:8000/v1
+#   Ollama      http://localhost:11434/v1
+base_url = "https://api.openai.com/v1"
+
+# API key. Prefer env var SUI_API_KEY or OPENAI_API_KEY over committing this.
+# api_key = "sk-..."
+
+# Model name passed verbatim to the endpoint.
+model = "gpt-5"
+
+# Requested in the request body for providers that support cache accounting
+# (OpenAI prompt_cache_key). Harmless on providers that ignore it.
+# prompt_cache_key = "sui"
+
+[agent]
+# Hard cap on tool-call iterations per user turn. Don't let the loop spiral.
+max_turns = 60
+
+# Per-request deadline for the provider call.
+request_timeout_ms = 300000
+
+# Conservative context guard (estimated tokens, chars/4). Above this the
+# turn stops cleanly instead of growing until the provider rejects it.
+context_token_budget = 120000
+
+# Default bash timeout; the model may request less, never more than bash_timeout_max.
+bash_timeout_ms = 120000
+bash_timeout_max_ms = 600000
+
+# Auto-approve all tool calls (same as -y flag). Default false = y/n/a prompt.
+# NEVER bypasses the endpoint trust gate.
+# auto_approve = false
+
+# Reserved completion capacity counted against the context budget.
+# context_reserve_tokens = 8192
+
+# ── Named provider profiles (GLOBAL config only — ~/.config/sui/config.toml) ──
+# Profiles are ignored if defined in a project sui.toml.
+# Credentials bind to the profile's endpoint; key comes from key_env.
+#
+# [profiles.cheap]
+# base_url = "https://api.deepseek.com/v1"
+# model = "deepseek-chat"
+# key_env = "DEEPSEEK_API_KEY"
+# pricing = { input = 0.28, cached = 0.028, output = 0.42 }   # $/MTok
+#
+# [profiles.strong]
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-5"
+# key_env = "OPENAI_API_KEY"
+#
+# Certify with: sui-certify --profile cheap --profile strong

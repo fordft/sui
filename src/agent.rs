@@ -1,0 +1,473 @@
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
+use std::io::Write;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::context::{self, LayerHashes};
+use crate::journal::Journal;
+use crate::permission::Gate;
+use crate::provider::Provider;
+use crate::tools::{self, ToolContext};
+use crate::types::Message;
+
+/// Hard limits for a single agent trajectory.
+pub struct Limits {
+    pub max_turns: usize,
+    /// Estimated input tokens + reserve above this stops the turn.
+    pub context_budget: usize,
+    /// Reserved completion capacity counted against the budget.
+    pub context_reserve: usize,
+    pub request_timeout: Duration,
+}
+
+/// Identity fields stamped on every trace record.
+pub struct Identity {
+    pub session_id: String,
+    /// Scenario/agent label, e.g. "fast-path" or a certification scenario.
+    pub agent_id: String,
+    pub role: String,
+    pub base_url: String,
+    pub model: String,
+    pub cache_key_fingerprint: Option<String>,
+}
+
+const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "edit_file", "bash"];
+
+/// Result of an intercepted tool call (e.g. orchestrator plan submission).
+/// Intercepted calls never touch the filesystem.
+pub enum Intercept {
+    /// Emitted as the tool result; the loop continues.
+    Result(String),
+    /// Emitted as the tool result, then the turn ends (remaining calls in
+    /// the batch get "skipped" envelopes so every call has a response).
+    Finish(String),
+}
+
+type Interceptor = Arc<dyn Fn(&crate::types::ToolCall) -> Option<Intercept> + Send + Sync>;
+
+/// One deterministic worker trajectory: append-only history, serialized
+/// tool execution, no planner. This same loop is the fast path and the
+/// mission-mode worker.
+pub struct Agent {
+    provider: Provider,
+    tools: ToolContext,
+    gate: Gate,
+    journal: Journal,
+    history: Vec<Message>,
+    system: String,
+    limits: Limits,
+    ident: Identity,
+    tool_schemas: Vec<Value>,
+    hashes: LayerHashes,
+    request_seq: u64,
+    known: Vec<String>,
+    interceptor: Option<Interceptor>,
+    quiet: bool,
+}
+
+impl Agent {
+    pub fn new(
+        provider: Provider,
+        tools: ToolContext,
+        gate: Gate,
+        journal: Journal,
+        limits: Limits,
+        ident: Identity,
+    ) -> Self {
+        let tool_schemas = tools::schemas();
+        let hashes = context::layer_hashes(&tool_schemas, context::SYSTEM);
+        let known = KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
+        Self {
+            provider,
+            tools,
+            gate,
+            journal,
+            history: Vec::new(),
+            system: context::SYSTEM.to_string(),
+            limits,
+            ident,
+            tool_schemas,
+            hashes,
+            request_seq: 0,
+            known,
+            interceptor: None,
+            quiet: false,
+        }
+    }
+
+    /// Register an extra (intercepted-only) tool schema — e.g. submit_result.
+    /// Changes the tool layer fingerprint; call before driving.
+    pub fn add_tool_schema(&mut self, schema: Value) {
+        if let Some(n) = schema["function"]["name"].as_str() {
+            self.known.push(n.to_string());
+        }
+        self.tool_schemas.push(schema);
+        self.hashes = context::layer_hashes(&self.tool_schemas, &self.system);
+    }
+
+    /// Intercept matching tool calls before execution.
+    /// Return None → normal tool execution; Some(Result) → envelope, loop
+    /// continues; Some(Finish) → envelope, turn ends.
+    pub fn set_interceptor(&mut self, f: Interceptor) {
+        self.interceptor = Some(f);
+    }
+
+    /// Suppress streamed-token printing (mission workers don't spam stdout).
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    /// Override the static contract — used by certification to force a
+    /// deliberate prefix invalidation.
+    pub fn set_system(&mut self, system: String) {
+        self.hashes = context::layer_hashes(&self.tool_schemas, &system);
+        self.system = system;
+    }
+
+    /// Rehydrate history (e.g. rebuilt from a journal for restart/replay).
+    pub fn restore_history(&mut self, msgs: Vec<Message>) {
+        self.history = msgs;
+    }
+
+    pub fn history(&self) -> &[Message] {
+        &self.history
+    }
+
+    pub fn requests_made(&self) -> u64 {
+        self.request_seq
+    }
+
+    /// Queue a user message, then drive until completion.
+    pub async fn run_turn(&mut self, user_input: &str) -> Result<()> {
+        self.push_user(user_input);
+        self.drive().await
+    }
+
+    pub fn push_user(&mut self, user_input: &str) {
+        self.history.push(Message::User {
+            content: user_input.to_string(),
+        });
+        self.journal.log("user", json!({ "content": user_input }));
+    }
+
+    /// The agent loop without pushing a new user message — safe to call
+    /// again after a failed request (no duplicate user turn).
+    pub async fn drive(&mut self) -> Result<()> {
+        for _ in 0..self.limits.max_turns {
+            let t_asm = Instant::now();
+            let req = context::compile(&self.history, &self.system);
+            let assembly_ms = t_asm.elapsed().as_millis();
+            let est_tokens = context::estimate_tokens(&req);
+            let request_fp = context::request_fingerprint(&req);
+            let req_id = self.request_seq;
+            self.request_seq += 1;
+            if std::env::var_os("SUI_DEBUG_REQ").is_some() {
+                let _ = std::fs::write(
+                    format!("/tmp/sui-req-{}-{}.json", self.ident.agent_id, req_id),
+                    serde_json::to_string_pretty(&req).unwrap_or_default(),
+                );
+            }
+
+            if est_tokens + self.limits.context_reserve > self.limits.context_budget {
+                eprintln!(
+                    "· context budget exceeded (~{} est + {} reserve > {}); start a new session",
+                    est_tokens, self.limits.context_reserve, self.limits.context_budget
+                );
+                self.journal.log(
+                    "budget_exceeded",
+                    json!({ "est_tokens": est_tokens, "reserve": self.limits.context_reserve,
+                            "budget": self.limits.context_budget }),
+                );
+                return Ok(());
+            }
+
+            let quiet = self.quiet;
+            let outcome = tokio::select! {
+                r = tokio::time::timeout(
+                    self.limits.request_timeout,
+                    self.provider.stream_chat(&req, &self.tool_schemas, |d| {
+                        if !quiet {
+                            print!("{d}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }),
+                ) => match r {
+                    Ok(inner) => inner,
+                    Err(_) => Err(anyhow!("request deadline exceeded")),
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\n· interrupted");
+                    self.journal.log("interrupted", json!({ "request_id": req_id, "phase": "request" }));
+                    return Ok(());
+                }
+            };
+
+            let outcome = match outcome {
+                Ok(o) => o,
+                Err(e) => {
+                    self.journal.log(
+                        "request",
+                        self.trace(
+                            req_id, assembly_ms, est_tokens, &request_fp, None, None, None,
+                            0, 0,
+                            Some(error_class(&e)),
+                        ),
+                    );
+                    return Err(e);
+                }
+            };
+
+            if !outcome.content.is_empty() {
+                println!();
+            }
+            match &outcome.usage {
+                Some(u) => eprintln!(
+                    "· {} in / {} cached / {} out",
+                    opt(u.input_tokens),
+                    opt(u.cache_read_tokens),
+                    opt(u.output_tokens)
+                ),
+                None => eprintln!("· usage: not reported"),
+            }
+            self.journal.log(
+                "request",
+                self.trace(
+                    req_id,
+                    assembly_ms,
+                    est_tokens,
+                    &request_fp,
+                    outcome.usage.as_ref(),
+                    outcome.returned_model.as_deref(),
+                    outcome.finish_reason.as_deref(),
+                    outcome.first_delta_ms,
+                    outcome.total_ms,
+                    None,
+                ),
+            );
+            self.journal.log(
+                "assistant",
+                json!({
+                    "content": outcome.content,
+                    "tool_calls": outcome.tool_calls,
+                    "reasoning_content": outcome.reasoning_content,
+                }),
+            );
+            self.history.push(Message::Assistant {
+                content: if outcome.content.is_empty() {
+                    None
+                } else {
+                    Some(outcome.content.clone())
+                },
+                tool_calls: if outcome.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(outcome.tool_calls.clone())
+                },
+                reasoning_content: outcome.reasoning_content.clone(),
+            });
+
+            if outcome.tool_calls.is_empty() {
+                return Ok(());
+            }
+
+            // ── Batch validation before ANY side effect ───────────────
+            // A batch executes only when the completion is a valid
+            // tool-call finish AND every call is a known tool with valid
+            // JSON arguments. Any failure rejects the whole batch.
+            let valid_completion = outcome.finish_reason.as_deref() == Some("tool_calls");
+            if !valid_completion {
+                self.journal.log(
+                    "warn",
+                    json!({ "request_id": req_id,
+                            "msg": "tool calls present but finish_reason is not 'tool_calls'",
+                            "finish_reason": outcome.finish_reason }),
+                );
+            }
+            let plans: Vec<Result<Value, String>> = outcome
+                .tool_calls
+                .iter()
+                .map(|c| {
+                    if !self.known.iter().any(|k| k == &c.function.name) {
+                        return Err(format!("unknown tool '{}'", c.function.name));
+                    }
+                    serde_json::from_str::<Value>(&c.function.arguments)
+                        .map_err(|e| format!("malformed arguments: {e}"))
+                })
+                .collect();
+            let batch_ok = valid_completion && plans.iter().all(|p| p.is_ok());
+
+            for (i, (call, plan)) in outcome.tool_calls.iter().zip(plans.iter()).enumerate() {
+                let name = call.function.name.as_str();
+                let summary = summarize(name, &call.function.arguments);
+                let t_tool = Instant::now();
+                let mut finish_after = false;
+                let (result, executed) = if !batch_ok {
+                    let why = match (valid_completion, plan) {
+                        (false, _) => {
+                            "batch rejected: finish_reason was not 'tool_calls'".to_string()
+                        }
+                        (true, Err(e)) => format!("batch rejected: {e}"),
+                        (true, Ok(_)) => {
+                            "batch rejected: sibling call invalid".to_string()
+                        }
+                    };
+                    (
+                        format!("status: error\nerror: {why} — call not executed"),
+                        false,
+                    )
+                } else if let Some(hit) = self
+                    .interceptor
+                    .as_ref()
+                    .and_then(|f| f(call))
+                {
+                    let (r, fin) = match hit {
+                        Intercept::Result(r) => (r, false),
+                        Intercept::Finish(r) => (r, true),
+                    };
+                    finish_after = fin;
+                    (r, false)
+                } else if needs_approval(name) && !self.gate.check(&summary) {
+                    (
+                        "status: denied\nerror: user rejected the action".to_string(),
+                        false,
+                    )
+                } else {
+                    eprintln!("» {summary}");
+                    let args = plan.as_ref().expect("batch_ok implies parsed");
+                    match tools::execute(&self.tools, name, args, async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    })
+                    .await
+                    {
+                        Ok(r) => (r, true),
+                        Err(e) => (format!("status: error\nerror: {e:#}"), true),
+                    }
+                };
+                self.journal.log(
+                    "tool",
+                    json!({
+                        "tool_call_id": call.id,
+                        "name": name,
+                        "args": call.function.arguments,
+                        "executed": executed,
+                        "execution_ms": t_tool.elapsed().as_millis(),
+                        "result": result,
+                    }),
+                );
+                let cancelled = result.starts_with("status: cancelled");
+                self.history.push(Message::Tool {
+                    tool_call_id: call.id.clone(),
+                    content: result,
+                });
+                if cancelled {
+                    eprintln!("\n· interrupted during tool execution");
+                    self.journal.log(
+                        "interrupted",
+                        json!({ "request_id": req_id, "phase": "tool" }),
+                    );
+                    return Ok(());
+                }
+                if finish_after {
+                    // every remaining call still needs a paired tool response
+                    for rest in &outcome.tool_calls[i + 1..] {
+                        self.history.push(Message::Tool {
+                            tool_call_id: rest.id.clone(),
+                            content: "status: skipped\nerror: turn ended by submission".into(),
+                        });
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        eprintln!("· max_turns reached; stopping");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace(
+        &self,
+        request_id: u64,
+        assembly_ms: u128,
+        est_tokens: usize,
+        request_fp: &str,
+        usage: Option<&crate::types::Usage>,
+        returned_model: Option<&str>,
+        finish_reason: Option<&str>,
+        first_delta_ms: u128,
+        total_ms: u128,
+        error: Option<&str>,
+    ) -> Value {
+        json!({
+            "request_id": request_id,
+            "session_id": self.ident.session_id,
+            "agent_id": self.ident.agent_id,
+            "role": self.ident.role,
+            "provider_profile": self.ident.base_url,
+            "requested_model": self.ident.model,
+            "returned_model": returned_model,
+            "epoch_id": "E0",
+            "static_prefix_hash": self.hashes.static_prefix,
+            "tool_schema_hash": self.hashes.tool_schema,
+            "epoch_prefix_hash": self.hashes.epoch_prefix,
+            "request_fingerprint": request_fp,
+            "cache_policy": "implicit",
+            "cache_controls_sent": if self.ident.cache_key_fingerprint.is_some() {
+                json!(["prompt_cache_key"])
+            } else {
+                json!([])
+            },
+            "cache_key_fingerprint": self.ident.cache_key_fingerprint,
+            "input_size_estimate": est_tokens,
+            "estimate_method": "chars/4",
+            "usage": usage.map(|u| json!({
+                "input_tokens": u.input_tokens,
+                "cache_read_tokens": u.cache_read_tokens,
+                "cache_write_tokens": u.cache_write_tokens,
+                "output_tokens": u.output_tokens,
+                "complete": u.complete,
+            })),
+            "timing": {
+                "context_assembly_ms": assembly_ms,
+                "first_delta_ms": first_delta_ms,
+                "request_total_ms": total_ms,
+            },
+            "finish_reason": finish_reason,
+            "error_class": error,
+        })
+    }
+}
+
+fn needs_approval(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file" | "bash")
+}
+
+fn summarize(name: &str, args: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+    match name {
+        "bash" => format!("bash: {}", v["command"].as_str().unwrap_or("")),
+        "read_file" => format!("read {}", v["path"].as_str().unwrap_or("")),
+        "write_file" => format!("write {}", v["path"].as_str().unwrap_or("")),
+        "edit_file" => format!("edit {}", v["path"].as_str().unwrap_or("")),
+        _ => format!("{name} {args}"),
+    }
+}
+
+fn opt(v: Option<u64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+}
+
+fn error_class(e: &anyhow::Error) -> &'static str {
+    let m = format!("{e:#}");
+    if m.contains("deadline") {
+        "deadline_exceeded"
+    } else if m.contains("provider http") {
+        "http_error"
+    } else if m.contains("stream error") {
+        "stream_error"
+    } else if m.contains("interrupted") {
+        "stream_interrupted"
+    } else {
+        "transport_error"
+    }
+}

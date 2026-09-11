@@ -1,0 +1,6 @@
+/target
+# local configs may hold machine-specific profiles or key_env names
+sui.toml
+*.local.toml
+.env
+.env.*
