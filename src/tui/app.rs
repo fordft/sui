@@ -449,6 +449,11 @@ impl App {
     // ── input handling → effects ────────────────────────────────────
     pub fn key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // global quit preempts modal input — Ctrl+Q always works
+        if ctrl && k.code == KeyCode::Char('q') {
+            self.effects.push(Effect::Quit);
+            return;
+        }
         if let Some(m) = self.modal.take() {
             // handlers consume the modal and return the next state —
             // Some(m) stays open, a different Some replaces, None closes
@@ -456,7 +461,6 @@ impl App {
             return;
         }
         match (ctrl, k.code) {
-            (true, KeyCode::Char('q')) => self.effects.push(Effect::Quit),
             (true, KeyCode::Char('s')) => self.stop(),
             (true, KeyCode::Char('t')) => {
                 self.tab = Tab::ALL[((self.tab as usize) + 1) % 5]

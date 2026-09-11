@@ -34,6 +34,10 @@ path = "src/bin/mission.rs"
 lto = true
 codegen-units = 1
 
+# cargo-dist builds use this profile (inherits release)
+[profile.dist]
+inherits = "release"
+
 # cargo-dist release pipeline: tag v* → CI build → GitHub Release assets
 # (archives + checksums + sui-installer.sh). Private install dir keeps us
 # off other `sui` binaries (e.g. the Mysten toolchain).
@@ -50,4 +54,9 @@ targets = [
 install-path = "$HOME/.sui/bin"
 github-attestations = true
 pr-run-mode = "plan"
-allow-dirty = ["ci"]
+
+# Thin guarded wrapper: collision check vs other `sui` commands, then
+# delegates to the generated sui-installer.sh. Published as install.sh.
+[[workspace.metadata.dist.extra-artifacts]]
+artifacts = ["install.sh"]
+build = ["true"]
