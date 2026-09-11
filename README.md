@@ -100,6 +100,11 @@ GNU builds link against **glibc 2.35** (Ubuntu 22.04 baseline); older distros
 and Alpine/musl are not covered. Native Windows is not packaged yet (WSL2
 works).
 
+Tested end-to-end (v0.3.0): `install.sh` and `brew install` on Linux x86-64
+(brew 6.0.19) — install, `--version`, `sui tui` first-run, uninstall. macOS
+archives are CI-built and attested but not runtime-tested on hardware yet;
+Apple Silicon is the expected-path build, Intel Macs are best-effort.
+
 Runtime: **git** and **bash** for workspace/mission operations; the target
 project's own toolchain for its builds/tests. Headless Linux is supported —
 without a desktop credential service, keys fall back to session/env storage.
