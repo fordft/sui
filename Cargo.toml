@@ -1,8 +1,9 @@
 [package]
 name = "sui"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "cache-first multi-agent coding harness"
+repository = "https://github.com/fordft/sui"
 
 [dependencies]
 anyhow = "1"
@@ -27,6 +28,26 @@ path = "src/bin/certify.rs"
 name = "sui-mission"
 path = "src/bin/mission.rs"
 
+[workspace]
+
 [profile.release]
 lto = true
 codegen-units = 1
+
+# cargo-dist release pipeline: tag v* → CI build → GitHub Release assets
+# (archives + checksums + sui-installer.sh). Private install dir keeps us
+# off other `sui` binaries (e.g. the Mysten toolchain).
+[workspace.metadata.dist]
+cargo-dist-version = "0.33.0"
+ci = ["github"]
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+install-path = "$HOME/.sui/bin"
+github-attestations = true
+pr-run-mode = "plan"
+allow-dirty = ["ci"]

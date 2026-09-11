@@ -12,7 +12,7 @@ enum Sub {
 }
 
 #[derive(Parser)]
-#[command(name = "sui", about = "cache-first multi-agent coding harness (v0: fast path)")]
+#[command(name = "sui", version, about = "cache-first multi-agent coding harness (v0: fast path)")]
 struct Cli {
     #[command(subcommand)]
     sub: Option<Sub>,

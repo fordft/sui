@@ -27,7 +27,7 @@ use sui::tools::bash::spawn_bounded;
 use sui::tools::ToolContext;
 
 #[derive(Parser)]
-#[command(name = "sui-mission", about = "bounded multi-agent mission execution")]
+#[command(name = "sui-mission", version, about = "bounded multi-agent mission execution")]
 struct Cli {
     /// Strong model profile (orchestrator + auditor + escalation)
     #[arg(long)]

@@ -24,7 +24,7 @@ use sui::tools::ToolContext;
 use sui::types::Message;
 
 #[derive(Parser)]
-#[command(name = "sui-certify", about = "bounded live-provider certification")]
+#[command(name = "sui-certify", version, about = "bounded live-provider certification")]
 struct Cli {
     /// Profiles to certify, in order (cheap worker first, then strong).
     #[arg(long, required = true)]
