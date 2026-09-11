@@ -489,7 +489,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 )));
             }
             lines.push(Line::from(Span::styled(
-                "test sends one small live request — keys never written to config",
+                "test sends one small live request — Store chooses where the key lives",
                 dim(),
             )));
             f.render_widget(

@@ -811,3 +811,78 @@ fn workspace_change_resets_auto() {
     assert!(!app.auto.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(app.ui.workspace.as_deref(), Some("/tmp/other"));
 }
+
+/// Regression: saving a provider form must persist the key to
+/// session_keys so the settings row stops showing MISSING.
+#[test]
+fn provider_form_save_keeps_key() {
+    use sui::tui::app::ProvType;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.modal = Some(Modal::Provider(ProvForm::new(ProvType::Custom)));
+    // fields: Name, BaseUrl, Model, Auth, Test, Save, Cancel
+    // move focus to Auth (3) and switch to ApiKey
+    for _ in 0..3 {
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    if let Some(Modal::Provider(f)) = &app.modal {
+        assert_eq!(f.auth, sui::tui::app::AuthMode::ApiKey);
+    } else {
+        panic!();
+    }
+    // ApiKey mode adds ApiKey + Store rows: focus 4 = key field
+    app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.paste("sk-test-123");
+    // tab past Store+Test to Save (7)
+    for _ in 0..3 {
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Some(Effect::SaveProfile { key, key_env, store, .. }) = app.effects.pop() else {
+        panic!("no SaveProfile effect");
+    };
+    assert_eq!(key.as_deref(), Some("sk-test-123"), "pasted key must reach the save effect");
+    assert!(key_env.is_none(), "ApiKey mode must not persist an env name");
+    assert_eq!(store, sui::tui::app::Store::Keychain);
+}
+
+/// Config-file store writes api_key into the profile so it survives
+/// restart — the only durable path on headless boxes with no keyring.
+#[test]
+fn provider_save_config_file_persists() {
+    use sui::tui::app::{ProvType, Store};
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let mut f = ProvForm::new(ProvType::Custom);
+    f.name.set("mine");
+    f.base_url.set("http://127.0.0.1:9");
+    f.store = Store::ConfigFile;
+    // fields for Custom+ApiKey — set auth + key directly
+    f.auth = sui::tui::app::AuthMode::ApiKey;
+    f.key.set("sk-persist");
+    app.modal = Some(Modal::Provider(f));
+    // navigate straight to Save: fields are Name,BaseUrl,Model,Auth,ApiKey,Store,Test,Save,Cancel
+    for _ in 0..7 {
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Some(Effect::SaveProfile { name, base_url, model, key_env, key, store }) =
+        app.effects.pop()
+    else {
+        panic!("no SaveProfile effect");
+    };
+    assert_eq!(store, Store::ConfigFile);
+    assert_eq!(key.as_deref(), Some("sk-persist"));
+    // run the same persistence path the event loop runs, against a fixture file
+    let cfg = repo.join("saved-config.toml");
+    let inline = if store == Store::ConfigFile { key.clone() } else { None };
+    sui::config::save_profile_at(&cfg, &name, &base_url, &model, key_env.as_deref(), inline.as_deref())
+        .unwrap();
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("api_key = \"sk-persist\""), "config must carry the key: {text}");
+    // and a reload sees it (what the restarted TUI sees)
+    let doc: toml::Value = text.parse().unwrap();
+    let p = &doc["profiles"]["mine"];
+    assert_eq!(p["api_key"].as_str(), Some("sk-persist"));
+}

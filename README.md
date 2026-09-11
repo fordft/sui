@@ -76,8 +76,10 @@ sui tui
 First run opens the setup screen. Add a provider — **DeepSeek**,
 **OpenRouter**, or a **custom OpenAI-compatible** endpoint — pick models per
 role (orchestrator / workers / auditor), then type a task. Credentials are
-entered in-app (masked), stored per your choice: environment variable, session
-only, or OS keyring where available. No API key is needed to install.
+entered in-app (masked), stored per your choice: OS keyring, plaintext in the
+config file, session only, or an environment variable. On headless machines
+with no keyring the form defaults to the config-file store so keys survive
+restarts. No API key is needed to install.
 
 Mutating tool calls ask first: `y`/`Y` approves once, `a`/`A` approves for the
 session (an `AUTO` badge shows in the header), `n`/`N`/`Esc` denies — each on

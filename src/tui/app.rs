@@ -91,12 +91,15 @@ impl AuthMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Store {
     Keychain,
+    /// Plaintext api_key in ~/.config/sui/config.toml — the only durable
+    /// choice on headless boxes where no OS keyring exists.
+    ConfigFile,
     Session,
 }
 impl Store {
-    pub const ALL: [Store; 2] = [Store::Keychain, Store::Session];
+    pub const ALL: [Store; 3] = [Store::Keychain, Store::ConfigFile, Store::Session];
     pub fn name(self) -> &'static str {
-        ["OS Keychain", "Session only"][self as usize]
+        ["OS Keychain", "Config file (plaintext)", "Session only"][self as usize]
     }
 }
 
@@ -266,25 +269,25 @@ impl ProvForm {
             _ => std::env::var(self.ptype.default_env()).ok(),
         }
     }
-    /// Map the form onto SaveProfile inputs. Known providers persist their
-    /// conventional env-var name so headless/CLI env auth keeps working even
-    /// though the form never shows it.
-    fn save_inputs(&self) -> (Option<String>, Option<String>, bool) {
+    /// Map the form onto SaveProfile inputs: (key_env to persist, typed
+    /// key, chosen store). Known providers persist their conventional
+    /// env-var name so headless/CLI env auth keeps working even though the
+    /// form never shows it.
+    fn save_inputs(&self) -> (Option<String>, Option<String>, Store) {
         let key = self.key.text();
         let key = if key.is_empty() { None } else { Some(key) };
-        let remember = self.store == Store::Keychain;
         match self.ptype {
             ProvType::DeepSeek | ProvType::OpenRouter => (
                 Some(self.ptype.default_env().to_string()),
                 key,
-                remember,
+                self.store,
             ),
             ProvType::Custom => match self.auth {
-                AuthMode::None => (None, None, false),
-                AuthMode::ApiKey => (None, key, remember),
+                AuthMode::None => (None, None, self.store),
+                AuthMode::ApiKey => (None, key, self.store),
                 AuthMode::Advanced => {
                     let env = self.key_env.text();
-                    (if env.is_empty() { None } else { Some(env) }, None, false)
+                    (if env.is_empty() { None } else { Some(env) }, None, self.store)
                 }
             },
         }
@@ -358,7 +361,7 @@ pub enum Effect {
     SendTask { task: String, mode: Mode },
     Stop,
     Quit,
-    SaveProfile { name: String, base_url: String, model: String, key_env: Option<String>, key: Option<String>, remember: bool },
+    SaveProfile { name: String, base_url: String, model: String, key_env: Option<String>, key: Option<String>, store: Store },
     SaveUi,
     FetchModels { base_url: String, key: Option<String>, target: PickTarget },
     Probe { name: String, base_url: String, model: String, key: Option<String> },
@@ -428,16 +431,24 @@ impl App {
     ) -> Self {
         let no_profiles = profiles.is_empty();
         let mut session_keys = BTreeMap::new();
-        let mut keyring_ok = true;
         for name in profiles.keys() {
             match keyring::Entry::new("sui", name).and_then(|e| e.get_password()) {
                 Ok(k) => {
                     session_keys.insert(name.clone(), k);
                 }
-                Err(keyring::Error::NoEntry) => {}
-                Err(_) => keyring_ok = false,
+                Err(_) => {}
             }
         }
+        // authoritative probe: NoEntry on reads proves nothing — a write
+        // must round-trip before we call the keyring usable (headless
+        // boxes report NoEntry forever and would silently drop keys)
+        let keyring_ok = keyring::Entry::new("sui", "__probe__")
+            .and_then(|e| {
+                e.set_password("x")?;
+                let _ = e.delete_credential();
+                Ok(())
+            })
+            .is_ok();
         Self {
             screen: if no_profiles { Screen::Setup } else { Screen::Main },
             tab: Tab::Chat,
@@ -900,14 +911,14 @@ impl App {
                     if f.name.text().is_empty() {
                         f.status = "name required".into();
                     } else {
-                        let (key_env, key, remember) = f.save_inputs();
+                        let (key_env, key, store) = f.save_inputs();
                         self.effects.push(Effect::SaveProfile {
                             name: f.name.text(),
                             base_url: f.base_url.text(),
                             model: f.model.text(),
                             key_env,
                             key,
-                            remember,
+                            store,
                         });
                         self.screen = Screen::Main;
                         return None;
@@ -1042,7 +1053,12 @@ impl App {
                     .find(|t| t.name() == choice)
                     .copied()
                     .unwrap_or(ProvType::Custom);
-                Some(Modal::Provider(ProvForm::new(ptype)))
+                let mut f = ProvForm::new(ptype);
+                // headless: no working keyring → default to durable storage
+                if !self.keyring_ok {
+                    f.store = Store::ConfigFile;
+                }
+                Some(Modal::Provider(f))
             }
         }
     }
@@ -1131,7 +1147,11 @@ impl App {
             Some(SettingsRow::EditProfile(name)) => {
                 if let Some(p) = self.profiles.get(&name).cloned() {
                     let has_key = self.session_keys.contains_key(&name) || p.api_key.is_some();
-                    self.modal = Some(Modal::Provider(ProvForm::from_existing(&name, &p, has_key)));
+                    let mut f = ProvForm::from_existing(&name, &p, has_key);
+                    if !self.keyring_ok {
+                        f.store = Store::ConfigFile;
+                    }
+                    self.modal = Some(Modal::Provider(f));
                 }
             }
             Some(SettingsRow::Role(role)) => {

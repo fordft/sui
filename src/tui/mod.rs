@@ -39,9 +39,8 @@ use app::*;
 enum Ctl {
     Models(Result<Vec<ModelInfo>, String>),
     ProbeDone(String, Result<provider::Probe, String>),
-    ProfileSaved(String),
+    ProfileSaved,
     Diff(String),
-    Status(String),
 }
 
 /// Restore the terminal no matter how we leave (drop, panic, error).
@@ -243,12 +242,10 @@ pub async fn run() -> Result<()> {
                             Err(e) => app.models_loaded(vec![], Some(e)),
                         },
                         Ctl::ProbeDone(n, r) => app.probe_done(&n, r),
-                        Ctl::ProfileSaved(n) => {
+                        Ctl::ProfileSaved => {
                             app.profiles = config::profiles(None).unwrap_or_default();
-                            app.status = format!("saved profile {n}");
                         }
                         Ctl::Diff(s) => app.diff_text = s,
-                        Ctl::Status(s) => app.status = s,
                     }
                     dirty = true;
                 }
@@ -356,22 +353,31 @@ pub async fn run() -> Result<()> {
                         }
                     }
                 },
-                Effect::SaveProfile { name, base_url, model, key_env, key, remember } => {
-                    match config::save_profile(&name, &base_url, &model, key_env.as_deref()) {
+                Effect::SaveProfile { name, base_url, model, key_env, key, store } => {
+                    // Store::ConfigFile persists the key inline; other
+                    // stores keep it out of the file
+                    let inline = if store == app::Store::ConfigFile { key.clone() } else { None };
+                    match config::save_profile(&name, &base_url, &model, key_env.as_deref(), inline.as_deref()) {
                         Ok(()) => {
-                            if let Some(k) = key {
-                                if remember && app.keyring_ok {
-                                    let n = name.clone();
-                                    let tx = ctl_tx.clone();
-                                    let _ = keyring::Entry::new("sui", &n).and_then(|e| e.set_password(&k));
-                                    let _ = tx.send(Ctl::Status(format!("{n}: key stored in OS keyring")));
-                                    app.session_keys.insert(name.clone(), k);
-                                } else {
-                                    app.session_keys.insert(name.clone(), k);
-                                    let _ = ctl_tx.send(Ctl::Status(format!("{name}: session-only key")));
+                            let note = match (&key, store) {
+                                (Some(k), app::Store::Keychain) if app.keyring_ok => {
+                                    match keyring::Entry::new("sui", &name)
+                                        .and_then(|e| e.set_password(k))
+                                    {
+                                        Ok(()) => "key → OS keyring",
+                                        Err(_) => "keyring write failed — key is session-only",
+                                    }
                                 }
+                                (Some(_), app::Store::Keychain) => "no OS keyring — key is session-only",
+                                (Some(_), app::Store::ConfigFile) => "key → config file (plaintext)",
+                                (Some(_), app::Store::Session) => "key → session only",
+                                (None, _) => "no key",
+                            };
+                            if let Some(k) = key {
+                                app.session_keys.insert(name.clone(), k);
                             }
-                            let _ = ctl_tx.send(Ctl::ProfileSaved(name));
+                            app.status = format!("saved {name} · {note}");
+                            let _ = ctl_tx.send(Ctl::ProfileSaved);
                         }
                         Err(e) => app.status = format!("save failed: {e:#}"),
                     }

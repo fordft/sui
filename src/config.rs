@@ -389,9 +389,22 @@ pub fn save_profile(
     base_url: &str,
     model: &str,
     key_env: Option<&str>,
+    api_key: Option<&str>,
 ) -> Result<()> {
-    let p = global_path()?;
-    let mut doc: toml::Value = std::fs::read_to_string(&p)
+    save_profile_at(&global_path()?, name, base_url, model, key_env, api_key)
+}
+
+/// save_profile against an explicit path — testable without touching the
+/// user's real config.
+pub fn save_profile_at(
+    p: &Path,
+    name: &str,
+    base_url: &str,
+    model: &str,
+    key_env: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<()> {
+    let mut doc: toml::Value = std::fs::read_to_string(p)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
@@ -410,11 +423,18 @@ pub fn save_profile(
     match key_env {
         Some(k) => {
             t.insert("key_env".into(), toml::Value::String(k.to_string()));
-            t.remove("api_key");
+            if api_key.is_none() {
+                t.remove("api_key");
+            }
         }
         None => {
             t.remove("key_env");
         }
+    }
+    // explicit user choice (Config file store): keep the key in the profile
+    // so it survives restarts — the only durable path on headless boxes
+    if let Some(k) = api_key {
+        t.insert("api_key".into(), toml::Value::String(k.to_string()));
     }
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
