@@ -491,3 +491,34 @@ fn tui_settings_roles_and_forms() {
     app.paste("สวัสดี ครับ — ไทย + emoji 🦀 works");
     assert!(app.input.text().contains("ไทย"));
 }
+
+/// Regression: pasting while a modal is open must land in the modal's
+/// focused field — an API key pasted into setup must not reach the chat box.
+#[test]
+fn tui_paste_targets_modal_field() {
+    let repo = fixture_repo();
+    let mut bare = App::with_state(repo, BTreeMap::new(), UiSettings::default());
+    assert!(matches!(bare.modal, Some(Modal::Provider(_))));
+
+    // focus the API-key field (5), paste a key
+    if let Some(Modal::Provider(f)) = &mut bare.modal {
+        f.focus = 5;
+    }
+    bare.paste("sk-test-pasted-key-123");
+    if let Some(Modal::Provider(f)) = &bare.modal {
+        assert_eq!(f.key.text(), "sk-test-pasted-key-123");
+    } else {
+        panic!("provider modal vanished");
+    }
+    assert!(bare.input.text().is_empty(), "paste leaked into chat input");
+
+    // base URL field (2) too — prefilled default gets the paste appended
+    if let Some(Modal::Provider(f)) = &mut bare.modal {
+        f.focus = 2;
+    }
+    bare.paste("https://api.example.test/v1");
+    if let Some(Modal::Provider(f)) = &bare.modal {
+        assert!(f.base_url.text().ends_with("https://api.example.test/v1"));
+    }
+    assert!(bare.input.text().is_empty());
+}

@@ -542,8 +542,26 @@ impl App {
     }
 
     pub fn paste(&mut self, s: &str) {
-        if self.tab == Tab::Chat {
-            self.input.insert_str(s);
+        // modal field wins over chat input — pasting an API key into the
+        // setup form must not leak it into the task box
+        match &mut self.modal {
+            Some(Modal::Provider(f)) => {
+                if let Some(b) = f.cur() {
+                    b.insert_str(s);
+                    f.refresh_endpoint();
+                }
+            }
+            Some(Modal::Picker(p)) => {
+                p.filter.insert_str(s);
+                p.sel = 0;
+            }
+            Some(Modal::Text { buf, .. }) => buf.insert_str(s),
+            Some(_) => {}
+            None => {
+                if self.tab == Tab::Chat {
+                    self.input.insert_str(s);
+                }
+            }
         }
     }
 
