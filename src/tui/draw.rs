@@ -401,61 +401,89 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
         Modal::Provider(pf) => {
             let r = centered(74, 18, area);
             f.render_widget(Clear, r);
+            let fields = pf.fields();
             let mut lines = vec![];
-            let fields: Vec<(usize, String, bool)> = vec![
-                (0, pf.name.text(), false),
-                (2, pf.base_url.text(), false),
-                (4, pf.key_env.text(), false),
-                (5, "•".repeat(pf.key.text().chars().count().min(24)), false),
-                (7, pf.model.text(), false),
-            ];
-            let mut pos = 0;
-            for (i, label) in [
-                "Profile name", "Provider type", "Base URL", "Auth", "Env var",
-                "API key", "Remember", "Model",
-            ]
-            .iter()
-            .enumerate()
-            {
+            let mut btn_row: Option<Line> = None;
+            for (i, fld) in fields.iter().enumerate() {
                 let sel = pf.focus == i;
-                let val = match i {
-                    1 => format!("◀ {} ▶", pf.ptype.name()),
-                    3 => format!("◀ {} ▶", pf.auth.name()),
-                    6 => (if pf.remember { "[x]" } else { "[ ]" }).to_string() + " OS keyring",
-                    _ => fields.iter().find(|(fi, _, _)| *fi == i).map(|(_, v, _)| v.clone()).unwrap_or_default(),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:<13}", label), if sel { acc() } else { dim() }),
-                    Span::styled(val, if sel { Style::default().add_modifier(Modifier::UNDERLINED) } else { Style::default() }),
-                ]));
-                pos = i + 1;
+                match fld {
+                    Field::Test | Field::Save | Field::Cancel => {
+                        if btn_row.is_none() {
+                            // gather the trailing buttons into one row
+                            let mut row = vec![];
+                            for (j, b) in fields[i..].iter().enumerate() {
+                                let label = match b {
+                                    Field::Test => "Test conn.",
+                                    Field::Save => "Save",
+                                    _ => "Cancel",
+                                };
+                                row.push(Span::styled(
+                                    format!(" [ {} ] ", label),
+                                    if pf.focus == i + j {
+                                        Style::default().bg(Color::Cyan).fg(Color::Black)
+                                    } else {
+                                        Style::default()
+                                    },
+                                ));
+                            }
+                            btn_row = Some(Line::from(row));
+                        }
+                    }
+                    _ => {
+                        let val = match fld {
+                            Field::Name => pf.name.text(),
+                            Field::BaseUrl => pf.base_url.text(),
+                            Field::Model => pf.model.text(),
+                            Field::KeyEnv => pf.key_env.text(),
+                            Field::ApiKey => {
+                                "•".repeat(pf.key.text().chars().count().min(24))
+                            }
+                            Field::Auth => format!("◀ {} ▶", pf.auth.name()),
+                            Field::CredSrc => "Environment variable".to_string(),
+                            Field::Store => format!("◀ {} ▶", pf.store.name()),
+                            _ => String::new(),
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("{:<17}", fld.label()),
+                                if sel { acc() } else { dim() },
+                            ),
+                            Span::styled(
+                                val,
+                                if sel {
+                                    Style::default().add_modifier(Modifier::UNDERLINED)
+                                } else {
+                                    Style::default()
+                                },
+                            ),
+                        ]));
+                    }
+                }
             }
-            let _ = pos;
-            lines.push(Line::from(Span::styled(format!("→ POST {}", pf.endpoint), dim())));
-            let btns = ["Test conn.", "Save", "Cancel"];
-            let mut row = vec![];
-            for (bi, b) in btns.iter().enumerate() {
-                let i = 8 + bi;
-                row.push(Span::styled(
-                    format!(" [ {} ] ", b),
-                    if pf.focus == i {
-                        Style::default().bg(Color::Cyan).fg(Color::Black)
-                    } else {
-                        Style::default()
-                    },
-                ));
-            }
+            lines.push(Line::from(Span::styled(
+                format!("→ POST {}", pf.endpoint),
+                dim(),
+            )));
             lines.push(Line::from(""));
-            lines.push(Line::from(row));
+            if let Some(row) = btn_row {
+                lines.push(row);
+            }
             if !pf.status.is_empty() {
-                lines.push(Line::from(Span::styled(pf.status.clone(), Style::default().fg(Color::Yellow))));
+                lines.push(Line::from(Span::styled(
+                    pf.status.clone(),
+                    Style::default().fg(Color::Yellow),
+                )));
             }
             lines.push(Line::from(Span::styled(
                 "test sends one small live request — keys never written to config",
                 dim(),
             )));
             f.render_widget(
-                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("provider")),
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(pf.ptype.name()),
+                ),
                 r,
             );
         }

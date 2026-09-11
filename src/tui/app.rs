@@ -71,30 +71,79 @@ impl ProvType {
     }
 }
 
+/// Custom-endpoint auth choice. Known providers never see this — they get
+/// API-key + store only, with the conventional env var as invisible fallback.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AuthMode {
-    EnvVar,
-    SessionKey,
     None,
+    ApiKey,
+    /// Headless/CI path: read the key from an environment variable.
+    Advanced,
 }
 impl AuthMode {
-    pub const ALL: [AuthMode; 3] = [AuthMode::EnvVar, AuthMode::SessionKey, AuthMode::None];
+    pub const ALL: [AuthMode; 3] = [AuthMode::None, AuthMode::ApiKey, AuthMode::Advanced];
     pub fn name(self) -> &'static str {
-        ["Environment variable", "Session API key", "None"][self as usize]
+        ["None", "API Key", "Advanced…"][self as usize]
     }
 }
 
-/// Provider editor form — fields navigable, typed input, masked key.
+/// Where a typed API key lives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Store {
+    Keychain,
+    Session,
+}
+impl Store {
+    pub const ALL: [Store; 2] = [Store::Keychain, Store::Session];
+    pub fn name(self) -> &'static str {
+        ["OS Keychain", "Session only"][self as usize]
+    }
+}
+
+/// Rows of the provider form — computed per provider type + auth mode so
+/// irrelevant rows disappear entirely instead of rendering disabled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Field {
+    Name,
+    BaseUrl,
+    Model,
+    Auth,
+    CredSrc, // Advanced: credential source (env var only today)
+    KeyEnv,  // Advanced: variable name
+    ApiKey,
+    Store,
+    Test,
+    Save,
+    Cancel,
+}
+impl Field {
+    pub fn label(self) -> &'static str {
+        match self {
+            Field::Name => "Profile name",
+            Field::BaseUrl => "Base URL",
+            Field::Model => "Model",
+            Field::Auth => "Authentication",
+            Field::CredSrc => "Credential source",
+            Field::KeyEnv => "Variable name",
+            Field::ApiKey => "API Key",
+            Field::Store => "Store",
+            Field::Test | Field::Save | Field::Cancel => "",
+        }
+    }
+}
+
+/// Provider editor form — dynamic row set, masked key, selectors cycle
+/// with ←/→/Space.
 pub struct ProvForm {
     pub name: Buf,
     pub ptype: ProvType,
     pub base_url: Buf,
-    pub auth: AuthMode,
+    pub auth: AuthMode, // custom only
     pub key_env: Buf,
-    pub key: Buf, // session-only key entry; masked in the view
-    pub remember: bool,
+    pub key: Buf, // masked in the view
+    pub store: Store,
     pub model: Buf,
-    pub focus: usize,
+    pub focus: usize, // index into fields()
     pub editing: Option<String>, // original name when editing existing
     pub endpoint: String,        // preview of the real request destination
     pub status: String,
@@ -103,13 +152,13 @@ pub struct ProvForm {
 impl ProvForm {
     pub fn new(ptype: ProvType) -> Self {
         let mut f = Self {
-            name: Buf::new(),
+            name: Buf::from(&ptype.name().to_lowercase()),
             ptype,
             base_url: Buf::from(ptype.default_url()),
-            auth: AuthMode::EnvVar,
+            auth: AuthMode::None,
             key_env: Buf::from(ptype.default_env()),
             key: Buf::new(),
-            remember: false,
+            store: Store::Keychain,
             model: Buf::new(),
             focus: 0,
             editing: None,
@@ -119,13 +168,31 @@ impl ProvForm {
         f.refresh_endpoint();
         f
     }
-    pub fn from_existing(name: &str, p: &ProfileCfg) -> Self {
-        let mut f = Self::new(ProvType::Custom);
+    /// Rebuild the form for an existing profile. `has_stored_key` tells the
+    /// form whether a keyring/session key exists for it.
+    pub fn from_existing(name: &str, p: &ProfileCfg, has_stored_key: bool) -> Self {
+        let base = p.base_url.as_deref().unwrap_or("");
+        let ptype = if base == ProvType::DeepSeek.default_url() {
+            ProvType::DeepSeek
+        } else if base == ProvType::OpenRouter.default_url() {
+            ProvType::OpenRouter
+        } else {
+            ProvType::Custom
+        };
+        let mut f = Self::new(ptype);
         f.name.set(name);
-        f.base_url.set(p.base_url.as_deref().unwrap_or(""));
+        f.base_url.set(base);
         f.model.set(p.model.as_deref().unwrap_or(""));
-        f.key_env.set(p.key_env.as_deref().unwrap_or(""));
-        f.auth = if p.key_env.is_some() { AuthMode::EnvVar } else { AuthMode::None };
+        if ptype == ProvType::Custom {
+            f.auth = if let Some(env) = &p.key_env {
+                f.key_env.set(env);
+                AuthMode::Advanced
+            } else if has_stored_key || p.api_key.is_some() {
+                AuthMode::ApiKey
+            } else {
+                AuthMode::None
+            };
+        }
         f.editing = Some(name.to_string());
         f.refresh_endpoint();
         f
@@ -133,16 +200,93 @@ impl ProvForm {
     pub fn refresh_endpoint(&mut self) {
         self.endpoint = format!("{}/chat/completions", self.base_url.text().trim_end_matches('/'));
     }
-    /// 0..8 fields, 9/10/11 = Test/Save/Cancel
-    pub const FIELDS: usize = 12;
+
+    /// The visible row set for the current provider type + auth mode.
+    pub fn fields(&self) -> Vec<Field> {
+        let mut v = vec![Field::Name];
+        match self.ptype {
+            ProvType::DeepSeek | ProvType::OpenRouter => {
+                v.extend([Field::ApiKey, Field::Store, Field::Model]);
+            }
+            ProvType::Custom => {
+                v.extend([Field::BaseUrl, Field::Model, Field::Auth]);
+                match self.auth {
+                    AuthMode::ApiKey => v.extend([Field::ApiKey, Field::Store]),
+                    AuthMode::Advanced => v.extend([Field::CredSrc, Field::KeyEnv]),
+                    AuthMode::None => {}
+                }
+            }
+        }
+        v.extend([Field::Test, Field::Save, Field::Cancel]);
+        v
+    }
+    pub fn cur_field(&self) -> Field {
+        let fs = self.fields();
+        fs[self.focus.min(fs.len() - 1)]
+    }
     fn cur(&mut self) -> Option<&mut Buf> {
-        match self.focus {
-            0 => Some(&mut self.name),
-            2 => Some(&mut self.base_url),
-            4 => Some(&mut self.key_env),
-            5 => Some(&mut self.key),
-            7 => Some(&mut self.model),
+        match self.cur_field() {
+            Field::Name => Some(&mut self.name),
+            Field::BaseUrl => Some(&mut self.base_url),
+            Field::KeyEnv => Some(&mut self.key_env),
+            Field::ApiKey => Some(&mut self.key),
+            Field::Model => Some(&mut self.model),
             _ => None,
+        }
+    }
+    /// Selector rows cycle on ←/→/Space/Enter.
+    fn cycle(&mut self, dir: isize) {
+        match self.cur_field() {
+            Field::Auth => {
+                let i = AuthMode::ALL.iter().position(|a| *a == self.auth).unwrap();
+                let n = AuthMode::ALL.len() as isize;
+                self.auth = AuthMode::ALL[((i as isize + dir).rem_euclid(n)) as usize];
+            }
+            Field::Store => {
+                let i = Store::ALL.iter().position(|s| *s == self.store).unwrap();
+                let n = Store::ALL.len() as isize;
+                self.store = Store::ALL[((i as isize + dir).rem_euclid(n)) as usize];
+            }
+            Field::CredSrc => {} // env var only, for now
+            _ => {}
+        }
+    }
+    /// Key the form would use for fetches/probes: typed key, else the
+    /// provider's conventional env var, else the advanced env var.
+    fn effective_key(&self) -> Option<String> {
+        let typed = self.key.text();
+        if !typed.is_empty() {
+            return Some(typed);
+        }
+        match self.ptype {
+            ProvType::Custom => match self.auth {
+                AuthMode::Advanced => std::env::var(self.key_env.text()).ok(),
+                _ => None,
+            },
+            _ => std::env::var(self.ptype.default_env()).ok(),
+        }
+    }
+    /// Map the form onto SaveProfile inputs. Known providers persist their
+    /// conventional env-var name so headless/CLI env auth keeps working even
+    /// though the form never shows it.
+    fn save_inputs(&self) -> (Option<String>, Option<String>, bool) {
+        let key = self.key.text();
+        let key = if key.is_empty() { None } else { Some(key) };
+        let remember = self.store == Store::Keychain;
+        match self.ptype {
+            ProvType::DeepSeek | ProvType::OpenRouter => (
+                Some(self.ptype.default_env().to_string()),
+                key,
+                remember,
+            ),
+            ProvType::Custom => match self.auth {
+                AuthMode::None => (None, None, false),
+                AuthMode::ApiKey => (None, key, remember),
+                AuthMode::Advanced => {
+                    let env = self.key_env.text();
+                    (if env.is_empty() { None } else { Some(env) }, None, false)
+                }
+            },
         }
     }
 }
@@ -161,6 +305,7 @@ pub enum PickTarget {
     ProvModel,            // into ProvForm.model
     Role(Role),
     ModelForRole(String), // after profile chosen → pick model
+    NewProvider,          // provider type → open its form
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -308,7 +453,14 @@ impl App {
             started: None,
             outcome: String::new(),
             modal: if no_profiles {
-                Some(Modal::Provider(ProvForm::new(ProvType::DeepSeek)))
+                Some(Modal::Picker(Picker {
+                    title: "add a provider".into(),
+                    items: ProvType::ALL.iter().map(|t| t.name().to_string()).collect(),
+                    filter: Buf::new(),
+                    sel: 0,
+                    target: PickTarget::NewProvider,
+                    loading: false,
+                }))
             } else {
                 None
             },
@@ -655,81 +807,58 @@ impl App {
     }
 
     fn provider_key(&mut self, k: KeyEvent, mut f: ProvForm) -> Option<Modal> {
+        let n = f.fields().len();
         match k.code {
             KeyCode::Esc => return None,
-            KeyCode::Tab | KeyCode::Down => {
-                f.focus = (f.focus + 1) % ProvForm::FIELDS;
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                f.focus = (f.focus + ProvForm::FIELDS - 1) % ProvForm::FIELDS;
-            }
-            KeyCode::Left | KeyCode::Right if f.focus == 1 => {
-                let i = ProvType::ALL.iter().position(|t| *t == f.ptype).unwrap();
-                let d = if k.code == KeyCode::Right { 1 } else { ProvType::ALL.len() - 1 };
-                f.ptype = ProvType::ALL[(i + d) % ProvType::ALL.len()];
-                if f.base_url.text().is_empty()
-                    || ProvType::ALL.iter().any(|t| f.base_url.text() == t.default_url())
-                {
-                    f.base_url.set(f.ptype.default_url());
-                    f.key_env.set(f.ptype.default_env());
+            KeyCode::Tab | KeyCode::Down => f.focus = (f.focus + 1) % n,
+            KeyCode::BackTab | KeyCode::Up => f.focus = (f.focus + n - 1) % n,
+            KeyCode::Left | KeyCode::Right => {
+                if f.cur().is_some() {
+                    match k.code {
+                        KeyCode::Left => f.cur().unwrap().left(),
+                        _ => f.cur().unwrap().right(),
+                    }
+                } else {
+                    f.cycle(if k.code == KeyCode::Right { 1 } else { -1 });
                 }
-                f.refresh_endpoint();
             }
-            KeyCode::Left | KeyCode::Right if f.focus == 3 => {
-                let i = AuthMode::ALL.iter().position(|t| *t == f.auth).unwrap();
-                let d = if k.code == KeyCode::Right { 1 } else { AuthMode::ALL.len() - 1 };
-                f.auth = AuthMode::ALL[(i + d) % AuthMode::ALL.len()];
-            }
-            KeyCode::Char(' ') if f.focus == 6 => f.remember = !f.remember,
-            KeyCode::Enter => match f.focus {
-                8 => {
-                    // Test — one small live request
+            KeyCode::Char(' ') if f.cur().is_none() => f.cycle(1),
+            KeyCode::Enter => match f.cur_field() {
+                Field::Test => {
                     let name = f.name.text();
                     if !name.is_empty() {
                         self.status = "test sends one small live request".into();
                         self.effects.push(Effect::Probe {
-                            name: name.clone(),
+                            name,
                             base_url: f.base_url.text(),
                             model: f.model.text(),
-                            key: if f.auth == AuthMode::SessionKey {
-                                Some(f.key.text())
-                            } else {
-                                std::env::var(f.key_env.text()).ok()
-                            },
+                            key: f.effective_key(),
                         });
                     }
                 }
-                9 => {
+                Field::Save => {
                     if f.name.text().is_empty() {
                         f.status = "name required".into();
                     } else {
+                        let (key_env, key, remember) = f.save_inputs();
                         self.effects.push(Effect::SaveProfile {
                             name: f.name.text(),
                             base_url: f.base_url.text(),
                             model: f.model.text(),
-                            key_env: if f.auth == AuthMode::EnvVar && !f.key_env.text().is_empty() {
-                                Some(f.key_env.text())
-                            } else { None },
-                            key: if f.auth == AuthMode::SessionKey && !f.key.text().is_empty() {
-                                Some(f.key.text())
-                            } else { None },
-                            remember: f.remember,
+                            key_env,
+                            key,
+                            remember,
                         });
                         self.screen = Screen::Main;
                         return None;
                     }
                 }
-                10 => return None,
-                7 => {
-                    // model field → catalog picker (manual = filter text)
-                    let key = if f.auth == AuthMode::SessionKey {
-                        Some(f.key.text())
-                    } else {
-                        std::env::var(f.key_env.text()).ok()
-                    };
+                Field::Cancel => return None,
+                Field::Model => {
+                    // catalog picker; filter text doubles as manual entry
                     self.effects.push(Effect::FetchModels {
                         base_url: f.base_url.text(),
-                        key,
+                        key: f.effective_key(),
                         target: PickTarget::ProvModel,
                     });
                     self.form_stash = Some(f);
@@ -742,7 +871,7 @@ impl App {
                         loading: true,
                     }));
                 }
-                _ => {}
+                _ => f.cycle(1), // selectors advance on Enter too
             },
             KeyCode::Backspace => {
                 if let Some(b) = f.cur() { b.backspace(); }
@@ -751,12 +880,6 @@ impl App {
             KeyCode::Delete => {
                 if let Some(b) = f.cur() { b.delete(); }
                 f.refresh_endpoint();
-            }
-            KeyCode::Left => {
-                if let Some(b) = f.cur() { b.left(); }
-            }
-            KeyCode::Right => {
-                if let Some(b) = f.cur() { b.right(); }
             }
             KeyCode::Char(c) => {
                 if let Some(b) = f.cur() {
@@ -853,6 +976,14 @@ impl App {
                 self.effects.push(Effect::SaveUi);
                 None
             }
+            PickTarget::NewProvider => {
+                let ptype = ProvType::ALL
+                    .iter()
+                    .find(|t| t.name() == choice)
+                    .copied()
+                    .unwrap_or(ProvType::Custom);
+                Some(Modal::Provider(ProvForm::new(ptype)))
+            }
         }
     }
 
@@ -927,11 +1058,19 @@ impl App {
     pub fn settings_activate(&mut self, row: usize) {
         match self.settings_rows().get(row).cloned() {
             Some(SettingsRow::AddProfile) => {
-                self.modal = Some(Modal::Provider(ProvForm::new(ProvType::DeepSeek)))
+                self.modal = Some(Modal::Picker(Picker {
+                    title: "add a provider".into(),
+                    items: ProvType::ALL.iter().map(|t| t.name().to_string()).collect(),
+                    filter: Buf::new(),
+                    sel: 0,
+                    target: PickTarget::NewProvider,
+                    loading: false,
+                }));
             }
             Some(SettingsRow::EditProfile(name)) => {
                 if let Some(p) = self.profiles.get(&name).cloned() {
-                    self.modal = Some(Modal::Provider(ProvForm::from_existing(&name, &p)));
+                    let has_key = self.session_keys.contains_key(&name) || p.api_key.is_some();
+                    self.modal = Some(Modal::Provider(ProvForm::from_existing(&name, &p, has_key)));
                 }
             }
             Some(SettingsRow::Role(role)) => {

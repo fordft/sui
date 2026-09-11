@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sui::config::{Profile, ProfileCfg, UiSettings};
 use sui::events::UiEvent;
 use sui::mission::{self, MissionCfg};
-use sui::tui::app::{App, ChatItem, Effect, Modal, Mode, Role, Tab};
+use sui::tui::app::{App, AuthMode, ChatItem, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, Tab};
 
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -448,9 +448,11 @@ fn tui_settings_roles_and_forms() {
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
 
-    // first-run with no profiles → Setup + provider modal
-    let bare = App::with_state(repo.clone(), BTreeMap::new(), UiSettings::default());
+    // first-run with no profiles → Setup + provider-type picker → form
+    let mut bare = App::with_state(repo.clone(), BTreeMap::new(), UiSettings::default());
     assert!(matches!(bare.screen, sui::tui::app::Screen::Setup));
+    assert!(matches!(bare.modal, Some(Modal::Picker(_))));
+    bare.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // pick DeepSeek
     assert!(matches!(bare.modal, Some(Modal::Provider(_))));
 
     // role assignment: solo → mock-ctrl
@@ -497,12 +499,14 @@ fn tui_settings_roles_and_forms() {
 #[test]
 fn tui_paste_targets_modal_field() {
     let repo = fixture_repo();
-    let mut bare = App::with_state(repo, BTreeMap::new(), UiSettings::default());
+    let mut bare = App::with_state(repo.clone(), BTreeMap::new(), UiSettings::default());
+    // first-run: provider-type picker → choose DeepSeek → form
+    bare.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(bare.modal, Some(Modal::Provider(_))));
 
-    // focus the API-key field (5), paste a key
+    // focus the API-key field, paste a key
     if let Some(Modal::Provider(f)) = &mut bare.modal {
-        f.focus = 5;
+        f.focus = f.fields().iter().position(|x| *x == Field::ApiKey).unwrap();
     }
     bare.paste("sk-test-pasted-key-123");
     if let Some(Modal::Provider(f)) = &bare.modal {
@@ -512,13 +516,37 @@ fn tui_paste_targets_modal_field() {
     }
     assert!(bare.input.text().is_empty(), "paste leaked into chat input");
 
-    // base URL field (2) too — prefilled default gets the paste appended
-    if let Some(Modal::Provider(f)) = &mut bare.modal {
-        f.focus = 2;
-    }
-    bare.paste("https://api.example.test/v1");
+    // DeepSeek form hides Base URL / Auth / env-var rows entirely
     if let Some(Modal::Provider(f)) = &bare.modal {
-        assert!(f.base_url.text().ends_with("https://api.example.test/v1"));
+        assert!(f.fields().iter().all(|x| *x != Field::BaseUrl));
+        assert!(f.fields().iter().all(|x| *x != Field::Auth));
+        assert!(f.fields().iter().all(|x| *x != Field::KeyEnv));
     }
-    assert!(bare.input.text().is_empty());
+
+    // Custom → BaseUrl row exists and receives paste
+    let mut cf = ProvForm::new(ProvType::Custom);
+    assert_eq!(cf.auth, AuthMode::None); // custom endpoints default to no auth
+    // None: no key rows at all
+    assert!(cf.fields().iter().all(|x| !matches!(x, Field::ApiKey | Field::Store | Field::CredSrc | Field::KeyEnv)));
+    cf.auth = AuthMode::ApiKey;
+    let fs = cf.fields();
+    assert!(fs.iter().any(|x| *x == Field::ApiKey));
+    assert!(fs.iter().any(|x| *x == Field::Store));
+    assert!(fs.iter().all(|x| *x != Field::KeyEnv));
+    cf.auth = AuthMode::Advanced;
+    let fs = cf.fields();
+    assert!(fs.iter().any(|x| *x == Field::CredSrc));
+    assert!(fs.iter().any(|x| *x == Field::KeyEnv));
+    assert!(fs.iter().all(|x| *x != Field::ApiKey));
+    assert!(fs.iter().all(|x| *x != Field::Store));
+
+    cf.auth = AuthMode::None;
+    cf.focus = cf.fields().iter().position(|x| *x == Field::BaseUrl).unwrap();
+    let mut app2 = App::with_state(repo.clone(), BTreeMap::new(), UiSettings::default());
+    app2.modal = Some(Modal::Provider(cf));
+    app2.paste("https://api.example.test/v1");
+    if let Some(Modal::Provider(f)) = &app2.modal {
+        assert_eq!(f.base_url.text(), "https://api.example.test/v1");
+    }
+    assert!(app2.input.text().is_empty());
 }
