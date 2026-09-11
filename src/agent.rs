@@ -105,17 +105,20 @@ impl Agent {
     }
 
     /// Wire a UI: typed events out, shared cancellation in (Stop button /
-    /// mission-level cancel), and gate decisions as interactive modals.
+    /// mission-level cancel), gate decisions as interactive modals, and an
+    /// optional shared session-approval flag so UI policy changes reach
+    /// the live gate without respawning the agent.
     pub fn wire_ui(
         &mut self,
         sink: Sink,
         cancel: Arc<tokio::sync::Notify>,
         stop: Arc<AtomicBool>,
+        session: Option<Arc<AtomicBool>>,
     ) {
         self.events = Some(sink.clone());
         self.cancel = Some(cancel);
         self.stop = stop.clone();
-        self.gate.set_ui(sink, stop);
+        self.gate.set_ui(sink, stop, session);
     }
 
     fn emit(&self, e: UiEvent) {
@@ -198,10 +201,12 @@ impl Agent {
             }
 
             if est_tokens + self.limits.context_reserve > self.limits.context_budget {
-                eprintln!(
-                    "· context budget exceeded (~{} est + {} reserve > {}); start a new session",
-                    est_tokens, self.limits.context_reserve, self.limits.context_budget
-                );
+                if !self.quiet {
+                    eprintln!(
+                        "· context budget exceeded (~{} est + {} reserve > {}); start a new session",
+                        est_tokens, self.limits.context_reserve, self.limits.context_budget
+                    );
+                }
                 self.journal.log(
                     "budget_exceeded",
                     json!({ "est_tokens": est_tokens, "reserve": self.limits.context_reserve,
@@ -233,7 +238,9 @@ impl Agent {
                     Err(_) => Err(anyhow!("request deadline exceeded")),
                 },
                 _ = cancel_wait(self.cancel.clone()) => {
-                    eprintln!("\n· interrupted");
+                    if !quiet {
+                        eprintln!("\n· interrupted");
+                    }
                     self.journal.log("interrupted", json!({ "request_id": req_id, "phase": "request" }));
                     return Ok(());
                 }
@@ -273,17 +280,19 @@ impl Agent {
                 });
             }
 
-            if !outcome.content.is_empty() {
-                println!();
-            }
-            match &outcome.usage {
-                Some(u) => eprintln!(
-                    "· {} in / {} cached / {} out",
-                    opt(u.input_tokens),
-                    opt(u.cache_read_tokens),
-                    opt(u.output_tokens)
-                ),
-                None => eprintln!("· usage: not reported"),
+            if !quiet {
+                if !outcome.content.is_empty() {
+                    println!();
+                }
+                match &outcome.usage {
+                    Some(u) => eprintln!(
+                        "· {} in / {} cached / {} out",
+                        opt(u.input_tokens),
+                        opt(u.cache_read_tokens),
+                        opt(u.output_tokens)
+                    ),
+                    None => eprintln!("· usage: not reported"),
+                }
             }
             self.journal.log(
                 "request",
@@ -382,13 +391,15 @@ impl Agent {
                     };
                     finish_after = fin;
                     (r, false)
-                } else if needs_approval(name) && !self.gate.check(&summary) {
+                } else if needs_approval(name) && !self.gate.check(&summary).await {
                     (
                         "status: denied\nerror: user rejected the action".to_string(),
                         false,
                     )
                 } else {
-                    eprintln!("» {summary}");
+                    if !self.quiet {
+                        eprintln!("» {summary}");
+                    }
                     self.emit(UiEvent::ToolStart {
                         agent: self.ident.agent_id.clone(),
                         name: name.to_string(),
@@ -432,7 +443,9 @@ impl Agent {
                     content: result,
                 });
                 if cancelled {
-                    eprintln!("\n· interrupted during tool execution");
+                    if !self.quiet {
+                        eprintln!("\n· interrupted during tool execution");
+                    }
                     self.journal.log(
                         "interrupted",
                         json!({ "request_id": req_id, "phase": "tool" }),
@@ -451,7 +464,9 @@ impl Agent {
                 }
             }
         }
-        eprintln!("· max_turns reached; stopping");
+        if !self.quiet {
+            eprintln!("· max_turns reached; stopping");
+        }
         Ok(())
     }
 

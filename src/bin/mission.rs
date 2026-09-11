@@ -323,6 +323,7 @@ async fn main() -> Result<()> {
         worker_max_turns: 50,
         events: None,
         cancel: None,
+        session_approve: None,
     };
 
     let mut rows: Vec<TrialRow> = vec![];

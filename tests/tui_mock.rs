@@ -9,12 +9,13 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use sui::config::{Profile, ProfileCfg, UiSettings};
 use sui::events::UiEvent;
 use sui::mission::{self, MissionCfg};
 use sui::tui::app::{App, AuthMode, ChatItem, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, Tab};
+use sui::tui::text::Buf;
 
 fn key(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -48,7 +49,21 @@ fn sse_text(t: &str) -> String {
 /// Mock routing: "control plane" system → submit_result(plan); worker with
 /// last msg role=tool → text; user msg containing WRITEME → write_file;
 /// containing LONGTASK → bash sleep; else text "done".
+/// WRITEME3 issues three sequential write_file calls; a denial result or
+/// three tool messages ends the turn. `gates` can hold each follow-up
+/// call on a flag so tests control exactly when the next check happens.
 fn mock(plan: Value) -> u16 {
+    mock_inner(plan, None)
+}
+
+fn mock_gated(plan: Value, gates: [std::sync::Arc<std::sync::atomic::AtomicBool>; 2]) -> u16 {
+    mock_inner(plan, Some(gates))
+}
+
+fn mock_inner(
+    plan: Value,
+    gates: Option<[std::sync::Arc<std::sync::atomic::AtomicBool>; 2]>,
+) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -90,6 +105,7 @@ fn mock(plan: Value) -> u16 {
                 .unwrap_or("")
                 .to_string();
 
+            let n_tools = msgs.iter().filter(|m| m["role"] == "tool").count();
             let body = if system.contains("control plane") {
                 if last_user.contains("auditor") {
                     let sub = json!({"payload": {"verdict": "PASS", "findings": [],
@@ -98,6 +114,34 @@ fn mock(plan: Value) -> u16 {
                 } else {
                     let sub = json!({"payload": plan});
                     sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
+                }
+            } else if last_user.contains("WRITEME3") {
+                // three sequential protected writes — exercises live policy
+                // changes mid-run without respawning the agent
+                let last_tool = msgs
+                    .iter()
+                    .rev()
+                    .find(|m| m["role"] == "tool")
+                    .and_then(|m| m["content"].as_str())
+                    .unwrap_or("");
+                if n_tools >= 3 || last_tool.contains("denied") {
+                    sse_text("done")
+                } else {
+                    if let Some(g) = &gates {
+                        // hold write#2 on gates[0], write#3 on gates[1]
+                        if (1..=2).contains(&n_tools) {
+                            let flag = &g[n_tools - 1];
+                            let t0 = std::time::Instant::now();
+                            while !flag.load(std::sync::atomic::Ordering::Relaxed)
+                                && t0.elapsed() < Duration::from_secs(10)
+                            {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                    }
+                    sse_tool_calls(json!([tc("w", "write_file",
+                        &json!({"path": format!("out/tui{}.txt", n_tools + 1),
+                                "content": "written"}).to_string())]))
                 }
             } else if last["role"] == "tool" {
                 sse_text("done")
@@ -243,6 +287,7 @@ async fn tui_solo_write_with_permission_modal() {
         ev_tx,
         app.cancel.clone(),
         app.stop_flag.clone(),
+        app.auto.clone(),
     );
     solo.send(task);
 
@@ -285,7 +330,7 @@ async fn tui_solo_permission_denied() {
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let prof = sui::tui::resolve_to_profile(&app, "mock-worker").unwrap();
-    let solo = sui::tui::spawn_solo(prof, repo.clone(), jdir(), ev_tx, app.cancel.clone(), app.stop_flag.clone());
+    let solo = sui::tui::spawn_solo(prof, repo.clone(), jdir(), ev_tx, app.cancel.clone(), app.stop_flag.clone(), app.auto.clone());
     solo.send(task);
 
     let mut n = 0;
@@ -313,7 +358,7 @@ async fn tui_stop_cancels_running_tool() {
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let prof = sui::tui::resolve_to_profile(&app, "mock-worker").unwrap();
-    let solo = sui::tui::spawn_solo(prof, repo.clone(), jdir(), ev_tx, app.cancel.clone(), app.stop_flag.clone());
+    let solo = sui::tui::spawn_solo(prof, repo.clone(), jdir(), ev_tx, app.cancel.clone(), app.stop_flag.clone(), app.auto.clone());
     solo.send(task);
 
     // wait for the permission modal (bash needs approval), approve, then stop
@@ -430,6 +475,7 @@ async fn tui_mission_events_flow() {
         worker_max_turns: 10,
         events: Some(ev_tx),
         cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
+        session_approve: Some(app.auto.clone()),
     };
     tokio::spawn(async move {
         let _ = mission::run(cfg).await;
@@ -549,4 +595,219 @@ fn tui_paste_targets_modal_field() {
         assert_eq!(f.base_url.text(), "https://api.example.test/v1");
     }
     assert!(app2.input.text().is_empty());
+}
+
+// ── permission modal key semantics ────────────────────────────────────
+
+fn perm_app(repo: &PathBuf) -> (App, tokio::sync::mpsc::UnboundedReceiver<sui::events::GateChoice>) {
+    let mut app = app_with_mock(repo, 1); // port unused — modal injected directly
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    app.modal = Some(Modal::Permission { id: 1, summary: "write out/x".into(), reply: tx });
+    (app, rx)
+}
+
+#[test]
+fn perm_uppercase_variants_decide() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(key('Y'));
+    assert!(matches!(rx.try_recv().unwrap(), sui::events::GateChoice::Once));
+
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(key('A'));
+    assert!(matches!(rx.try_recv().unwrap(), sui::events::GateChoice::Session));
+    assert!(app.auto.load(std::sync::atomic::Ordering::Relaxed), "[a] must raise the Auto badge");
+
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(key('N'));
+    assert!(matches!(rx.try_recv().unwrap(), sui::events::GateChoice::Deny));
+}
+
+#[test]
+fn perm_enter_does_not_approve() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })),
+        "bare Enter must not grant approval — no selected action exists");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn perm_release_kind_fires_shortcut() {
+    // Transports that only report Release-kind char events must still
+    // drive the modal; the gate is parked on this reply either way.
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Release));
+    assert!(matches!(rx.try_recv().unwrap(), sui::events::GateChoice::Once));
+}
+
+#[test]
+fn perm_release_of_unrelated_key_ignored() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Release));
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn perm_keys_never_leak_to_chat_input() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(key('y'));
+    assert!(rx.try_recv().is_ok());
+    assert!(app.input.text().is_empty(), "decision key leaked into chat input");
+    // the trailing Release on press+release terminals must not type either
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Release));
+    assert!(app.input.text().is_empty(), "release event typed into chat input");
+}
+
+#[test]
+fn ctrl_s_stops_with_permission_modal_open() {
+    let repo = fixture_repo();
+    let (mut app, _rx) = perm_app(&repo);
+    app.running = true;
+    app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert!(app.effects.iter().any(|e| matches!(e, Effect::Stop)),
+        "Ctrl+S was swallowed by the open modal");
+}
+
+/// One physical keypress, one approval: on Press+Release terminals the
+/// trailing Release must not approve the NEXT prompt.
+#[test]
+fn perm_press_release_counts_once() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Press));
+    assert!(matches!(rx.try_recv().unwrap(), sui::events::GateChoice::Once));
+    assert!(app.modal.is_none());
+
+    // tool 2's prompt opens; the Release tail of the same keypress arrives
+    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+    app.modal = Some(Modal::Permission { id: 2, summary: "write out/y".into(), reply: tx2 });
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Release));
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })),
+        "a Release matching an earlier Press approved the next prompt");
+    assert!(rx2.try_recv().is_err());
+
+    // a genuinely new keypress still approves
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Press));
+    assert!(matches!(rx2.try_recv().unwrap(), sui::events::GateChoice::Once));
+}
+
+/// Repeat events (held key) never decide a permission prompt.
+#[test]
+fn perm_repeat_never_approves() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Repeat));
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })));
+    assert!(rx.try_recv().is_err());
+}
+
+/// A Release with no prior Press still works (release-only transports),
+/// including a release typed into chat before the modal opened.
+#[test]
+fn perm_release_without_press_is_compat_path() {
+    let repo = fixture_repo();
+    let (mut app, mut rx) = perm_app(&repo);
+    // 'y' was pressed while no modal existed (typed into chat), then
+    // released over the open modal — the press is outstanding, so this
+    // release is NOT a fresh decision
+    app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Release));
+    assert!(rx.try_recv().is_ok(), "release-only transport must still decide");
+}
+
+/// Live policy: [a] raises the shared flag (next tool unprompted), the
+/// Settings toggle revokes it, and the next tool prompts again — same
+/// agent, no respawn, conversation untouched. The mock holds each
+/// follow-up tool call on a latch so the flag flip is deterministic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tui_session_policy_live_revocation() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let repo = fixture_repo();
+    let g2 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let g3 = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let port = mock_gated(json!({}), [g2.clone(), g3.clone()]);
+    let mut app = app_with_mock(&repo, port);
+
+    app.input.set("WRITEME3");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Effect::SendTask { task, .. } = app.effects.pop().unwrap() else { panic!() };
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+    let prof = sui::tui::resolve_to_profile(&app, "mock-worker").unwrap();
+    let solo = sui::tui::spawn_solo(
+        prof, repo.clone(), jdir(), ev_tx,
+        app.cancel.clone(), app.stop_flag.clone(), app.auto.clone(),
+    );
+    solo.send(task);
+
+    // first protected call prompts (Ask is the default)
+    let mut n = 0;
+    while !matches!(app.modal, Some(Modal::Permission { .. })) && n < 20 {
+        let ev = tokio::time::timeout(Duration::from_secs(10), ev_rx.recv()).await.unwrap().unwrap();
+        app.apply_event(ev);
+        n += 1;
+    }
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })));
+
+    // [a] → session flag up → tool 1 runs; tool 2's call waits on the latch
+    app.key(key('a'));
+    assert!(app.auto.load(Relaxed));
+    let t1 = repo.join("out/tui1.txt");
+    let t0 = std::time::Instant::now();
+    while !t1.exists() && t0.elapsed() < Duration::from_secs(15) {
+        while let Ok(ev) = ev_rx.try_recv() { app.apply_event(ev); }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(t1.exists());
+
+    // Ask→Auto was live: release the latch — tool 2 must run unprompted
+    g2.store(true, Relaxed);
+    let t2 = repo.join("out/tui2.txt");
+    let t0 = std::time::Instant::now();
+    while !t2.exists() && t0.elapsed() < Duration::from_secs(15) {
+        while let Ok(ev) = ev_rx.try_recv() { app.apply_event(ev); }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(t2.exists(), "session flag should auto-allow tool 2");
+    assert!(app.modal.is_none(), "tool 2 ran without a prompt");
+
+    // Auto→Ask: revoke while the mock holds tool 3's call on its latch —
+    // the live gate must see Ask before the next dispatch
+    app.auto.store(false, Relaxed);
+    g3.store(true, Relaxed);
+    let mut n = 0;
+    while !matches!(app.modal, Some(Modal::Permission { .. })) && n < 30 {
+        let ev = tokio::time::timeout(Duration::from_secs(10), ev_rx.recv()).await.unwrap().unwrap();
+        app.apply_event(ev);
+        n += 1;
+    }
+    assert!(matches!(app.modal, Some(Modal::Permission { .. })),
+        "revoking Auto must re-prompt on the very next tool");
+    assert!(!app.auto.load(Relaxed), "badge reflects effective policy");
+
+    app.key(key('n'));
+    assert!(pump(&mut app, &mut ev_rx).await);
+    assert!(!repo.join("out/tui3.txt").exists(), "denied tool must not run");
+}
+
+/// Workspace change resets the session flag — Ask is the default there.
+#[test]
+fn workspace_change_resets_auto() {
+    let repo = fixture_repo();
+    let (mut app, _rx) = perm_app(&repo);
+    app.modal = None;
+    app.auto.store(true, std::sync::atomic::Ordering::Relaxed);
+    app.modal = Some(Modal::Text {
+        title: "workspace path".into(),
+        buf: Buf::from("/tmp/other"),
+        target: sui::tui::app::TextTarget::Workspace,
+    });
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.auto.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(app.ui.workspace.as_deref(), Some("/tmp/other"));
 }

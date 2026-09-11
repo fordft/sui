@@ -254,6 +254,7 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
         worker_max_turns: 10,
         events: None,
         cancel: None,
+        session_approve: None,
     }
 }
 

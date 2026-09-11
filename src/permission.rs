@@ -11,6 +11,10 @@ use crate::events::{GateChoice, Sink, UiEvent};
 pub struct Gate {
     auto: bool,
     session_allow: bool,
+    /// Shared session-scoped approval flag (TUI): 'a' raises it, the
+    /// Ask/Auto toggle clears it — revocation reaches the live gate
+    /// without touching the agent. Absent on headless/stdin paths.
+    session: Option<Arc<AtomicBool>>,
     sink: Option<Sink>,
     cancel: Option<Arc<AtomicBool>>,
     seq: u64,
@@ -21,6 +25,7 @@ impl Gate {
         Self {
             auto,
             session_allow: false,
+            session: None,
             sink: None,
             cancel: None,
             seq: 0,
@@ -28,38 +33,61 @@ impl Gate {
     }
 
     /// Interactive mode: decisions arrive via UiEvent::Permission replies.
-    pub fn set_ui(&mut self, sink: Sink, cancel: Arc<AtomicBool>) {
+    /// `session` is the live session-approval flag shared with the UI.
+    pub fn set_ui(&mut self, sink: Sink, cancel: Arc<AtomicBool>, session: Option<Arc<AtomicBool>>) {
         self.sink = Some(sink);
         self.cancel = Some(cancel);
+        self.session = session;
+    }
+
+    /// Effective "skip prompts" state: constructor auto, a session grant,
+    /// or the shared flag. Re-checked on every dispatch so revoking [a]
+    /// or toggling Auto off takes effect on the very next tool call.
+    fn open(&self) -> bool {
+        self.auto
+            || self.session_allow
+            || self.session.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false)
     }
 
     /// Returns true if the action may proceed.
-    pub fn check(&mut self, summary: &str) -> bool {
-        if self.auto || self.session_allow {
-            eprintln!("» allow (auto): {summary}");
+    pub async fn check(&mut self, summary: &str) -> bool {
+        if self.open() {
+            // Under a UI (sink set) raw writes would corrupt the alt screen.
+            if self.sink.is_none() {
+                eprintln!("» allow (auto): {summary}");
+            }
             return true;
         }
         if let Some(tx) = self.sink.clone() {
             self.seq += 1;
-            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = tx.send(UiEvent::Permission {
                 id: self.seq,
                 summary: summary.to_string(),
                 reply: reply_tx,
             });
-            // Block until the UI answers or the run is cancelled. The poll
-            // interval lets a Stop break a parked gate instead of deadlocking.
+            // Wait for the UI's answer or a Stop. This must stay fully
+            // async: a blocking recv inside the agent task starves its
+            // runtime worker — the TUI's select then stops redrawing and
+            // the modal only responds once per physical keypress.
             loop {
-                match reply_rx.recv_timeout(Duration::from_millis(200)) {
-                    Ok(choice) => match choice {
-                        GateChoice::Once => return true,
-                        GateChoice::Session => {
-                            self.session_allow = true;
+                tokio::select! {
+                    choice = reply_rx.recv() => match choice {
+                        Some(GateChoice::Once) => return true,
+                        Some(GateChoice::Session) => {
+                            // Raise the shared session flag — revocable by
+                            // the UI toggle. Local session_allow stays for
+                            // the stdin path below.
+                            if let Some(f) = &self.session {
+                                f.store(true, Ordering::Relaxed);
+                            } else {
+                                self.session_allow = true;
+                            }
                             return true;
                         }
-                        GateChoice::Deny => return false,
+                        Some(GateChoice::Deny) | None => return false, // None = UI gone
                     },
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
                         if self
                             .cancel
                             .as_ref()
@@ -69,7 +97,6 @@ impl Gate {
                             return false;
                         }
                     }
-                    Err(_) => return false, // UI gone
                 }
             }
         }

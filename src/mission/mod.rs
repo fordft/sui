@@ -64,6 +64,8 @@ pub struct MissionCfg {
     /// UI wiring: events out, shared cancel in. None = headless.
     pub events: Option<crate::events::Sink>,
     pub cancel: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
+    /// Shared session-approval flag from the UI (see Gate::set_ui).
+    pub session_approve: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Default)]
@@ -149,7 +151,7 @@ fn mk_agent(
     a.set_quiet(true);
     a.set_system(system.to_string());
     if let (Some(sink), Some((n, f))) = (&cfg.events, &cfg.cancel) {
-        a.wire_ui(sink.clone(), n.clone(), f.clone());
+        a.wire_ui(sink.clone(), n.clone(), f.clone(), cfg.session_approve.clone());
     }
     Ok(a)
 }
@@ -544,7 +546,9 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     };
     if cancelled {
         journal.log("mission", json!({ "state": format!("{:?}", S::Cancelled) }));
-        eprintln!("· mission: cancelled");
+        if cfg.events.is_none() {
+            eprintln!("· mission: cancelled");
+        }
     }
 
     match flow {
@@ -617,7 +621,9 @@ async fn body(
     macro_rules! state {
         ($s:expr) => {{
             journal.log("mission", json!({ "state": format!("{:?}", $s) }));
-            eprintln!("· mission: {:?}", $s);
+            if cfg.events.is_none() {
+                eprintln!("· mission: {:?}", $s);
+            }
             if let Some(tx) = &cfg.events {
                 let _ = tx.send(crate::events::UiEvent::MissionState(format!("{:?}", $s)));
             }

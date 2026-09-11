@@ -44,6 +44,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                 if app.running { " · RUNNING" } else { "" },
                 Style::default().fg(Color::Yellow),
             ),
+            Span::styled(
+                if app.auto.load(std::sync::atomic::Ordering::Relaxed) { " · AUTO" } else { "" },
+                Style::default().fg(Color::Magenta),
+            ),
         ])),
         rows[0],
     );
@@ -283,6 +287,16 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 format!("  worker concurrency: {} (max 2)", app.ui.worker_count.unwrap_or(1)),
                 Style::default(),
             ),
+            SettingsRow::Auto => {
+                let on = app.auto.load(std::sync::atomic::Ordering::Relaxed);
+                (
+                    format!(
+                        "  auto-approve this session: {} (YOLO — resets on restart/workspace change)",
+                        if on { "on" } else { "off" }
+                    ),
+                    if on { Style::default().fg(Color::Magenta) } else { Style::default() },
+                )
+            }
             SettingsRow::Workspace => (
                 format!("  workspace: {}", app.workspace.display()),
                 Style::default(),
@@ -374,7 +388,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 Paragraph::new(vec![
                     Line::from(summary.clone()),
                     Line::from(""),
-                    Line::from(Span::styled("[y] once   [a] session   [n/Esc] deny", acc())),
+                    Line::from(Span::styled("[y/Y] once   [a/A] session   [n/N/Esc] deny", acc())),
                 ])
                 .block(Block::default().borders(Borders::ALL).title("permission")),
                 r,

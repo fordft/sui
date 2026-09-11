@@ -79,6 +79,13 @@ role (orchestrator / workers / auditor), then type a task. Credentials are
 entered in-app (masked), stored per your choice: environment variable, session
 only, or OS keyring where available. No API key is needed to install.
 
+Mutating tool calls ask first: `y`/`Y` approves once, `a`/`A` approves for the
+session (an `AUTO` badge shows in the header), `n`/`N`/`Esc` denies — each on
+a single keystroke. A persistent **auto-approve (YOLO)** toggle lives in
+Settings; the CLI equivalents are `sui -y` and `auto_approve = true` in
+config. `Ctrl+S` stops a running task, `Ctrl+Q` quits — both work while a
+permission prompt is open.
+
 Non-TUI paths still work: `sui` (REPL), `sui "task"` (one-shot),
 `sui-mission`, `sui-certify`.
 

@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, atomic::AtomicBool};
+use tokio::sync::mpsc::UnboundedSender;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::config::{self, ProfileCfg, UiSettings};
 use crate::events::{GateChoice, UiEvent};
@@ -341,7 +341,7 @@ pub struct TaskRow {
 pub enum Modal {
     Provider(ProvForm),
     Picker(Picker),
-    Permission { id: u64, summary: String, reply: Sender<GateChoice> },
+    Permission { id: u64, summary: String, reply: UnboundedSender<GateChoice> },
     ConfirmTest { name: String }, // warn: probe costs one small request
     Text { title: String, buf: Buf, target: TextTarget },
     Help,
@@ -396,6 +396,18 @@ pub struct App {
     pub stop_flag: Arc<AtomicBool>,
     pub effects: Vec<Effect>,
     pub keyring_ok: bool,
+    /// Session-scoped auto-approval flag, shared live with every spawned
+    /// gate. Raised by [a] on a permission modal or the Settings toggle;
+    /// cleared by the toggle, workspace change, and restart. Never
+    /// persisted — every launch starts in Ask.
+    pub auto: Arc<AtomicBool>,
+    /// Physical keys currently held (Press seen, no Release yet). Used to
+    /// deduplicate permission decisions: a Release only counts as a
+    /// decision when no matching Press is outstanding — so on terminals
+    /// reporting Press+Release, one physical keypress can never approve
+    /// two consecutive prompts. Release-only transports (no Press ever
+    /// seen) still work.
+    held: std::collections::HashSet<KeyCode>,
 }
 
 impl App {
@@ -471,6 +483,8 @@ impl App {
             stop_flag: Arc::new(AtomicBool::new(false)),
             effects: vec![],
             keyring_ok,
+            auto: Arc::new(AtomicBool::new(false)),
+            held: std::collections::HashSet::new(),
         }
     }
 
@@ -601,19 +615,60 @@ impl App {
     // ── input handling → effects ────────────────────────────────────
     pub fn key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        // global quit preempts modal input — Ctrl+Q always works
+        // Track physical key state before any dispatch: a Release is only a
+        // fresh decision when no matching Press is outstanding.
+        let held_press = self.held.contains(&k.code);
+        match k.kind {
+            KeyEventKind::Press => {
+                self.held.insert(k.code);
+            }
+            KeyEventKind::Release => {
+                self.held.remove(&k.code);
+            }
+            _ => {}
+        }
+        let press = k.kind == KeyEventKind::Press;
+        // Global chords preempt modal input — Ctrl+Q always quits, Ctrl+S
+        // stops a running task even while a permission modal is parked.
+        // Accepted on any event kind: on transports that only deliver
+        // Release-kind events these are still the user's way out.
         if ctrl && k.code == KeyCode::Char('q') {
             self.effects.push(Effect::Quit);
             return;
         }
+        if ctrl && k.code == KeyCode::Char('s') {
+            self.stop();
+            return;
+        }
         if let Some(m) = self.modal.take() {
-            // handlers consume the modal and return the next state —
-            // Some(m) stays open, a different Some replaces, None closes
-            self.modal = self.modal_key(k, m);
+            // Permission shortcuts: Press decides. A Release decides only
+            // when no matching Press was seen (release-only transports) —
+            // a Press+Release pair is ONE keypress and must not approve two
+            // consecutive prompts. Repeat never decides. Everywhere else
+            // non-Press kinds are dropped so those same terminals don't
+            // double-type or leak decision keys into the chat input.
+            let usable = if matches!(m, Modal::Permission { .. }) {
+                match k.kind {
+                    KeyEventKind::Press => true,
+                    KeyEventKind::Release => !held_press,
+                    _ => false,
+                }
+            } else {
+                press
+            };
+            if usable {
+                // handlers consume the modal and return the next state —
+                // Some(m) stays open, a different Some replaces, None closes
+                self.modal = self.modal_key(k, m);
+            } else {
+                self.modal = Some(m);
+            }
+            return;
+        }
+        if !press {
             return;
         }
         match (ctrl, k.code) {
-            (true, KeyCode::Char('s')) => self.stop(),
             (true, KeyCode::Char('t')) => {
                 self.tab = Tab::ALL[((self.tab as usize) + 1) % 5]
             }
@@ -731,18 +786,21 @@ impl App {
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
         match m {
             Modal::Permission { id, summary, reply } => match k.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
                     let _ = reply.send(GateChoice::Once);
                     None
                 }
-                KeyCode::Char('a') => {
+                KeyCode::Char('a') | KeyCode::Char('A') => {
                     let _ = reply.send(GateChoice::Session);
+                    self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
                     None
                 }
-                KeyCode::Char('n') | KeyCode::Esc => {
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     let _ = reply.send(GateChoice::Deny);
                     None
                 }
+                // Enter does nothing: the modal has no selected action to
+                // confirm, and approval must never be granted silently.
                 _ => Some(Modal::Permission { id, summary, reply }),
             },
             Modal::Help => {
@@ -771,6 +829,8 @@ impl App {
                     match target {
                         TextTarget::Workspace => {
                             self.ui.workspace = if v.is_empty() { None } else { Some(v) };
+                            // new workspace → approvals default back to Ask
+                            self.auto.store(false, std::sync::atomic::Ordering::Relaxed);
                         }
                         TextTarget::Acceptance => {
                             if !v.is_empty() {
@@ -1049,6 +1109,7 @@ impl App {
             v.push(SettingsRow::Role(r));
         }
         v.push(SettingsRow::Workers);
+        v.push(SettingsRow::Auto);
         v.push(SettingsRow::Workspace);
         v.push(SettingsRow::Acceptance);
         v
@@ -1094,6 +1155,13 @@ impl App {
                 });
                 self.effects.push(Effect::SaveUi);
             }
+            Some(SettingsRow::Auto) => {
+                // session-scoped YOLO toggle — flips the flag the live gate
+                // already watches, so Ask→Auto→Ask lands on the very next
+                // tool dispatch without touching the agent or its history
+                let on = !self.auto.load(std::sync::atomic::Ordering::Relaxed);
+                self.auto.store(on, std::sync::atomic::Ordering::Relaxed);
+            }
             Some(SettingsRow::Workspace) => {
                 self.modal = Some(Modal::Text {
                     title: "workspace path".into(),
@@ -1119,6 +1187,7 @@ pub enum SettingsRow {
     EditProfile(String),
     Role(Role),
     Workers,
+    Auto,
     Workspace,
     Acceptance,
 }

@@ -35,7 +35,11 @@ pub enum UiEvent {
         complete: bool,
     },
     /// A mutating tool needs a decision; reply goes on `reply`.
-    Permission { id: u64, summary: String, reply: std::sync::mpsc::Sender<GateChoice> },
+    Permission {
+        id: u64,
+        summary: String,
+        reply: tokio::sync::mpsc::UnboundedSender<GateChoice>,
+    },
     /// Mission state machine transition.
     MissionState(String),
     /// Task-contract status row (from plan / worker results).

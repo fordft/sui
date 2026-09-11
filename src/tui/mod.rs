@@ -9,7 +9,7 @@ pub mod draw;
 pub mod text;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -85,6 +85,7 @@ pub fn spawn_solo(
     sink: Sink,
     cancel: Arc<tokio::sync::Notify>,
     flag: Arc<std::sync::atomic::AtomicBool>,
+    session: Arc<std::sync::atomic::AtomicBool>,
 ) -> Solo {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
@@ -96,7 +97,7 @@ pub fn spawn_solo(
                 bash_timeout: Duration::from_secs(120),
                 bash_timeout_max: Duration::from_secs(600),
             },
-            Gate::new(false), // interactive approvals in the TUI
+            Gate::new(false), // approvals via modal; session flag is live
             match Journal::open_named(&jdir, "solo") {
                 Ok(j) => j,
                 Err(e) => {
@@ -126,7 +127,7 @@ pub fn spawn_solo(
             },
         );
         agent.set_quiet(true);
-        agent.wire_ui(sink.clone(), cancel, flag);
+        agent.wire_ui(sink.clone(), cancel, flag, Some(session));
         while let Some(msg) = rx.recv().await {
             let r = agent.run_turn(&msg).await;
             match r {
@@ -197,14 +198,21 @@ pub async fn run() -> Result<()> {
             last_draw = Instant::now();
             dirty = false;
         }
+        // when a frame is pending but throttled, wake at the frame
+        // boundary instead of the full heartbeat — a skipped draw must
+        // never wait for the next input event
+        let tick = if dirty {
+            Duration::from_millis(33).saturating_sub(last_draw.elapsed())
+        } else {
+            Duration::from_millis(200)
+        };
         tokio::select! {
             biased;
             ev = keys.next() => {
                 if let Some(Ok(Event::Key(k))) = ev {
-                    if k.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    // raw mode: Ctrl+C arrives as a key event
+                    // raw mode: Ctrl+C arrives as a key event. App::key owns
+                    // the Press/Release policy — permission shortcuts honor
+                    // Release-only transports, text input ignores them.
                     if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                         && matches!(k.code, crossterm::event::KeyCode::Char('c'))
                     {
@@ -245,9 +253,9 @@ pub async fn run() -> Result<()> {
                     dirty = true;
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                // heartbeat: keep elapsed/running displays fresh
-                if app.running { dirty = true; }
+            _ = tokio::time::sleep(tick) => {
+                // heartbeat / pending-frame deadline
+                if app.running || dirty { dirty = true; }
             }
         }
 
@@ -292,6 +300,7 @@ pub async fn run() -> Result<()> {
                                         ev_tx.clone(),
                                         app.cancel.clone(),
                                         app.stop_flag.clone(),
+                                        app.auto.clone(),
                                     ));
                                 }
                                 let _ = solo.as_ref().unwrap().tx.send(task);
@@ -331,6 +340,7 @@ pub async fn run() -> Result<()> {
                                     worker_max_turns: 50,
                                     events: Some(ev_tx.clone()),
                                     cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
+                                    session_approve: Some(app.auto.clone()),
                                 };
                                 tokio::spawn(async move {
                                     let _ = mission::run(cfg).await;
