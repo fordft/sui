@@ -1,6 +1,6 @@
 [package]
 name = "sui"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "cache-first multi-agent coding harness"
 repository = "https://github.com/fordft/sui"

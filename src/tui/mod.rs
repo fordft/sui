@@ -155,7 +155,7 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
     })
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(force_mission: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("sui tui needs a terminal");
     }
@@ -180,6 +180,10 @@ pub async fn run() -> Result<()> {
 
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(workspace.clone());
+    if force_mission {
+        app.mode = app::Mode::Mission;
+        app.ui.mode = Some("mission".into());
+    }
     let jdir = run_dir();
 
     let (ev_tx, mut ev_rx) = unbounded_channel::<UiEvent>();

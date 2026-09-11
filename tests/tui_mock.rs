@@ -14,7 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use sui::config::{Profile, ProfileCfg, UiSettings};
 use sui::events::UiEvent;
 use sui::mission::{self, MissionCfg};
-use sui::tui::app::{App, AuthMode, ChatItem, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, Tab};
+use sui::tui::app::{App, AuthMode, ChatItem, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, SettingsRow, Tab};
 use sui::tui::text::Buf;
 
 fn key(c: char) -> KeyEvent {
@@ -885,4 +885,52 @@ fn provider_save_config_file_persists() {
     let doc: toml::Value = text.parse().unwrap();
     let p = &doc["profiles"]["mine"];
     assert_eq!(p["api_key"].as_str(), Some("sk-persist"));
+}
+
+/// Mission mode must be reachable without Ctrl+M — that chord is byte
+/// 0x0D == Enter in most terminals, so it can never fire there.
+#[test]
+fn mission_mode_alternate_paths() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    assert_eq!(app.mode, Mode::Solo);
+
+    // Ctrl+O — portable chord
+    app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Mission);
+    assert!(app.effects.iter().any(|e| matches!(e, Effect::SaveUi)),
+        "mode change must persist ui.mode");
+    app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Solo);
+
+    // kitty/CSI-u terminals do deliver real Ctrl+M — keep it working
+    app.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Mission);
+    app.key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL));
+    assert_eq!(app.mode, Mode::Solo);
+
+    // slash commands in the chat input
+    app.input.insert_str("/mission");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Mission);
+    assert!(app.input.is_empty());
+    app.input.insert_str("/solo");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Solo);
+    // unknown slash command must not dispatch a task
+    app.input.insert_str("/nonsense");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.input.is_empty(), "unknown command keeps the input");
+    assert!(app.effects.iter().all(|e| !matches!(e, Effect::SendTask { .. })));
+
+    // settings row: run mode toggles on Enter
+    app.tab = Tab::Settings;
+    let i = app
+        .settings_rows()
+        .iter()
+        .position(|r| matches!(r, SettingsRow::Mode))
+        .expect("Mode row exists");
+    app.settings_sel = i;
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, Mode::Mission);
 }

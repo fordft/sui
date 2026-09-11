@@ -95,7 +95,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // input
-    let hint = if app.running { "running… (Ctrl+S stop)" } else { "type a task — Enter sends · Ctrl+J newline" };
+    let hint = if app.running { "running… (Ctrl+S stop)" } else { "type a task — Enter sends · Ctrl+N newline · /mission /solo" };
     f.render_widget(
         Paragraph::new(app.input.text())
             .block(Block::default().borders(Borders::ALL).title(hint))
@@ -106,7 +106,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     // footer
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Ctrl+T tabs · Ctrl+M solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit", dim()),
+            Span::styled(" Ctrl+T tabs · Ctrl+O solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit", dim()),
             Span::styled(format!("  {}", app.status), Style::default().fg(Color::Yellow)),
         ])),
         rows[4],
@@ -283,6 +283,16 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 format!("  {:<14} → {}", r.name(), app.role_profile(*r).unwrap_or("—".into())),
                 Style::default(),
             ),
+            SettingsRow::Mode => {
+                let mission = app.mode == crate::tui::app::Mode::Mission;
+                (
+                    format!(
+                        "  run mode: {} (Enter toggles · Ctrl+O · /mission · /solo · sui tui --mission)",
+                        if mission { "mission" } else { "solo" }
+                    ),
+                    if mission { Style::default().fg(Color::Magenta) } else { Style::default() },
+                )
+            }
             SettingsRow::Workers => (
                 format!("  worker concurrency: {} (max 2)", app.ui.worker_count.unwrap_or(1)),
                 Style::default(),
@@ -400,8 +410,8 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from("keys"),
-                    Line::from("  Ctrl+T cycle tabs   Ctrl+M solo/mission   Ctrl+B sidebar"),
-                    Line::from("  Ctrl+J newline in input   PgUp/PgDn scroll   ↑/↓ select"),
+                    Line::from("  Ctrl+T cycle tabs   Ctrl+O solo/mission   Ctrl+B sidebar"),
+                    Line::from("  Ctrl+N newline · /mission /solo   PgUp/PgDn scroll   ↑/↓ select"),
                     Line::from("  Enter send/activate   Esc close modal   Ctrl+S stop run"),
                     Line::from("  Ctrl+Q quit"),
                     Line::from(""),

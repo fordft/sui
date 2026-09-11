@@ -8,7 +8,11 @@ use sui::{agent, config, context, journal, permission, provider, tools};
 #[derive(clap::Subcommand)]
 enum Sub {
     /// Terminal UI: setup, provider/model roles, chat, mission view
-    Tui,
+    Tui {
+        /// Start in mission mode (orchestrator → workers → auditor)
+        #[arg(long)]
+        mission: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -41,8 +45,8 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if matches!(cli.sub, Some(Sub::Tui)) {
-        return sui::tui::run().await;
+    if let Some(Sub::Tui { mission }) = &cli.sub {
+        return sui::tui::run(*mission).await;
     }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
     let cfg = config::load(config::Overrides {

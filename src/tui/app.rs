@@ -684,23 +684,32 @@ impl App {
                 self.tab = Tab::ALL[((self.tab as usize) + 1) % 5]
             }
             (true, KeyCode::Char('b')) => self.sidebar = !self.sidebar,
-            (true, KeyCode::Char('m')) => {
-                self.mode = match self.mode {
-                    Mode::Solo => Mode::Mission,
-                    Mode::Mission => Mode::Solo,
-                };
-                self.ui.mode = Some(match self.mode {
-                    Mode::Solo => "solo".into(),
-                    Mode::Mission => "mission".into(),
-                });
-            }
-            (true, KeyCode::Char('j')) => self.input.insert('\n'),
+            // Ctrl+M is byte 0x0D == Enter in most terminals; Ctrl+O (0x0F)
+            // is the portable chord. 'm' stays for kitty/CSI-u keyboards.
+            (true, KeyCode::Char('m')) | (true, KeyCode::Char('o')) => self.toggle_mode(),
+            (true, KeyCode::Char('j')) | (true, KeyCode::Char('n')) => self.input.insert('\n'),
             (_, KeyCode::F(1)) => self.modal = Some(Modal::Help),
             (_, KeyCode::PageUp) => self.scroll = self.scroll.saturating_add(10),
             (_, KeyCode::PageDown) => self.scroll = self.scroll.saturating_sub(10),
             (_, KeyCode::Enter) => {
                 if self.tab == Tab::Chat && !self.input.is_empty() && !self.running {
                     let task = self.input.text();
+                    if task.starts_with('/') {
+                        match task.as_str() {
+                            "/mission" => {
+                                self.set_mode(Mode::Mission);
+                                self.input.clear();
+                            }
+                            "/solo" => {
+                                self.set_mode(Mode::Solo);
+                                self.input.clear();
+                            }
+                            _ => {
+                                self.status = format!("unknown command '{task}' — /mission /solo");
+                            }
+                        }
+                        return;
+                    }
                     self.input.clear();
                     self.chat.push(ChatItem::User(task.clone()));
                     self.running = true;
@@ -780,6 +789,34 @@ impl App {
                     self.input.insert_str(s);
                 }
             }
+        }
+    }
+
+    /// Flip solo ↔ mission and persist the choice so the next launch
+    /// remembers it (ui.mode in config.toml).
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Solo => Mode::Mission,
+            Mode::Mission => Mode::Solo,
+        };
+        self.ui.mode = Some(match self.mode {
+            Mode::Solo => "solo".into(),
+            Mode::Mission => "mission".into(),
+        });
+        self.effects.push(Effect::SaveUi);
+        self.status = match self.mode {
+            Mode::Solo => "mode: solo (one worker)".into(),
+            Mode::Mission => "mode: mission (orchestrator → workers → auditor)".into(),
+        };
+    }
+    pub fn set_mode(&mut self, m: Mode) {
+        if self.mode != m {
+            self.toggle_mode();
+        } else {
+            self.status = match m {
+                Mode::Solo => "already solo".into(),
+                Mode::Mission => "already mission".into(),
+            };
         }
     }
 
@@ -1124,6 +1161,7 @@ impl App {
         for r in Role::ALL {
             v.push(SettingsRow::Role(r));
         }
+        v.push(SettingsRow::Mode);
         v.push(SettingsRow::Workers);
         v.push(SettingsRow::Auto);
         v.push(SettingsRow::Workspace);
@@ -1168,6 +1206,7 @@ impl App {
                     loading: false,
                 }));
             }
+            Some(SettingsRow::Mode) => self.toggle_mode(),
             Some(SettingsRow::Workers) => {
                 self.ui.worker_count = Some(match self.ui.worker_count {
                     Some(2) => 1,
@@ -1206,6 +1245,7 @@ pub enum SettingsRow {
     AddProfile,
     EditProfile(String),
     Role(Role),
+    Mode,
     Workers,
     Auto,
     Workspace,
