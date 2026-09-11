@@ -7,9 +7,35 @@ one screen.
 
 ## Install
 
+Pick **one** — Homebrew (recommended, macOS + Linux) or the shell installer.
+Don't stack both: they install the same binaries to different prefixes, and
+whichever comes first on PATH wins.
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew install fordft/tap/sui-ai
+sui tui
+```
+
+The `sui-ai` formula installs prebuilt binaries (`sui`, `sui-mission`,
+`sui-certify`) — no Rust or compilation needed. Update with
+`brew upgrade sui-ai`; remove with `brew uninstall sui-ai` (your config,
+credentials, and journals are never touched).
+
+### Shell installer (no Homebrew)
+
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/fordft/sui/releases/latest/download/sui-installer.sh | sh
+```
+
+Checksum-verified alternative (recommended — also checks for a foreign
+`sui` on your PATH):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/fordft/sui/releases/latest/download/install.sh | sh
 ```
 
 Installs to `~/.sui/bin` (user-owned, no sudo). If `~/.sui/bin` isn't on your
@@ -28,14 +54,10 @@ less sui-installer.sh
 sh sui-installer.sh
 ```
 
-**Name-collision guard** — if you already have a different `sui` on PATH (the
-Mysten blockchain toolchain also uses that name), use the guarded wrapper;
-it warns and never overwrites:
-
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/fordft/sui/releases/latest/download/install.sh | sh
-```
+**Name-collision note** — the Mysten blockchain toolchain also ships a `sui`
+command. The shell installer always targets `~/.sui/bin` and never touches
+another installation; `install.sh` additionally warns when a different `sui`
+already owns the name on PATH.
 
 **Rollback** — pin a release:
 

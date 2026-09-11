@@ -4,6 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "cache-first multi-agent coding harness"
 repository = "https://github.com/fordft/sui"
+homepage = "https://github.com/fordft/sui"
 
 [dependencies]
 anyhow = "1"
