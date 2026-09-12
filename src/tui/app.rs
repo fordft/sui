@@ -451,25 +451,32 @@ impl App {
         ui: UiSettings,
     ) -> Self {
         let no_profiles = profiles.is_empty();
-        let mut session_keys = BTreeMap::new();
-        for name in profiles.keys() {
-            match keyring::Entry::new("sui", name).and_then(|e| e.get_password()) {
-                Ok(k) => {
-                    session_keys.insert(name.clone(), k);
-                }
-                Err(_) => {}
-            }
-        }
         // authoritative probe: NoEntry on reads proves nothing — a write
         // must round-trip before we call the keyring usable (headless
-        // boxes report NoEntry forever and would silently drop keys)
-        let keyring_ok = keyring::Entry::new("sui", "__probe__")
-            .and_then(|e| {
-                e.set_password("x")?;
-                let _ = e.delete_credential();
-                Ok(())
-            })
-            .is_ok();
+        // boxes report NoEntry forever and would silently drop keys).
+        // Once per process: on a dbus-less box each secret-service call
+        // can block tens of seconds, and probing per App would hang CI.
+        static KEYRING_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let keyring_ok = *KEYRING_OK.get_or_init(|| {
+            keyring::Entry::new("sui", "__probe__")
+                .and_then(|e| {
+                    e.set_password("x")?;
+                    let _ = e.delete_credential();
+                    Ok(())
+                })
+                .is_ok()
+        });
+        let mut session_keys = BTreeMap::new();
+        if keyring_ok {
+            for name in profiles.keys() {
+                match keyring::Entry::new("sui", name).and_then(|e| e.get_password()) {
+                    Ok(k) => {
+                        session_keys.insert(name.clone(), k);
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
         Self {
             screen: if no_profiles { Screen::Setup } else { Screen::Main },
             tab: Tab::Chat,

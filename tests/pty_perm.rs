@@ -279,7 +279,13 @@ fn pty_ctrl_s_stops_during_permission() {
     wait_for("stop to settle the run", Duration::from_secs(10), || {
         count(&p.buf, "run finished") > 0
     });
-    assert!(!repo.join("out/perm1.txt").exists());
+    if repo.join("out/perm1.txt").exists() {
+        // forensic: dump the transcript tail — an approve path would be
+        // visible as the decision or the tool result text
+        let b = p.buf.lock().unwrap();
+        let s = String::from_utf8_lossy(&b);
+        panic!("perm1.txt written despite stop — transcript tail:\n{}", &s[s.len().saturating_sub(3000)..]);
+    }
     let _ = p.child.kill();
     let _ = p.child.wait();
 }
