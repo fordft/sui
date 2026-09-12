@@ -182,6 +182,13 @@ impl Agent {
         self.journal.log("user", json!({ "content": user_input }));
     }
 
+    /// Direct journal write for run-boundary evidence the agent loop does
+    /// not itself produce (task start/end, approval policy). Kept out of
+    /// `history` — never model-visible.
+    pub fn jlog(&mut self, kind: &str, data: Value) {
+        self.journal.log(kind, data);
+    }
+
     /// The agent loop without pushing a new user message — safe to call
     /// again after a failed request (no duplicate user turn).
     pub async fn drive(&mut self) -> Result<()> {

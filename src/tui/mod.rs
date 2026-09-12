@@ -88,6 +88,7 @@ pub fn spawn_solo(
 ) -> Solo {
     let (tx, mut rx) = unbounded_channel::<String>();
     let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
+    let workspace_for_log = workspace.display().to_string();
     tokio::spawn(async move {
         let mut agent = Agent::new(
             Provider::new(&prof.base_url, prof.api_key.clone(), prof.model.clone(), prof.prompt_cache_key.clone()),
@@ -126,14 +127,25 @@ pub fn spawn_solo(
             },
         );
         agent.set_quiet(true);
-        agent.wire_ui(sink.clone(), cancel, flag, Some(session));
+        agent.wire_ui(sink.clone(), cancel, flag, Some(session.clone()));
+        agent.jlog("session", serde_json::json!({
+            "mode": "solo",
+            "workspace": workspace_for_log,
+            "sui_version": env!("CARGO_PKG_VERSION"),
+        }));
         while let Some(msg) = rx.recv().await {
+            agent.jlog("task", serde_json::json!({
+                "task": msg,
+                "approval": if session.load(std::sync::atomic::Ordering::Relaxed) { "auto" } else { "ask" },
+            }));
             let r = agent.run_turn(&msg).await;
             match r {
                 Ok(()) => {
+                    agent.jlog("task_done", serde_json::json!({ "outcome": "done" }));
                     let _ = sink.send(UiEvent::RunDone { outcome: "done".into(), accepted_sha: None });
                 }
                 Err(e) => {
+                    agent.jlog("task_done", serde_json::json!({ "outcome": format!("error: {e:#}") }));
                     let _ = sink.send(UiEvent::Error { agent: "solo".into(), msg: format!("{e:#}") });
                     let _ = sink.send(UiEvent::RunDone { outcome: format!("error: {e:#}"), accepted_sha: None });
                 }
@@ -179,12 +191,13 @@ pub async fn run(force_mission: bool) -> Result<()> {
     }));
 
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
+    let jdir = run_dir();
     let mut app = App::new(workspace.clone());
+    app.run_dir = Some(jdir.clone());
     if force_mission {
         app.mode = app::Mode::Mission;
         app.ui.mode = Some("mission".into());
     }
-    let jdir = run_dir();
 
     let (ev_tx, mut ev_rx) = unbounded_channel::<UiEvent>();
     let (ctl_tx, mut ctl_rx) = unbounded_channel::<Ctl>();
@@ -384,6 +397,32 @@ pub async fn run(force_mission: bool) -> Result<()> {
                             let _ = ctl_tx.send(Ctl::ProfileSaved);
                         }
                         Err(e) => app.status = format!("save failed: {e:#}"),
+                    }
+                }
+                Effect::ExportRun => {
+                    match app.run_dir.clone().map(|d| {
+                        d.file_name().unwrap().to_string_lossy().to_string()
+                    }) {
+                        Some(id) => {
+                            match crate::export::run_export(&crate::export::ExportOpts {
+                                run_id: Some(id),
+                                latest_for_workspace: None,
+                                format: crate::export::Format::Markdown,
+                                include_diff: false,
+                                runs_root: None,
+                                out_root: None,
+                                running: app.running,
+                            }) {
+                                Ok(p) => {
+                                    app.status = format!(
+                                        "report: {} — review before sharing",
+                                        p.display()
+                                    );
+                                }
+                                Err(e) => app.status = format!("export: {e:#}"),
+                            }
+                        }
+                        None => app.status = "export: no run dir".into(),
                     }
                 }
                 Effect::SaveUi => {

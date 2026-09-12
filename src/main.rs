@@ -13,6 +13,21 @@ enum Sub {
         #[arg(long)]
         mission: bool,
     },
+    /// Export a recorded run's journals into a sanitized report (no API calls)
+    Export {
+        /// Export the latest run associated with the current workspace
+        #[arg(long)]
+        latest: bool,
+        /// Run id — the runs/<id> directory name or a unique prefix
+        #[arg(long)]
+        run: Option<String>,
+        /// markdown (default) or json
+        #[arg(long, default_value = "markdown", value_parser = ["markdown", "json"])]
+        format: String,
+        /// Include a bounded git diff between recorded base and accepted sha
+        #[arg(long)]
+        include_diff: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -47,6 +62,31 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Sub::Tui { mission }) = &cli.sub {
         return sui::tui::run(*mission).await;
+    }
+    if let Some(Sub::Export { latest, run, format, include_diff }) = &cli.sub {
+        if !latest && run.is_none() {
+            anyhow::bail!("specify --latest or --run <run-id> (see ~/.local/share/sui/runs/)");
+        }
+        let path = sui::export::run_export(&sui::export::ExportOpts {
+            run_id: run.clone(),
+            latest_for_workspace: if *latest {
+                std::env::current_dir().ok()
+            } else {
+                None
+            },
+            format: if format == "json" {
+                sui::export::Format::Json
+            } else {
+                sui::export::Format::Markdown
+            },
+            include_diff: *include_diff,
+            runs_root: None,
+            out_root: None,
+            running: false,
+        })?;
+        println!("Report exported:\n  {}", path.display());
+        println!("\nReview before sharing: the report may contain project code and commands.");
+        return Ok(());
     }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
     let cfg = config::load(config::Overrides {

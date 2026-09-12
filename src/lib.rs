@@ -2,6 +2,7 @@ pub mod agent;
 pub mod config;
 pub mod context;
 pub mod events;
+pub mod export;
 pub mod journal;
 pub mod mission;
 pub mod permission;

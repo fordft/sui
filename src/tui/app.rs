@@ -363,6 +363,8 @@ pub enum Effect {
     Quit,
     SaveProfile { name: String, base_url: String, model: String, key_env: Option<String>, key: Option<String>, store: Store },
     SaveUi,
+    /// Export this session's journals to a sanitized report file.
+    ExportRun,
     FetchModels { base_url: String, key: Option<String>, target: PickTarget },
     Probe { name: String, base_url: String, model: String, key: Option<String> },
     KeyringStore { profile: String, key: String },
@@ -404,6 +406,9 @@ pub struct App {
     /// cleared by the toggle, workspace change, and restart. Never
     /// persisted — every launch starts in Ask.
     pub auto: Arc<AtomicBool>,
+    /// This TUI session's journal dir (~/.local/share/sui/runs/<id>) —
+    /// the exportable run unit. None in tests.
+    pub run_dir: Option<PathBuf>,
     /// Physical keys currently held (Press seen, no Release yet). Used to
     /// deduplicate permission decisions: a Release only counts as a
     /// decision when no matching Press is outstanding — so on terminals
@@ -495,6 +500,7 @@ impl App {
             effects: vec![],
             keyring_ok,
             auto: Arc::new(AtomicBool::new(false)),
+            run_dir: None,
             held: std::collections::HashSet::new(),
         }
     }
@@ -704,8 +710,12 @@ impl App {
                                 self.set_mode(Mode::Solo);
                                 self.input.clear();
                             }
+                            "/export" => {
+                                self.effects.push(Effect::ExportRun);
+                                self.input.clear();
+                            }
                             _ => {
-                                self.status = format!("unknown command '{task}' — /mission /solo");
+                                self.status = format!("unknown command '{task}' — /mission /solo /export");
                             }
                         }
                         return;
@@ -1162,6 +1172,7 @@ impl App {
             v.push(SettingsRow::Role(r));
         }
         v.push(SettingsRow::Mode);
+        v.push(SettingsRow::Export);
         v.push(SettingsRow::Workers);
         v.push(SettingsRow::Auto);
         v.push(SettingsRow::Workspace);
@@ -1207,6 +1218,9 @@ impl App {
                 }));
             }
             Some(SettingsRow::Mode) => self.toggle_mode(),
+            Some(SettingsRow::Export) => {
+                self.effects.push(Effect::ExportRun);
+            }
             Some(SettingsRow::Workers) => {
                 self.ui.worker_count = Some(match self.ui.worker_count {
                     Some(2) => 1,
@@ -1246,6 +1260,7 @@ pub enum SettingsRow {
     EditProfile(String),
     Role(Role),
     Mode,
+    Export,
     Workers,
     Auto,
     Workspace,

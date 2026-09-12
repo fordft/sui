@@ -91,6 +91,29 @@ permission prompt is open.
 Non-TUI paths still work: `sui` (REPL), `sui "task"` (one-shot),
 `sui-mission`, `sui-certify`.
 
+### Export a run report
+
+Every run journals to `~/.local/share/sui/runs/<run-id>/` (requests, messages,
+tool calls with exit codes, mission gates, audit verdicts). Turn one into a
+single readable file — for sharing, debugging, or review by another agent:
+
+```bash
+sui export --latest              # newest run for the current workspace
+sui export --run <run-id>        # a specific run
+sui export --run <id> --format json
+sui export --run <id> --include-diff   # bounded git diff of the accepted candidate
+```
+
+In the TUI: **Settings → export run report**, or `/export` in the input box —
+works during or after a run (live exports are labeled partial snapshots).
+
+Reports land at `~/.local/share/sui/exports/<run-id>/report.md` (mode `0600`)
+and are built from the journals, not the screen — full tool results, gate
+exit codes, and the auditor's verdict, with credentials/authorization
+material redacted best-effort. Missing data shows as "Not recorded"/"Unknown",
+never invented. **Review before sharing** — the report can contain project
+code and commands. Export makes no API calls and needs no credentials.
+
 ## Update / uninstall
 
 **Update**: rerun the installer. Profiles, role/model selections, OS-keyring

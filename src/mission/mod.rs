@@ -234,6 +234,33 @@ pub struct TaskOut {
     /// The revision this task's worktree was actually created from —
     /// ownership diffs must compare against this, not a recomputed tip.
     pub task_base: String,
+    /// Deterministic gate evidence (ownership + acceptance commands) —
+    /// journaled as part of task_result for the run export.
+    pub gates: Vec<Value>,
+}
+
+/// One gate record: a command the runtime itself executed, not a model
+/// claim. Output tails are bounded; truncation is flagged.
+fn gate_rec(kind: &str, cmd: &str, cwd: &Path, out: &crate::tools::bash::ProcOut) -> Value {
+    let tail = |s: &str| -> String {
+        if s.len() > 4000 {
+            format!("{}…<truncated>", &s[..4000])
+        } else {
+            s.to_string()
+        }
+    };
+    json!({
+        "kind": kind,
+        "cmd": cmd,
+        "cwd": cwd.file_name().map(|n| format!("worktrees/{}", n.to_string_lossy()))
+            .unwrap_or_else(|| cwd.display().to_string()),
+        "exit_code": out.code,
+        "ok": out.code == Some(0),
+        "timed_out": out.timed_out,
+        "truncated": out.truncated,
+        "stdout_tail": tail(&out.stdout),
+        "stderr_tail": tail(&out.stderr),
+    })
 }
 
 /// Which revision a task's worktree branches from: the mission base for
@@ -309,6 +336,7 @@ async fn finish_task(
         changed: vec![],
         capsule: String::new(),
         task_base: base.to_string(),
+        gates: vec![],
     };
     let changed = worktree::changed_files(wt, base)?;
     out.changed = changed.clone();
@@ -321,8 +349,27 @@ async fn finish_task(
         .filter(|f| !plan::path_owned(f, &c.owned_paths))
         .cloned()
         .collect();
-    if !oos.is_empty() {
-        out.capsule = capsule("out_of_scope", &format!("changed: {}", oos.join(", ")));
+    let in_scope = oos.is_empty();
+    out.gates.push(json!({
+        "kind": "ownership",
+        "cmd": format!("changed files ⊆ owned_paths ({})", c.owned_paths.join(", ")),
+        "cwd": wt.file_name().map(|n| format!("worktrees/{}", n.to_string_lossy()))
+            .unwrap_or_else(|| wt.display().to_string()),
+        "changed": changed,
+        "out_of_scope": oos,
+        "ok": in_scope,
+    }));
+    if !in_scope {
+        out.capsule = capsule("out_of_scope", &format!(
+            "changed: {}",
+            out.gates[0]["out_of_scope"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         return Ok(out);
     }
     out.sha = worktree::commit_all(wt, &format!("task {} [{}]", c.id, cfg.session))?;
@@ -335,6 +382,7 @@ async fn finish_task(
             std::future::pending(),
         )
         .await?;
+        out.gates.push(gate_rec("acceptance", cmd, wt, &r));
         if r.code != Some(0) {
             out.capsule = capsule(
                 "acceptance",
@@ -509,6 +557,18 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     let t0 = Instant::now();
     let mut journal = Journal::open_named(&cfg.run_dir, "mission")?;
     std::fs::create_dir_all(worktree::worktrees_dir(&cfg.run_dir))?;
+    journal.log("session", json!({
+        "mode": "mission",
+        "workspace": cfg.repo,
+        "sui_version": env!("CARGO_PKG_VERSION"),
+        "approval": if cfg.session_approve.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false) {
+            "auto"
+        } else if cfg.events.is_some() {
+            "ask"
+        } else {
+            "auto (unattended)"
+        },
+    }));
 
     let mut report = MissionReport {
         outcome: "running".into(),
@@ -597,6 +657,14 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
         }
     }
     report.elapsed_ms = t0.elapsed().as_millis();
+    journal.log("result", json!({
+        "outcome": report.outcome,
+        "accepted_sha": report.accepted_sha,
+        "branch": report.branch,
+        "elapsed_ms": report.elapsed_ms,
+        "repairs": report.repairs,
+        "escalations": report.escalations,
+    }));
 
     // worktrees persist on failure/cancel for inspection; cleaned on accept
     if report.outcome == "accepted" && !cfg.keep_worktrees {
@@ -732,6 +800,7 @@ async fn body(
                     changed: vec![],
                     capsule: capsule("runtime", &e),
                     task_base: task_base.clone(),
+                    gates: vec![],
                 },
             };
             if !out.ok {
@@ -785,6 +854,16 @@ async fn body(
                     "sha": out.sha, "changed": out.changed }));
                 if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
             }
+            journal.log("task_result", json!({
+                "id": contract.id,
+                "ok": out.ok,
+                "branch": out.branch,
+                "sha": out.sha,
+                "changed": out.changed,
+                "task_base": out.task_base,
+                "capsule": out.capsule,
+                "gates": out.gates,
+            }));
             // serialize integration: merge each passing task immediately
             state!(S::Integrating);
             if let Err(e) = worktree::merge(&integ_wt, &out.branch) {
@@ -837,6 +916,7 @@ async fn body(
             std::future::pending(),
         )
         .await?;
+        journal.log("gate", gate_rec("integration", cmd, &integ_wt, &r));
         if r.code != Some(0) {
             fail!(format!(
                 "integration check '{cmd}' failed (exit {:?})\n{}\n{}",
@@ -864,6 +944,7 @@ async fn body(
             Err(e) => fail!(format!("audit error: {e:#}")),
         };
         report.audit = Some(payload.clone());
+        journal.log("audit", payload.clone());
         if let Some(tx) = &cfg.events {
             let _ = tx.send(crate::events::UiEvent::AuditResult(payload.clone()));
         }
@@ -900,6 +981,7 @@ async fn body(
                 changed: vec![],
                 capsule: capsule("audit", &fixes_msg),
                 task_base: tb.clone(),
+                gates: vec![],
             };
             if let Ok(o) = repair_task(cfg, &t, &prev, &tb).await {
                 if o.ok {

@@ -934,3 +934,27 @@ fn mission_mode_alternate_paths() {
     app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.mode, Mode::Mission);
 }
+
+/// Settings → export row pushes the effect; /export does the same.
+#[test]
+fn export_run_triggers() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.tab = Tab::Settings;
+    let i = app
+        .settings_rows()
+        .iter()
+        .position(|r| matches!(r, SettingsRow::Export))
+        .expect("Export row exists");
+    app.settings_sel = i;
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.effects.iter().any(|e| matches!(e, Effect::ExportRun)));
+
+    app.tab = Tab::Chat;
+    app.input.insert_str("/export");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.effects.iter().filter(|e| matches!(e, Effect::ExportRun)).count(),
+        2
+    );
+}

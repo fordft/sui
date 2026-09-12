@@ -539,3 +539,58 @@ async fn mission_two_workers_parallel_wave() {
     assert_eq!(r.outcome, "accepted", "tasks: {:?}", r.tasks);
     assert!(repo_clean(&repo));
 }
+
+/// Full pipeline: run a real (mocked) mission, then export its journal
+/// directory — the same code path the TUI Export action uses.
+#[tokio::test]
+async fn mission_export_report() {
+    let _g = lock().lock().unwrap();
+    let repo = fixture_repo();
+    let base = head(&repo);
+    let port = mock(Script {
+        plan_payload: good_plan(&base),
+        worker_routes: vec![],
+        worker_first: worker_writes("out/ok.txt", "ok\n"),
+        worker_repair: json!("text"),
+        audit_verdicts: vec!["PASS".into()],
+        escalation: json!({"decision": "abort"}),
+    });
+    let mut c = cfg(port, &repo);
+    // run_dir must sit under a "runs" root so the exporter can resolve it
+    let runs = std::env::temp_dir().join(format!("sui-expruns-{}", std::process::id()));
+    let out = runs.join("../exp-out");
+    c.run_dir = runs.join("m-1");
+    let r = mission::run(c).await.unwrap();
+    assert_eq!(r.outcome, "accepted");
+
+    let p = sui::export::run_export(&sui::export::ExportOpts {
+        run_id: Some("m-1".into()),
+        latest_for_workspace: None,
+        format: sui::export::Format::Markdown,
+        include_diff: true,
+        runs_root: Some(runs.clone()),
+        out_root: Some(out),
+        running: false,
+    })
+    .unwrap();
+    let md = std::fs::read_to_string(&p).unwrap();
+    for must in [
+        "Run overview",
+        "test objective",
+        "mission",
+        "Planning",
+        "w-W1",
+        "Executed successfully",
+        "acceptance",
+        "PASS",
+        "accepted sha",
+        "Usage and timing",
+        "Limitations",
+    ] {
+        assert!(md.contains(must), "report missing {must:?}:\n{md}");
+    }
+    // gate evidence shows the acceptance command + exit code, not claims
+    assert!(md.contains("test -f out/ok.txt"), "acceptance cmd recorded");
+    // secrets never appear
+    assert!(!md.contains("api_key"));
+}

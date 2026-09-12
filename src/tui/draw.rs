@@ -293,6 +293,10 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                     if mission { Style::default().fg(Color::Magenta) } else { Style::default() },
                 )
             }
+            SettingsRow::Export => (
+                "  export run report → ~/.local/share/sui/exports/<run>/report.md".into(),
+                Style::default(),
+            ),
             SettingsRow::Workers => (
                 format!("  worker concurrency: {} (max 2)", app.ui.worker_count.unwrap_or(1)),
                 Style::default(),
