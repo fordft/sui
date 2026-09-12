@@ -50,7 +50,7 @@ impl Gate {
     }
 
     /// Returns true if the action may proceed.
-    pub async fn check(&mut self, summary: &str) -> bool {
+    pub async fn check(&mut self, summary: &str, agent: &str) -> bool {
         if self.open() {
             // Under a UI (sink set) raw writes would corrupt the alt screen.
             if self.sink.is_none() {
@@ -63,6 +63,7 @@ impl Gate {
             let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = tx.send(UiEvent::Permission {
                 id: self.seq,
+                agent: agent.to_string(),
                 summary: summary.to_string(),
                 reply: reply_tx,
             });

@@ -41,7 +41,19 @@ pub fn draw(f: &mut Frame, app: &App) {
             Span::styled(" SUI ", acc().add_modifier(Modifier::BOLD)),
             Span::styled(format!("· workspace: {ws} · Mode: {mode}"), dim()),
             Span::styled(
-                if app.running { " · RUNNING" } else { "" },
+                if app.running {
+                    const SPIN: &[char] = &['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+                    let e = app.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                    // wall-clock driven — animates on the heartbeat redraw
+                    let frame = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        / 100) as usize;
+                    format!(" · {} RUNNING {e}s", SPIN[frame % SPIN.len()])
+                } else {
+                    String::new()
+                },
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
@@ -104,16 +116,56 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
 
     // footer
+    let keys = " Ctrl+T tabs · Ctrl+O solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit";
+    let room = (area.width as usize).saturating_sub(keys.len() + 3);
+    let st = if app.status.chars().count() > room && room > 12 {
+        // middle-truncate long paths/messages instead of clipping the tail
+        let keep = room - 1;
+        let head = keep / 2;
+        let tail = keep - head;
+        let mut h: String = app.status.chars().take(head).collect();
+        h.push('…');
+        let t: String = {
+            let cs: Vec<char> = app.status.chars().collect();
+            cs[cs.len() - tail..].iter().collect()
+        };
+        format!("{h}{t}")
+    } else {
+        app.status.clone()
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" Ctrl+T tabs · Ctrl+O solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit", dim()),
-            Span::styled(format!("  {}", app.status), Style::default().fg(Color::Yellow)),
+            Span::styled(keys, dim()),
+            Span::styled(format!("  {st}"), Style::default().fg(Color::Yellow)),
         ])),
         rows[4],
     );
 
     if let Some(m) = &app.modal {
         draw_modal(f, app, m, area);
+    } else if app.tab == Tab::Chat {
+        // visible caret — map the cursor char-index through wrap+newlines
+        let w = rows[3].width.saturating_sub(2).max(1) as usize;
+        let (mut cy, mut cx) = (0usize, 0usize);
+        for (i, ch) in app.input.text().chars().enumerate() {
+            if i == app.input.cursor {
+                break;
+            }
+            if ch == '\n' {
+                cy += 1;
+                cx = 0;
+            } else {
+                cx += 1;
+                if cx >= w {
+                    cy += 1;
+                    cx = 0;
+                }
+            }
+        }
+        // clamp inside the box — the paragraph doesn't scroll, so a
+        // longer input clips and the caret must stay on its last row
+        let cy = cy.min(rows[3].height.saturating_sub(2).saturating_sub(1) as usize);
+        f.set_cursor_position((rows[3].x + 1 + cx.min(w - 1) as u16, rows[3].y + 1 + cy as u16));
     }
 }
 
@@ -121,20 +173,20 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
     let mut lines: Vec<Line> = vec![];
     for it in &app.chat {
         match it {
-            ChatItem::User(t) => {
-                lines.push(Line::from(Span::styled(
-                    "you",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                )));
+            ChatItem::User { text: t, at } => {
+                lines.push(Line::from(vec![
+                    Span::styled("you", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  {at}"), dim()),
+                ]));
                 for l in t.lines() {
                     lines.push(Line::from(format!("  {l}")));
                 }
             }
-            ChatItem::Assistant { agent, text, .. } => {
-                lines.push(Line::from(Span::styled(
-                    format!("{agent}"),
-                    acc().add_modifier(Modifier::BOLD),
-                )));
+            ChatItem::Assistant { agent, text, at, .. } => {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{agent}"), acc().add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  {at}"), dim()),
+                ]));
                 for l in text.lines() {
                     lines.push(Line::from(format!("  {l}")));
                 }
@@ -149,7 +201,7 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {mark} {name}: "), Style::default().fg(Color::Magenta)),
-                    Span::styled(summary.clone(), dim()),
+                    Span::styled(summary.lines().next().unwrap_or("").to_string(), dim()),
                 ]));
                 if *done && !result.is_empty() {
                     for l in result.lines().take(4) {
@@ -157,8 +209,8 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
                     }
                 }
             }
-            ChatItem::Sys(t) => {
-                lines.push(Line::from(Span::styled(format!("· {t}"), dim())));
+            ChatItem::Sys { text: t, at } => {
+                lines.push(Line::from(Span::styled(format!("· {t}  {at}"), dim())));
             }
         }
     }
@@ -166,8 +218,13 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
     let total = lines.len();
     let top = total.saturating_sub(inner_h).saturating_sub(app.scroll);
     let view: Vec<Line> = lines.into_iter().skip(top).take(inner_h).collect();
+    let title = if app.scroll > 0 {
+        format!("conversation — scrolled ▲ {} rows · PgDn to resume", app.scroll)
+    } else {
+        "conversation".into()
+    };
     f.render_widget(
-        Paragraph::new(view).block(Block::default().borders(Borders::ALL).title("conversation")),
+        Paragraph::new(view).block(Block::default().borders(Borders::ALL).title(title)),
         a,
     );
 }
@@ -221,7 +278,10 @@ fn draw_changes(f: &mut Frame, app: &App, a: Rect) {
     }
     if !app.diff_text.is_empty() {
         items.push(ListItem::new(""));
-        items.push(ListItem::new(Span::styled("diff:", acc())));
+        items.push(ListItem::new(Span::styled(
+            "working tree vs HEAD (mission edits live on sui-mission-* branches):",
+            acc(),
+        )));
         for l in app.diff_text.lines().take(30) {
             items.push(ListItem::new(Span::styled(format!("  {l}"), dim())));
         }
@@ -294,7 +354,7 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 )
             }
             SettingsRow::Export => (
-                "  export run report → ~/.local/share/sui/exports/<run>/report.md".into(),
+                "  export run report → exports/<run>/report.md (or /export)".into(),
                 Style::default(),
             ),
             SettingsRow::Workers => (
@@ -312,7 +372,7 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 )
             }
             SettingsRow::Workspace => (
-                format!("  workspace: {}", app.workspace.display()),
+                format!("  workspace (applies on next launch): {}", app.workspace.display()),
                 Style::default(),
             ),
             SettingsRow::Acceptance => (
@@ -363,15 +423,24 @@ fn draw_sidebar(f: &mut Frame, app: &App, a: Rect) {
         v[0],
     );
 
-    let elapsed = app
-        .started
-        .map(|s| format!("{:?}", s.elapsed()))
+    let run_id = app
+        .run_dir
+        .as_ref()
+        .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "—".into());
     let run_lines = vec![
         Line::from(format!("stage:   {}", app.stage)),
-        Line::from(format!("elapsed: {}", if app.running { elapsed.as_str() } else { "—" })),
+        Line::from(format!(
+            "elapsed: {}",
+            if app.running {
+                format!("{}s", app.started.map(|s| s.elapsed().as_secs()).unwrap_or(0))
+            } else {
+                "—".into()
+            }
+        )),
         Line::from(format!("outcome: {}", if app.outcome.is_empty() { "—" } else { &app.outcome })),
-        Line::from(Span::styled("est. cost: —", dim())),
+        Line::from(Span::styled(format!("run: {run_id}"), dim())),
+        Line::from(Span::styled("export: /export or sui export", dim())),
     ];
     f.render_widget(
         Paragraph::new(run_lines).block(Block::default().borders(Borders::ALL).title("run")),
@@ -395,16 +464,31 @@ fn centered(w: u16, h: u16, a: Rect) -> Rect {
 
 fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     match m {
-        Modal::Permission { summary, .. } => {
-            let r = centered(60, 7, area);
+        Modal::Permission { agent, summary, .. } => {
+            let r = centered(76, 12, area);
+            let more = app.pending_perms.len();
+            let title = format!(
+                "permission — {agent}{} — [y] once [a] session [n/Esc] deny",
+                if more > 0 { format!(" · +{more} pending") } else { String::new() }
+            );
+            // bounded preview: never approve a command you can't read —
+            // heredocs/very long commands show head lines + a marker
+            let sl: Vec<&str> = summary.lines().collect();
+            let show = 8usize;
+            let mut lines: Vec<Line> = sl.iter().take(show).map(|l| Line::from((*l).to_string())).collect();
+            if sl.len() > show {
+                lines.push(Line::from(Span::styled(
+                    format!("… {} more line(s) — review the full command in the run export", sl.len() - show),
+                    dim(),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("[y/Y] once   [a/A] session   [n/N/Esc] deny", acc())));
             f.render_widget(Clear, r);
             f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(summary.clone()),
-                    Line::from(""),
-                    Line::from(Span::styled("[y/Y] once   [a/A] session   [n/N/Esc] deny", acc())),
-                ])
-                .block(Block::default().borders(Borders::ALL).title("permission")),
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .block(Block::default().borders(Borders::ALL).title(title)),
                 r,
             );
         }
@@ -415,9 +499,9 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 Paragraph::new(vec![
                     Line::from("keys"),
                     Line::from("  Ctrl+T cycle tabs   Ctrl+O solo/mission   Ctrl+B sidebar"),
-                    Line::from("  Ctrl+N newline · /mission /solo   PgUp/PgDn scroll   ↑/↓ select"),
-                    Line::from("  Enter send/activate   Esc close modal   Ctrl+S stop run"),
-                    Line::from("  Ctrl+Q quit"),
+                    Line::from("  Ctrl+N newline   PgUp/PgDn scroll   ↑ recall last task (input empty)"),
+                    Line::from("  Enter send/activate   Esc close/back   Ctrl+S stop   Ctrl+Q quit"),
+                    Line::from("  /mission /solo /export /help — settings: run mode · export report"),
                     Line::from(""),
                     Line::from("shell execution is NOT a sandbox — approvals are per-action"),
                     Line::from("keys are masked on entry; env var or session storage only"),

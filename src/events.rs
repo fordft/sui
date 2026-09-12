@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub type Sink = UnboundedSender<UiEvent>;
 
 /// What the user chose on a permission modal.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateChoice {
     Once,
     Session,
@@ -35,8 +35,11 @@ pub enum UiEvent {
         complete: bool,
     },
     /// A mutating tool needs a decision; reply goes on `reply`.
+    /// `agent` identifies who is asking — a mission can have several
+    /// pending at once, and 'a' approves the whole session.
     Permission {
         id: u64,
+        agent: String,
         summary: String,
         reply: tokio::sync::mpsc::UnboundedSender<GateChoice>,
     },

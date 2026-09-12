@@ -327,10 +327,19 @@ impl Role {
 
 #[derive(Clone)]
 pub enum ChatItem {
-    User(String),
-    Assistant { agent: String, text: String, live: bool },
-    Tool { agent: String, name: String, summary: String, done: bool, ok: bool, result: String },
-    Sys(String),
+    User { text: String, at: String },
+    Assistant { agent: String, text: String, live: bool, at: String },
+    Tool { agent: String, name: String, summary: String, done: bool, ok: bool, result: String, at: String },
+    Sys { text: String, at: String },
+}
+
+/// Wall-clock HH:MM UTC label for chat items — dim, and honest about TZ.
+pub fn now_hm() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{:02}:{:02}Z", (secs / 3600) % 24, (secs / 60) % 60)
 }
 
 #[derive(Clone)]
@@ -344,7 +353,7 @@ pub struct TaskRow {
 pub enum Modal {
     Provider(ProvForm),
     Picker(Picker),
-    Permission { id: u64, summary: String, reply: UnboundedSender<GateChoice> },
+    Permission { id: u64, agent: String, summary: String, reply: UnboundedSender<GateChoice> },
     ConfirmTest { name: String }, // warn: probe costs one small request
     Text { title: String, buf: Buf, target: TextTarget },
     Help,
@@ -409,6 +418,13 @@ pub struct App {
     /// This TUI session's journal dir (~/.local/share/sui/runs/<id>) —
     /// the exportable run unit. None in tests.
     pub run_dir: Option<PathBuf>,
+    /// Permission asks that arrived while one was already open — a
+    /// mission can have several workers wanting approval at once.
+    /// Replies stay parked here; nothing is denied by overwrite.
+    pub pending_perms: std::collections::VecDeque<(u64, String, String, tokio::sync::mpsc::UnboundedSender<crate::events::GateChoice>)>,
+    /// Submitted tasks, oldest first — Up recalls when input is empty.
+    pub history: Vec<String>,
+    pub hist_i: Option<usize>,
     /// Physical keys currently held (Press seen, no Release yet). Used to
     /// deduplicate permission decisions: a Release only counts as a
     /// decision when no matching Press is outstanding — so on terminals
@@ -463,7 +479,7 @@ impl App {
                 _ => Mode::Solo,
             },
             input: Buf::new(),
-            chat: vec![ChatItem::Sys("welcome — configure a provider (Settings → add), pick models per role, then type a task".into())],
+            chat: vec![ChatItem::Sys { text: "welcome — configure a provider (Settings → add), pick models per role, then type a task".into(), at: now_hm() }],
             scroll: 0,
             tasks: vec![],
             changes: vec![],
@@ -501,6 +517,9 @@ impl App {
             keyring_ok,
             auto: Arc::new(AtomicBool::new(false)),
             run_dir: None,
+            pending_perms: Default::default(),
+            history: Vec::new(),
+            hist_i: None,
             held: std::collections::HashSet::new(),
         }
     }
@@ -556,12 +575,12 @@ impl App {
                         t.push_str(&text);
                     }
                 } else {
-                    self.chat.push(ChatItem::Assistant { agent, text, live: true });
+                    self.chat.push(ChatItem::Assistant { agent, text, live: true, at: now_hm() });
                 }
             }
             UiEvent::ToolStart { agent, name, summary } => {
                 self.chat.push(ChatItem::Tool {
-                    agent, name, summary, done: false, ok: false, result: String::new(),
+                    agent, name, summary, done: false, ok: false, result: String::new(), at: now_hm(),
                 });
             }
             UiEvent::ToolDone { agent, name, ms, ok, result } => {
@@ -587,8 +606,14 @@ impl App {
                 u.cache_write += written.unwrap_or(0);
                 u.output += output.unwrap_or(0);
             }
-            UiEvent::Permission { id, summary, reply } => {
-                self.modal = Some(Modal::Permission { id, summary, reply });
+            UiEvent::Permission { id, agent, summary, reply } => {
+                // never overwrite an open prompt — the dropped reply
+                // channel would silently deny the parked request
+                if matches!(self.modal, Some(Modal::Permission { .. })) {
+                    self.pending_perms.push_back((id, agent, summary, reply));
+                } else {
+                    self.modal = Some(Modal::Permission { id, agent, summary, reply });
+                }
             }
             UiEvent::MissionState(s) => {
                 self.stage = s;
@@ -621,10 +646,10 @@ impl App {
                 if let Some(s) = accepted_sha {
                     self.accepted_sha = Some(s);
                 }
-                self.chat.push(ChatItem::Sys(format!("run finished: {outcome}")));
+                self.chat.push(ChatItem::Sys { text: format!("run finished: {outcome}"), at: now_hm() });
             }
             UiEvent::Error { agent, msg } => {
-                self.chat.push(ChatItem::Sys(format!("error [{agent}]: {msg}")));
+                self.chat.push(ChatItem::Sys { text: format!("error [{agent}]: {msg}"), at: now_hm() });
             }
         }
     }
@@ -693,12 +718,16 @@ impl App {
             // Ctrl+M is byte 0x0D == Enter in most terminals; Ctrl+O (0x0F)
             // is the portable chord. 'm' stays for kitty/CSI-u keyboards.
             (true, KeyCode::Char('m')) | (true, KeyCode::Char('o')) => self.toggle_mode(),
-            (true, KeyCode::Char('j')) | (true, KeyCode::Char('n')) => self.input.insert('\n'),
+            // NB: Ctrl+J is 0x0A = Enter on legacy terminals — binding it
+            // would submit the task instead of inserting a newline.
+            (true, KeyCode::Char('n')) => self.input.insert('\n'),
             (_, KeyCode::F(1)) => self.modal = Some(Modal::Help),
             (_, KeyCode::PageUp) => self.scroll = self.scroll.saturating_add(10),
             (_, KeyCode::PageDown) => self.scroll = self.scroll.saturating_sub(10),
             (_, KeyCode::Enter) => {
-                if self.tab == Tab::Chat && !self.input.is_empty() && !self.running {
+                if self.tab == Tab::Chat && !self.input.is_empty() && self.running {
+                    self.status = "run in progress — Ctrl+S stops it; text kept".into();
+                } else if self.tab == Tab::Chat && !self.input.is_empty() && !self.running {
                     let task = self.input.text();
                     if task.starts_with('/') {
                         match task.as_str() {
@@ -714,14 +743,21 @@ impl App {
                                 self.effects.push(Effect::ExportRun);
                                 self.input.clear();
                             }
+                            "/help" => {
+                                self.modal = Some(Modal::Help);
+                                self.input.clear();
+                            }
                             _ => {
-                                self.status = format!("unknown command '{task}' — /mission /solo /export");
+                                self.status = format!("unknown command '{task}' — /mission /solo /export /help");
                             }
                         }
                         return;
                     }
                     self.input.clear();
-                    self.chat.push(ChatItem::User(task.clone()));
+                    self.chat.push(ChatItem::User { text: task.clone(), at: now_hm() });
+                    self.history.push(task.clone());
+                    if self.history.len() > 200 { self.history.remove(0); }
+                    self.hist_i = None;
                     self.running = true;
                     self.started = Some(Instant::now());
                     self.outcome.clear();
@@ -734,6 +770,16 @@ impl App {
             (_, KeyCode::Up) => {
                 if self.tab == Tab::Settings {
                     self.settings_sel = self.settings_sel.saturating_sub(1);
+                } else if self.tab == Tab::Chat
+                    && (self.input.is_empty() || self.hist_i.is_some())
+                    && !self.history.is_empty()
+                {
+                    let i = self
+                        .hist_i
+                        .map(|i| i.saturating_sub(1))
+                        .unwrap_or(self.history.len() - 1);
+                    self.hist_i = Some(i);
+                    self.input.set(&self.history[i]);
                 } else {
                     self.scroll = self.scroll.saturating_add(1);
                 }
@@ -744,13 +790,22 @@ impl App {
                     if self.settings_sel + 1 < n {
                         self.settings_sel += 1;
                     }
+                } else if self.tab == Tab::Chat && self.hist_i.is_some() {
+                    let i = self.hist_i.unwrap() + 1;
+                    if i >= self.history.len() {
+                        self.hist_i = None;
+                        self.input.clear();
+                    } else {
+                        self.hist_i = Some(i);
+                        self.input.set(&self.history[i]);
+                    }
                 } else {
                     self.scroll = self.scroll.saturating_sub(1);
                 }
             }
             (_, KeyCode::Esc) => {
                 if self.tab == Tab::Settings {
-                    // no-op
+                    self.tab = Tab::Chat;
                 }
             }
             (_, KeyCode::Backspace) => {
@@ -772,7 +827,7 @@ impl App {
                 if self.tab == Tab::Chat { self.input.end(); }
             }
             (_, KeyCode::Char(c)) => {
-                if self.tab == Tab::Chat { self.input.insert(c); }
+                if self.tab == Tab::Chat { self.input.insert(c); self.hist_i = None; }
             }
             _ => {}
         }
@@ -843,24 +898,31 @@ impl App {
     /// Handlers consume the modal and return the next modal state.
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
         match m {
-            Modal::Permission { id, summary, reply } => match k.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    let _ = reply.send(GateChoice::Once);
-                    None
+            Modal::Permission { id, agent, summary, reply } => {
+                let decided = match k.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => Some(GateChoice::Once),
+                    KeyCode::Char('a') | KeyCode::Char('A') => Some(GateChoice::Session),
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        Some(GateChoice::Deny)
+                    }
+                    // Enter does nothing: the modal has no selected action
+                    // to confirm — approval must never be granted silently.
+                    _ => None,
+                };
+                match decided {
+                    None => Some(Modal::Permission { id, agent, summary, reply }),
+                    Some(c) => {
+                        if c == GateChoice::Session {
+                            self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let _ = reply.send(c);
+                        // next parked ask becomes the modal
+                        self.pending_perms.pop_front().map(|(id, agent, summary, reply)| {
+                            Modal::Permission { id, agent, summary, reply }
+                        })
+                    }
                 }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    let _ = reply.send(GateChoice::Session);
-                    self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
-                    None
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    let _ = reply.send(GateChoice::Deny);
-                    None
-                }
-                // Enter does nothing: the modal has no selected action to
-                // confirm, and approval must never be granted silently.
-                _ => Some(Modal::Permission { id, summary, reply }),
-            },
+            }
             Modal::Help => {
                 if matches!(k.code, KeyCode::Esc | KeyCode::Enter | KeyCode::F(1)) {
                     None

@@ -398,7 +398,7 @@ impl Agent {
                     };
                     finish_after = fin;
                     (r, false)
-                } else if needs_approval(name) && !self.gate.check(&summary).await {
+                } else if needs_approval(name) && !self.gate.check(&summary, &self.ident.agent_id).await {
                     (
                         "status: denied\nerror: user rejected the action".to_string(),
                         false,

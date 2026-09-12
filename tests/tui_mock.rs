@@ -12,7 +12,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use sui::config::{Profile, ProfileCfg, UiSettings};
-use sui::events::UiEvent;
+use sui::events::{GateChoice, UiEvent};
 use sui::mission::{self, MissionCfg};
 use sui::tui::app::{App, AuthMode, ChatItem, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, SettingsRow, Tab};
 use sui::tui::text::Buf;
@@ -602,7 +602,7 @@ fn tui_paste_targets_modal_field() {
 fn perm_app(repo: &PathBuf) -> (App, tokio::sync::mpsc::UnboundedReceiver<sui::events::GateChoice>) {
     let mut app = app_with_mock(repo, 1); // port unused — modal injected directly
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    app.modal = Some(Modal::Permission { id: 1, summary: "write out/x".into(), reply: tx });
+    app.modal = Some(Modal::Permission { id: 1, agent: "solo".into(), summary: "write out/x".into(), reply: tx });
     (app, rx)
 }
 
@@ -686,7 +686,7 @@ fn perm_press_release_counts_once() {
 
     // tool 2's prompt opens; the Release tail of the same keypress arrives
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
-    app.modal = Some(Modal::Permission { id: 2, summary: "write out/y".into(), reply: tx2 });
+    app.modal = Some(Modal::Permission { id: 2, agent: "solo".into(), summary: "write out/y".into(), reply: tx2 });
     app.key(KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Release));
     assert!(matches!(app.modal, Some(Modal::Permission { .. })),
         "a Release matching an earlier Press approved the next prompt");
@@ -957,4 +957,90 @@ fn export_run_triggers() {
         app.effects.iter().filter(|e| matches!(e, Effect::ExportRun)).count(),
         2
     );
+}
+
+/// Two concurrent permission asks must queue, not overwrite: the parked
+/// request keeps its reply channel alive and surfaces next.
+#[test]
+fn permission_asks_queue_in_order() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        id: 1, agent: "w-W1".into(), summary: "bash: rm a".into(), reply: tx1,
+    });
+    app.apply_event(UiEvent::Permission {
+        id: 2, agent: "w-W2".into(), summary: "bash: rm b".into(), reply: tx2,
+    });
+    match &app.modal {
+        Some(Modal::Permission { agent, summary, .. }) => {
+            assert_eq!(agent, "w-W1");
+            assert_eq!(summary, "bash: rm a");
+        }
+        _ => panic!("first ask should be the modal"),
+    }
+    assert_eq!(app.pending_perms.len(), 1, "second ask parks, not lost");
+
+    // 'y' decides the first; the second becomes the modal — nothing denied
+    app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(matches!(rx1.try_recv(), Ok(GateChoice::Once)));
+    match &app.modal {
+        Some(Modal::Permission { agent, .. }) => assert_eq!(agent, "w-W2"),
+        _ => panic!("queued ask should surface after decision"),
+    }
+    assert!(rx2.try_recv().is_err(), "queued ask still undecided");
+    app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(matches!(rx2.try_recv(), Ok(GateChoice::Deny)));
+    assert!(app.modal.is_none());
+}
+
+/// Enter during a run must not send or lose the draft — it warns instead.
+#[test]
+fn enter_while_running_warns_keeps_text() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.running = true;
+    app.input.insert_str("next task");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "next task", "draft preserved");
+    assert!(app.status.contains("in progress"));
+    assert!(app.effects.is_empty(), "nothing sent");
+}
+
+/// Up with an empty input recalls the last submitted task; typing clears it.
+#[test]
+fn input_history_recall() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.history = vec!["first".into(), "second".into()];
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "second");
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "first");
+    app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "second");
+    app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "");
+    assert!(app.hist_i.is_none());
+    // history present + empty input → Up recalls again rather than scroll
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.input.text(), "second");
+    app.input.clear();
+    app.hist_i = None;
+    app.history.clear();
+    // no history → Up scrolls the conversation instead
+    app.scroll = 0;
+    app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.scroll, 1);
+}
+
+/// Esc in Settings returns to Chat.
+#[test]
+fn esc_settings_back_to_chat() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.tab = Tab::Settings;
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.tab, Tab::Chat));
 }
