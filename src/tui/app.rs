@@ -458,13 +458,31 @@ impl App {
         // can block tens of seconds, and probing per App would hang CI.
         static KEYRING_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let keyring_ok = *KEYRING_OK.get_or_init(|| {
-            keyring::Entry::new("sui", "__probe__")
-                .and_then(|e| {
-                    e.set_password("x")?;
-                    let _ = e.delete_credential();
-                    Ok(())
-                })
-                .is_ok()
+            // linux secret-service needs a session bus; without one the
+            // dbus connect can block for a very long time on headless CI —
+            // no probe at all, the verdict is already "unusable"
+            #[cfg(target_os = "linux")]
+            if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+                && std::env::var_os("XDG_RUNTIME_DIR").is_none()
+            {
+                return false;
+            }
+            // hard timeout: a wedged secret-service call must never stall
+            // startup; the probe thread may linger blocked, that's fine
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(
+                    keyring::Entry::new("sui", "__probe__")
+                        .and_then(|e| {
+                            e.set_password("x")?;
+                            let _ = e.delete_credential();
+                            Ok(())
+                        })
+                        .is_ok(),
+                );
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or(false)
         });
         let mut session_keys = BTreeMap::new();
         if keyring_ok {
