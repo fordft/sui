@@ -32,6 +32,10 @@ pub struct Config {
 pub struct ProfileCfg {
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// "codex-oauth" = ChatGPT-sign-in Responses backend (no API key —
+    /// reuses `codex login` or `sui auth codex`). Anything else = the
+    /// standard OpenAI-compatible chat-completions transport.
+    pub kind: Option<String>,
     /// Name of the env var holding this profile's API key.
     pub key_env: Option<String>,
     /// Inline key allowed only in user-owned (global/--config) files.
@@ -249,6 +253,7 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
             }
         )
     })?;
+    let is_codex = p.kind.as_deref() == Some("codex-oauth");
     let api_key = p
         .key_env
         .as_deref()
@@ -257,7 +262,11 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
         .or_else(|| p.api_key.clone());
     Ok(Profile {
         name: name.to_string(),
-        base_url: norm_url(p.base_url.as_deref().unwrap_or("https://api.openai.com/v1")),
+        base_url: if is_codex {
+            "codex://oauth".into()
+        } else {
+            norm_url(p.base_url.as_deref().unwrap_or("https://api.openai.com/v1"))
+        },
         model: p.model.clone().unwrap_or_else(|| "gpt-5".into()),
         api_key,
         prompt_cache_key: p.prompt_cache_key.clone(),

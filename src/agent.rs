@@ -424,6 +424,7 @@ impl Agent {
                     Some(outcome.tool_calls.clone())
                 },
                 reasoning_content: outcome.reasoning_content.clone(),
+                response_items: outcome.response_items.clone(),
             });
 
             if outcome.tool_calls.is_empty() {

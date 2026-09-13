@@ -237,6 +237,7 @@ fn app_with_mock(repo: &PathBuf, port: u16) -> App {
     let pc = |model: &str| ProfileCfg {
         base_url: Some(format!("http://127.0.0.1:{port}/v1")),
         model: Some(model.into()),
+        kind: None,
         key_env: None,
         api_key: None,
         prompt_cache_key: None,

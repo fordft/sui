@@ -60,6 +60,15 @@ bash_timeout_max_ms = 600000
 #
 # Certify with: sui-certify --profile cheap --profile strong
 
+# ChatGPT-sign-in profile: uses your `codex login` session (or
+# `sui auth codex`) to call the Codex backend — no API key, no base_url.
+# This is subscription access, not API billing: token usage is reported
+# but cost stays unknown. Runs the Responses API, not chat-completions.
+#
+# [profiles.codex]
+# kind = "codex-oauth"
+# model = "gpt-5.5"
+
 # ── External coding agents (GLOBAL config only — ~/.config/sui/config.toml) ──
 # ACP backends for mission roles — NOT provider URLs. Each entry is a
 # trusted executable Sui may spawn (`devin acp`, the Codex ACP adapter).

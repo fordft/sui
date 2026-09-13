@@ -9,12 +9,21 @@ use crate::types::{FunctionCall, Message, ToolCall, Usage};
 /// Minimal OpenAI-compatible client: POST {base}/chat/completions, SSE stream.
 /// Transport is OpenAI-compatible; individual provider/model combinations
 /// still require live certification (cache fields, reasoning replay, etc).
+/// A `codex://` base URL switches to the ChatGPT-OAuth Responses backend
+/// (`src/codex.rs`).
 pub struct Provider {
     client: reqwest::Client,
-    url: String,
-    api_key: Option<String>,
+    inner: Inner,
     model: String,
     prompt_cache_key: Option<String>,
+}
+
+enum Inner {
+    Chat {
+        url: String,
+        api_key: Option<String>,
+    },
+    Codex(std::sync::OnceLock<std::sync::Arc<crate::codex::CodexAuth>>),
 }
 
 pub struct StreamOutcome {
@@ -32,6 +41,10 @@ pub struct StreamOutcome {
     pub first_delta_ms: u128,
     /// Total request wall time.
     pub total_ms: u128,
+    /// Raw Responses-API items to replay next turn (codex-oauth only;
+    /// carries encrypted reasoning across store:false turns). Empty for
+    /// chat-completions providers.
+    pub response_items: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -49,15 +62,23 @@ impl Provider {
         prompt_cache_key: Option<String>,
     ) -> Self {
         // Authenticated requests never follow redirects: a redirect would
-        // carry credentials to whatever the endpoint points at.
+        // carry credentials to whatever the endpoint points at. Codex's
+        // token never travels anywhere but chatgpt.com / auth.openai.com.
         let mut b = reqwest::Client::builder();
-        if api_key.is_some() {
+        if api_key.is_some() || base_url.starts_with("codex://") {
             b = b.redirect(reqwest::redirect::Policy::none());
         }
+        let inner = if base_url.starts_with("codex://") {
+            Inner::Codex(std::sync::OnceLock::new())
+        } else {
+            Inner::Chat {
+                url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
+                api_key,
+            }
+        };
         Self {
             client: b.build().unwrap_or_else(|_| reqwest::Client::new()),
-            url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
-            api_key,
+            inner,
             model,
             prompt_cache_key,
         }
@@ -76,6 +97,30 @@ impl Provider {
         mut on_delta: impl FnMut(&str),
         mut on_reasoning: impl FnMut(&str),
     ) -> Result<StreamOutcome> {
+        let (url, api_key) = match &self.inner {
+            Inner::Codex(auth) => {
+                // OnceLock::get_or_try_init is unstable — a benign double
+                // discover() just reads the same file twice.
+                if auth.get().is_none() {
+                    let _ = auth.set(crate::codex::CodexAuth::discover()?);
+                }
+                let auth = auth.get().unwrap().clone();
+                return crate::codex::stream_responses(
+                    crate::codex::CodexReq {
+                        auth: &auth,
+                        client: &self.client,
+                        model: &self.model,
+                        prompt_cache_key: self.prompt_cache_key.as_deref(),
+                    },
+                    messages,
+                    tools,
+                    on_delta,
+                    on_reasoning,
+                )
+                .await;
+            }
+            Inner::Chat { url, api_key } => (url.clone(), api_key.clone()),
+        };
         let start = Instant::now();
         let mut body = json!({
             "model": self.model,
@@ -88,8 +133,8 @@ impl Provider {
             body["prompt_cache_key"] = json!(k);
         }
 
-        let mut req = self.client.post(&self.url).json(&body);
-        if let Some(k) = &self.api_key {
+        let mut req = self.client.post(&url).json(&body);
+        if let Some(k) = &api_key {
             req = req.bearer_auth(k);
         }
         let resp = req.send().await.context("send chat request")?;
@@ -208,6 +253,7 @@ impl Provider {
             usage,
             first_delta_ms: first_delta_ms.unwrap_or(0),
             total_ms: start.elapsed().as_millis(),
+            response_items: Vec::new(),
         })
     }
 }
@@ -339,7 +385,7 @@ fn parse_usage(u: &Value) -> Usage {
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
+pub(crate) fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {

@@ -35,6 +35,11 @@ pub enum Message {
         /// do not use it.
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// Raw Responses-API items (e.g. encrypted reasoning) captured from
+        /// a codex-oauth turn, replayed verbatim on the next request while
+        /// `store:false`. Never serialized into chat-completions bodies.
+        #[serde(skip)]
+        response_items: Vec<serde_json::Value>,
     },
     Tool {
         tool_call_id: String,

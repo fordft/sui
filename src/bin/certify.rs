@@ -160,6 +160,7 @@ fn replay_history(path: &Path, max_users: usize) -> Result<Vec<Message>> {
                     .ok()
                     .filter(|v| !v.is_empty()),
                     reasoning_content: e["data"]["reasoning_content"].as_str().map(String::from),
+                    response_items: Vec::new(),
                 })
             }
             Some("tool") => out.push(Message::Tool {

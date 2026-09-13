@@ -954,9 +954,13 @@ impl App {
             .or_else(|| p.key_env.as_deref().and_then(|e| std::env::var(e).ok()))
             .or_else(|| p.api_key.clone());
         Some((
-            p.base_url
-                .clone()
-                .unwrap_or_else(|| "https://api.openai.com/v1".into()),
+            if p.kind.as_deref() == Some("codex-oauth") {
+                "codex://oauth".into()
+            } else {
+                p.base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".into())
+            },
             key,
             p.model.clone().unwrap_or_default(),
         ))

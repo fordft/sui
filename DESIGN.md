@@ -222,6 +222,28 @@ agents are never modeled as provider URLs. Select per role:
   `DEVIN_MODEL`. No paid fallback, cloud handoff, or nested delegation
   is enabled by default.
 
+### ChatGPT OAuth models (codex-oauth)
+
+A profile with `kind = "codex-oauth"` rides the user's ChatGPT sign-in —
+reusing `~/.codex/auth.json` (or Sui's own store written by
+`sui auth codex`, which keeps an independent refresh chain) — and calls
+`chatgpt.com/backend-api/codex/responses`, the Responses-API backend the
+Codex CLI itself uses.
+
+- **Transport**: Responses API over SSE, `store:false` — assistant items
+  (incl. encrypted reasoning) replay verbatim across turns via
+  `Message::Assistant.response_items`, never serialized into
+  chat-completions bodies. Tools flatten to `function` specs; calls and
+  results ride as `function_call` / `function_call_output` items.
+- **Tokens**: access token is a JWT (~8-10d); refresh rotates and writes
+  back atomically so the shared file with the Codex CLI stays valid; a
+  `refresh_token_reused` races the CLI → re-read and retry once. The
+  token is sent only to `chatgpt.com`/`auth.openai.com`, never to
+  journals or prompts.
+- **Honesty**: usage counts are real tokens but subscription-billed —
+  cost fields stay unknown, not zero. `sui auth codex` does PKCE on
+  localhost:1455 or `--manual` paste for headless/SSH.
+
 `--compare` is a pilot harness, not a verdict. It runs three strategies —
 strong-only, cheap-only, and the mission — each in a **separate disposable
 `git clone`** of the same committed base. That is *repository* separation

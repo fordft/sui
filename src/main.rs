@@ -23,6 +23,16 @@ enum Sub {
         #[arg(long, default_value = "any")]
         expect: String,
     },
+    /// Sign in to OpenAI with your ChatGPT account (Codex OAuth).
+    /// Reuses an existing `codex login` session automatically; this writes
+    /// Sui's own token store so its refresh chain never collides with the
+    /// Codex CLI's.
+    Auth {
+        /// Paste the callback URL yourself (headless/SSH — the browser's
+        /// localhost is not this machine's localhost)
+        #[arg(long)]
+        manual: bool,
+    },
     /// Export a recorded run's journals into a sanitized report (no API calls)
     Export {
         /// Export the latest run associated with the current workspace
@@ -79,6 +89,14 @@ async fn main() -> Result<()> {
     }
     if let Some(Sub::AcpBridge { dir, expect }) = &cli.sub {
         return sui::acp::bridge::serve(dir, expect);
+    }
+    if let Some(Sub::Auth { manual }) = &cli.sub {
+        let path = sui::codex::login(*manual).await?;
+        println!("Signed in. Token store: {}", path.display());
+        println!(
+            "Use it via a profile:\n\n  [profiles.codex]\n  kind = \"codex-oauth\"\n  model = \"gpt-5.3-codex\""
+        );
+        return Ok(());
     }
     if let Some(Sub::Export {
         latest,
