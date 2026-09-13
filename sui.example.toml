@@ -59,3 +59,28 @@ bash_timeout_max_ms = 600000
 # key_env = "OPENAI_API_KEY"
 #
 # Certify with: sui-certify --profile cheap --profile strong
+
+# ── External coding agents (GLOBAL config only — ~/.config/sui/config.toml) ──
+# ACP backends for mission roles — NOT provider URLs. Each entry is a
+# trusted executable Sui may spawn (`devin acp`, the Codex ACP adapter).
+# Sui never installs agents and refuses to run one until you set
+# approved = true after verifying the command yourself.
+# Authentication belongs to the agent's own CLI (devin login / codex
+# auth) — Sui injects no credentials. The child starts with an EMPTY
+# environment plus a safe whitelist; env_allow adds names, and anything
+# key/token/secret-shaped is refused anyway.
+#
+# [agents.devin]
+# command = "devin"
+# args = ["acp"]            # devin acp speaks ACP over stdio
+# model = "devin-…"         # optional; applied via session config option
+# approved = true
+#
+# [agents.codex]
+# command = "npx"
+# args = ["-y", "@agentclientprotocol/codex-acp@1.11.0"]  # pinned, not @latest
+# approved = true
+#
+# Select per mission role:
+#   CLI: sui-mission --control-profile strong --worker-agent devin
+#   TUI: Settings → role → acp:devin

@@ -546,8 +546,9 @@ async fn tui_mission_events_flow() {
     let cfg = MissionCfg {
         repo: repo.clone(),
         run_dir: jdir(),
-        control: prof("ctrl", "ctrl-model"),
-        worker: prof("work", "work-model"),
+        control: sui::backend::Backend::Native(prof("ctrl", "ctrl-model")),
+        worker: sui::backend::Backend::Native(prof("work", "work-model")),
+        auditor: None,
         objective: task,
         max_workers: 1,
         session: "tuitest".into(),

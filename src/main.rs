@@ -13,6 +13,16 @@ enum Sub {
         #[arg(long)]
         mission: bool,
     },
+    /// MCP artifact-submission bridge served over stdio — spawned by ACP
+    /// agents via session/new mcp_servers; not for interactive use
+    AcpBridge {
+        /// Session-scoped artifact drop directory
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        /// Expected payload kind: plan | verdict | decision | any
+        #[arg(long, default_value = "any")]
+        expect: String,
+    },
     /// Export a recorded run's journals into a sanitized report (no API calls)
     Export {
         /// Export the latest run associated with the current workspace
@@ -66,6 +76,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Sub::Tui { mission }) = &cli.sub {
         return sui::tui::run(*mission).await;
+    }
+    if let Some(Sub::AcpBridge { dir, expect }) = &cli.sub {
+        return sui::acp::bridge::serve(dir, expect);
     }
     if let Some(Sub::Export {
         latest,

@@ -249,8 +249,9 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
     MissionCfg {
         repo: repo.clone(),
         run_dir: std::env::temp_dir().join(format!("sui-mrun-{ts}")),
-        control: prof("strong"),
-        worker: prof("cheap"),
+        control: sui::backend::Backend::Native(prof("strong")),
+        worker: sui::backend::Backend::Native(prof("cheap")),
+        auditor: None,
         objective: "test objective".into(),
         max_workers: 1,
         session: format!("t{ts}"),

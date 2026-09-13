@@ -16,7 +16,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::acp::{bridge, driver};
 use crate::agent::{Agent, Identity, Intercept, Limits};
+use crate::backend::Backend;
 use crate::config::Profile;
 use crate::context;
 use crate::journal::Journal;
@@ -48,8 +50,12 @@ enum Flow {
 pub struct MissionCfg {
     pub repo: PathBuf,
     pub run_dir: PathBuf,
-    pub control: Profile,
-    pub worker: Profile,
+    /// Orchestrator/escalation plane.
+    pub control: Backend,
+    /// Implementation plane.
+    pub worker: Backend,
+    /// Auditor plane — None = the control backend.
+    pub auditor: Option<Backend>,
     pub objective: String,
     /// 1..=2. Concurrency only activates on a 2-task independent wave.
     pub max_workers: usize,
@@ -165,18 +171,229 @@ fn mk_agent(
     Ok(a)
 }
 
+/// Live external-agent sessions for one mission, keyed by session key
+/// (task id for workers so repair follow-ups reuse the session; role name
+/// for control). Drivers are spawned lazily and all shut down — protocol
+/// close first, bounded process-tree kill second — when the mission ends.
+#[derive(Default)]
+pub struct MissionRt {
+    pool: std::sync::Mutex<std::collections::HashMap<String, driver::AcpSession>>,
+}
+
+impl MissionRt {
+    /// Get or spawn a session for `key`. A dead or mismatched driver is
+    /// torn down and respawned — never silently reused after transport
+    /// failure (side effects may be unobservable).
+    #[allow(clippy::too_many_arguments)]
+    async fn session(
+        &self,
+        cfg: &MissionCfg,
+        spec: &crate::config::AcpSpec,
+        key: &str,
+        agent_id: &str,
+        cwd: &Path,
+        expect: &str,
+    ) -> Result<driver::AcpSession> {
+        // fast path: live session for this key
+        {
+            let pool = self.pool.lock().unwrap();
+            if let Some(s) = pool.get(key) {
+                if !s.dead() {
+                    return Ok(s.clone());
+                }
+            }
+        }
+        // dead/missing → (re)spawn. A prior dead session is dropped here,
+        // which ends its loop and kills any lingering child.
+        let dir = cfg.run_dir.join("acp-artifacts").join(key);
+        std::fs::create_dir_all(&dir)?;
+        let journal = Arc::new(Mutex::new(Journal::open_named(
+            &cfg.run_dir,
+            &format!("acp-{key}"),
+        )?));
+        let norm = Arc::new(Mutex::new(crate::acp::norm::Norm::new(
+            cfg.run,
+            agent_id.to_string(),
+            cfg.events.clone(),
+            journal.clone(),
+        )));
+        // same gate posture as native workers: worktrees are disposable,
+        // a UI session flag still applies when present
+        let mut g = Gate::new(true);
+        if let (Some(sink), Some((_, f))) = (&cfg.events, &cfg.cancel) {
+            g.set_ui(sink.clone(), f.clone(), cfg.session_approve.clone());
+        }
+        let sess = driver::AcpSession::spawn(
+            key.to_string(),
+            spec.clone(),
+            cwd,
+            Some(driver::BridgeCfg {
+                dir,
+                expect: expect.to_string(),
+            }),
+            norm,
+            Arc::new(tokio::sync::Mutex::new(g)),
+            journal,
+            cfg.run,
+        )
+        .await?;
+        let mut pool = self.pool.lock().unwrap();
+        if let Some(old) = pool.insert(key.to_string(), sess.clone()) {
+            tokio::spawn(async move { old.shutdown().await });
+        }
+        Ok(sess)
+    }
+
+    /// Protocol-close every session; bounded process-tree kill follows.
+    pub async fn shutdown_all(&self) {
+        let sessions: Vec<driver::AcpSession> =
+            self.pool.lock().unwrap().drain().map(|(_, s)| s).collect();
+        for s in sessions {
+            s.cancel(); // protocol cancel first — cheap even when idle
+            s.shutdown().await;
+        }
+    }
+}
+
+/// Worker-role dispatch: native agent loop or an ACP session prompt in
+/// the task worktree. Either way the deterministic gates afterwards
+/// (ownership, acceptance) are the real contract — an agent's `end_turn`
+/// or reported success is never proof.
+async fn drive_task(
+    cfg: &MissionCfg,
+    rt: &MissionRt,
+    c: &TaskContract,
+    wt: &Path,
+    prompt: String,
+    agent_id: &str,
+    journal_name: &str,
+) -> Result<()> {
+    match &cfg.worker {
+        Backend::Native(prof) => {
+            let mut agent = mk_agent(
+                cfg,
+                prof,
+                wt,
+                &prompts::worker_system(),
+                Journal::open_named(&cfg.run_dir, journal_name)?,
+                agent_id,
+                "worker",
+                &cfg.session,
+                c.max_turns.unwrap_or(cfg.worker_max_turns),
+                cfg.request_timeout,
+                cfg.context_budget,
+                cfg.context_reserve,
+            )?;
+            tokio::time::timeout(cfg.task_timeout, agent.run_turn(&prompt))
+                .await
+                .context("task deadline")?
+        }
+        Backend::Acp(spec) => {
+            let sess = rt.session(cfg, spec, &c.id, agent_id, wt, "any").await?;
+            match tokio::time::timeout(cfg.task_timeout, sess.prompt(&prompt)).await {
+                Err(_) => {
+                    // deadline: protocol cancel first, then the pool's
+                    // bounded kill. The session is poisoned — its remaining
+                    // side effects are unobservable, so it is not reused.
+                    sess.cancel();
+                    sess.shutdown().await;
+                    rt.pool.lock().unwrap().remove(&c.id);
+                    bail!("task deadline");
+                }
+                Ok(Err(e)) => Err(e),
+                Ok(Ok(end)) => match end.stop {
+                    agent_client_protocol::schema::v1::StopReason::EndTurn => Ok(()),
+                    agent_client_protocol::schema::v1::StopReason::Cancelled => {
+                        bail!("agent turn cancelled")
+                    }
+                    agent_client_protocol::schema::v1::StopReason::Refusal => {
+                        bail!("agent refused")
+                    }
+                    other => bail!("agent stopped: {other:?}"),
+                },
+            }
+        }
+    }
+}
+
+/// Control-role dispatch: native uses submit_result interception; ACP
+/// reads the session's artifact drops (shape-validated by the bridge,
+/// re-validated here authoritatively). Returns the captured payload.
+async fn run_control(
+    cfg: &MissionCfg,
+    rt: &MissionRt,
+    backend: &Backend,
+    agent_id: &str,
+    workspace: &Path,
+    prompt: String,
+    expect: &str,
+    check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>,
+) -> Result<Cap> {
+    match backend {
+        Backend::Native(prof) => {
+            let (mut a, cap) = control_agent(cfg, prof, workspace, agent_id, check)?;
+            a.run_turn(&prompt).await?;
+            let c = cap.lock().unwrap();
+            Ok(Cap {
+                payload: c.payload.clone(),
+                rejects: c.rejects,
+                last_error: c.last_error.clone(),
+            })
+        }
+        Backend::Acp(spec) => {
+            let dir = cfg.run_dir.join("acp-artifacts").join(agent_id);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
+            let sess = rt
+                .session(cfg, spec, agent_id, agent_id, workspace, expect)
+                .await?;
+            let full = format!(
+                "{prompt}\n\nSubmit your final deliverable ONLY via the MCP tool \
+                 `submit_result` (server `sui-artifacts`). Do not paste it in chat; \
+                 end your turn after a successful submission."
+            );
+            let end = tokio::time::timeout(cfg.task_timeout, sess.prompt(&full))
+                .await
+                .context("control deadline")??;
+            let mut cap = Cap {
+                payload: None,
+                rejects: 0,
+                last_error: None,
+            };
+            for payload in bridge::read_artifacts(&dir) {
+                match check(&payload) {
+                    Ok(()) => {
+                        cap.payload = Some(payload);
+                        break;
+                    }
+                    Err(e) => {
+                        cap.rejects += 1;
+                        cap.last_error = Some(format!("{e:#}"));
+                    }
+                }
+            }
+            if cap.payload.is_none() && cap.last_error.is_none() {
+                cap.last_error = Some(format!("turn ended {:?} with no artifact", end.stop));
+            }
+            Ok(cap)
+        }
+    }
+}
+
 /// Control-plane agent (orchestrator / auditor / escalation) with
 /// submit_result interception. `check` validates payloads; rejected
 /// payloads get one resubmission before the turn is ended.
 fn control_agent(
     cfg: &MissionCfg,
+    prof: &Profile,
     workspace: &Path,
     agent_id: &str,
     check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>,
 ) -> Result<(Agent, Arc<Mutex<Cap>>)> {
     let mut a = mk_agent(
         cfg,
-        &cfg.control,
+        prof,
         workspace,
         prompts::CONTROL_SYSTEM,
         Journal::open_named(&cfg.run_dir, agent_id)?,
@@ -294,8 +511,11 @@ fn base_for(cfg: &MissionCfg, c: &TaskContract, base: &str, integ_branch: &str) 
 
 /// Worker lifecycle: worktree → agent run → commit → ownership →
 /// acceptance gates. Never panics on task failure — returns evidence.
+/// The agent backend (native loop or external ACP) is interchangeable;
+/// the gates are not.
 async fn spawn_task(
     cfg: &MissionCfg,
+    rt: &MissionRt,
     c: &TaskContract,
     base: &str,
     integ_branch: &str,
@@ -308,26 +528,16 @@ async fn spawn_task(
     let _ = std::fs::remove_dir_all(&wt);
     let task_base = base_for(cfg, c, base, integ_branch)?;
     worktree::add(&cfg.repo, &wt, &branch, &task_base)?;
-    let mut agent = mk_agent(
+    drive_task(
         cfg,
-        &cfg.worker,
+        rt,
+        c,
         &wt,
-        &prompts::worker_system(),
-        Journal::open_named(&cfg.run_dir, &format!("w-{}", c.id))?,
+        prompts::worker_task(c, &wt.to_string_lossy()),
         &format!("w-{}", c.id),
-        "worker",
-        &cfg.session,
-        c.max_turns.unwrap_or(cfg.worker_max_turns),
-        cfg.request_timeout,
-        cfg.context_budget,
-        cfg.context_reserve,
-    )?;
-    tokio::time::timeout(
-        cfg.task_timeout,
-        agent.run_turn(&prompts::worker_task(c, &wt.to_string_lossy())),
+        &format!("w-{}", c.id),
     )
-    .await
-    .context("task deadline")??;
+    .await?;
     finish_task(cfg, &wt, &branch, c, &task_base).await
 }
 
@@ -417,31 +627,22 @@ async fn finish_task(
 /// carrying only the failure capsule (bounded artifact).
 async fn repair_task(
     cfg: &MissionCfg,
+    rt: &MissionRt,
     c: &TaskContract,
     prev: &TaskOut,
     task_base: &str,
 ) -> Result<TaskOut> {
     let wt = worktree::worktrees_dir(&cfg.run_dir).join(&c.id);
-    let mut agent = mk_agent(
+    drive_task(
         cfg,
-        &cfg.worker,
+        rt,
+        c,
         &wt,
-        &prompts::worker_system(),
-        Journal::open_named(&cfg.run_dir, &format!("w-{}-repair", c.id))?,
+        prompts::repair_task(c, &prev.capsule),
         &format!("w-{}-repair", c.id),
-        "worker",
-        &cfg.session,
-        c.max_turns.unwrap_or(cfg.worker_max_turns),
-        cfg.request_timeout,
-        cfg.context_budget,
-        cfg.context_reserve,
-    )?;
-    tokio::time::timeout(
-        cfg.task_timeout,
-        agent.run_turn(&prompts::repair_task(c, &prev.capsule)),
+        &format!("w-{}-repair", c.id),
     )
-    .await
-    .context("repair deadline")??;
+    .await?;
     finish_task(cfg, &wt, &prev.branch, c, task_base).await
 }
 
@@ -449,6 +650,7 @@ async fn repair_task(
 /// failure capsule and decides retry(revised contract)/abort.
 async fn escalate(
     cfg: &MissionCfg,
+    rt: &MissionRt,
     c: &TaskContract,
     prev: &TaskOut,
     budget_left: usize,
@@ -463,16 +665,19 @@ async fn escalate(
             }
             _ => bail!("decision must be retry or abort"),
         });
-    let (mut esc, cap) = control_agent(cfg, &cfg.repo, "escalation", check)?;
     let contract_json = serde_json::to_string_pretty(c).unwrap_or_default();
-    esc.run_turn(&prompts::escalation_task(
-        &contract_json,
-        &prev.capsule,
-        budget_left,
-    ))
+    let c2 = run_control(
+        cfg,
+        rt,
+        &cfg.control,
+        "escalation",
+        &cfg.repo,
+        prompts::escalation_task(&contract_json, &prev.capsule, budget_left),
+        "decision",
+        check,
+    )
     .await
     .context("escalation session")?;
-    let c2 = cap.lock().unwrap();
     match &c2.payload {
         Some(p) if p["decision"] == "retry" => {
             Ok(Some(serde_json::from_value(p["revised_task"].clone())?))
@@ -550,6 +755,7 @@ async fn gate_summary(plan: &MissionPlan, integ_wt: &Path) -> String {
 /// One auditor session over the integrated candidate.
 async fn audit_once(
     cfg: &MissionCfg,
+    rt: &MissionRt,
     integ_wt: &Path,
     plan: &MissionPlan,
     diff: &str,
@@ -561,14 +767,27 @@ async fn audit_once(
             Some("PASS") | Some("FAIL") => Ok(()),
             _ => bail!("verdict must be PASS or FAIL"),
         });
-    let (mut a, cap) = control_agent(cfg, integ_wt, "auditor", check)?;
-    a.run_turn(&prompts::audit_task(plan, diff, gates, risks))
-        .await?;
-    let c = cap.lock().unwrap();
-    let p = c
-        .payload
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("auditor produced no verdict"))?;
+    let auditor = cfg.auditor.as_ref().unwrap_or(&cfg.control);
+    let c = run_control(
+        cfg,
+        rt,
+        auditor,
+        "auditor",
+        integ_wt,
+        prompts::audit_task(plan, diff, gates, risks),
+        "verdict",
+        check,
+    )
+    .await?;
+    let p = c.payload.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "auditor produced no verdict{}",
+            c.last_error
+                .as_ref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
+        )
+    })?;
     Ok((p["verdict"].as_str().unwrap_or("FAIL").to_string(), p))
 }
 
@@ -604,10 +823,12 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
         run_dir: cfg.run_dir.clone(),
     };
 
+    // external-agent session pool; scoped so drivers die with the mission
+    let rt = MissionRt::default();
     // scoped so the body's borrows release before report finalization
     let mut cancelled = false;
     let flow = {
-        let body = body(&cfg, &mut report, &mut journal);
+        let body = body(&cfg, &rt, &mut report, &mut journal);
         tokio::pin!(body);
         let n = cfg.cancel.as_ref().map(|(n, _)| n.clone());
         tokio::select! {
@@ -623,6 +844,8 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
             }
         }
     };
+    // bounded teardown: protocol cancel → close → process-tree kill
+    rt.shutdown_all().await;
     if cancelled {
         journal.log("mission", json!({ "state": format!("{:?}", S::Cancelled) }));
         if cfg.events.is_none() {
@@ -701,7 +924,12 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
 
 /// The mission state machine. Returns the terminal Flow; every transition
 /// is journaled. `report` accumulates evidence as states complete.
-async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journal) -> Result<Flow> {
+async fn body(
+    cfg: &MissionCfg,
+    rt: &MissionRt,
+    report: &mut MissionReport,
+    journal: &mut Journal,
+) -> Result<Flow> {
     let mut escalations_left = 1usize;
     let mut audit_repairs_left = 1usize;
 
@@ -732,7 +960,6 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
             serde_json::from_value(p.clone()).context("payload is not a mission plan")?;
         plan::validate(&plan, &repo)
     });
-    let (mut orch, cap) = control_agent(cfg, &cfg.repo, "orchestrator", check_plan)?;
     let overview = {
         let out = spawn_bounded(
             &cfg.repo,
@@ -745,26 +972,30 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
         .await;
         out.map(|o| o.stdout).unwrap_or_default()
     };
-    if let Err(e) = orch
-        .run_turn(&prompts::orchestrator_task(
-            &cfg.objective,
-            &base,
-            &overview,
-        ))
-        .await
+    let cap = match run_control(
+        cfg,
+        rt,
+        &cfg.control,
+        "orchestrator",
+        &cfg.repo,
+        prompts::orchestrator_task(&cfg.objective, &base, &overview),
+        "plan",
+        check_plan,
+    )
+    .await
     {
-        fail!(format!("orchestrator error: {e:#}"));
-    }
+        Ok(c) => c,
+        Err(e) => fail!(format!("orchestrator error: {e:#}")),
+    };
     let plan: MissionPlan = {
-        let c = cap.lock().unwrap();
-        match &c.payload {
+        match &cap.payload {
             Some(p) => match serde_json::from_value(p.clone()) {
                 Ok(p) => p,
                 Err(e) => fail!(format!("plan decode: {e:#}")),
             },
             None => fail!(format!(
                 "orchestrator produced no valid plan{}",
-                c.last_error
+                cap.last_error
                     .as_ref()
                     .map(|e| format!(": {e}"))
                     .unwrap_or_default()
@@ -800,8 +1031,8 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
             let ba = base_for(cfg, ta, &base, &integ_branch)?;
             let bb = base_for(cfg, tb, &base, &integ_branch)?;
             let (ra, rb) = tokio::join!(
-                spawn_task(cfg, ta, &base, &integ_branch),
-                spawn_task(cfg, tb, &base, &integ_branch),
+                spawn_task(cfg, rt, ta, &base, &integ_branch),
+                spawn_task(cfg, rt, tb, &base, &integ_branch),
             );
             results.push((ta.clone(), ra.map_err(|e| e.to_string()), ba));
             results.push((tb.clone(), rb.map_err(|e| e.to_string()), bb));
@@ -809,7 +1040,7 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
             for &i in &wave {
                 let t = &plan.tasks[i];
                 let tb = base_for(cfg, t, &base, &integ_branch)?;
-                let r = spawn_task(cfg, t, &base, &integ_branch)
+                let r = spawn_task(cfg, rt, t, &base, &integ_branch)
                     .await
                     .map_err(|e| e.to_string());
                 results.push((t.clone(), r, tb));
@@ -843,7 +1074,7 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
                         text: format!("repair attempt 1 for {} — {}", contract.id, why),
                     });
                 }
-                match repair_task(cfg, &contract, &out, &task_base).await {
+                match repair_task(cfg, rt, &contract, &out, &task_base).await {
                     Ok(o2) if o2.ok => out = o2,
                     Ok(o2) => out = o2,
                     Err(e) => out.capsule = format!("{}\nrepair error: {e:#}", out.capsule),
@@ -866,9 +1097,9 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
                         text: format!("escalating {} to control — {}", contract.id, why),
                     });
                 }
-                match escalate(cfg, &contract, &out, escalations_left).await {
+                match escalate(cfg, rt, &contract, &out, escalations_left).await {
                     Ok(Some(newc)) => {
-                        let r2 = spawn_task(cfg, &newc, &base, &integ_branch)
+                        let r2 = spawn_task(cfg, rt, &newc, &base, &integ_branch)
                             .await
                             .map_err(|e| e.to_string());
                         match r2 {
@@ -925,9 +1156,9 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
                 if escalations_left > 0 {
                     escalations_left -= 1;
                     report.escalations += 1;
-                    match escalate(cfg, &contract, &conflict_out, escalations_left).await {
+                    match escalate(cfg, rt, &contract, &conflict_out, escalations_left).await {
                         Ok(Some(newc)) => {
-                            let r3 = spawn_task(cfg, &newc, &base, &integ_branch)
+                            let r3 = spawn_task(cfg, rt, &newc, &base, &integ_branch)
                                 .await
                                 .map_err(|e| e.to_string());
                             match r3 {
@@ -996,7 +1227,7 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
             report.repairs, report.escalations
         );
         let (verdict, payload) =
-            match audit_once(cfg, &integ_wt, &plan, &diff, &gates, &risks).await {
+            match audit_once(cfg, rt, &integ_wt, &plan, &diff, &gates, &risks).await {
                 Ok(v) => v,
                 Err(e) => fail!(format!("audit error: {e:#}")),
             };
@@ -1053,7 +1284,7 @@ async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journa
                 task_base: tb.clone(),
                 gates: vec![],
             };
-            if let Ok(o) = repair_task(cfg, &t, &prev, &tb).await {
+            if let Ok(o) = repair_task(cfg, rt, &t, &prev, &tb).await {
                 if o.ok {
                     any_ok = true;
                 }

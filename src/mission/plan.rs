@@ -34,17 +34,9 @@ pub struct TaskContract {
 
 const MAX_TASKS: usize = 8;
 
+/// Full validation: shape invariants + the base revision resolves in-repo.
 pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
-    if plan.objective.trim().is_empty() {
-        bail!("plan: empty objective");
-    }
-    if plan.tasks.is_empty() {
-        bail!("plan: no tasks");
-    }
-    if plan.tasks.len() > MAX_TASKS {
-        bail!("plan: {} tasks exceeds cap {MAX_TASKS}", plan.tasks.len());
-    }
-    // base revision must resolve
+    validate_shape(plan)?;
     let out = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo)
@@ -57,6 +49,21 @@ pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
         .context("git rev-parse")?;
     if !out.status.success() {
         bail!("plan: base_commit '{}' does not resolve", plan.base_commit);
+    }
+    Ok(())
+}
+
+/// Repo-free plan invariants — used by the ACP artifact bridge, which
+/// validates submissions without holding repository context.
+pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
+    if plan.objective.trim().is_empty() {
+        bail!("plan: empty objective");
+    }
+    if plan.tasks.is_empty() {
+        bail!("plan: no tasks");
+    }
+    if plan.tasks.len() > MAX_TASKS {
+        bail!("plan: {} tasks exceeds cap {MAX_TASKS}", plan.tasks.len());
     }
 
     let mut ids = HashSet::new();

@@ -213,6 +213,17 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
     })
 }
 
+/// Role name → backend. `acp:<name>` selects a trusted external agent
+/// from `[agents.<name>]`; anything else is a native provider profile.
+pub fn resolve_to_backend(app: &App, name: &str) -> Option<crate::backend::Backend> {
+    if let Some(agent) = name.strip_prefix("acp:") {
+        return config::resolve_agent(agent, None)
+            .ok()
+            .map(crate::backend::Backend::Acp);
+    }
+    resolve_to_profile(app, name).map(crate::backend::Backend::Native)
+}
+
 pub async fn run(force_mission: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("sui tui needs a terminal");
@@ -399,10 +410,13 @@ pub async fn run(force_mission: bool) -> Result<()> {
                     Mode::Mission => {
                         let control = app
                             .role_profile(Role::Orchestrator)
-                            .and_then(|n| resolve_to_profile(&app, &n));
+                            .and_then(|n| resolve_to_backend(&app, &n));
                         let worker = app
                             .role_profile(Role::Worker)
-                            .and_then(|n| resolve_to_profile(&app, &n));
+                            .and_then(|n| resolve_to_backend(&app, &n));
+                        let auditor = app
+                            .role_profile(Role::Auditor)
+                            .and_then(|n| resolve_to_backend(&app, &n));
                         match (control, worker) {
                             (Some(control), Some(worker)) => {
                                 let cfg = mission::MissionCfg {
@@ -410,6 +424,7 @@ pub async fn run(force_mission: bool) -> Result<()> {
                                     run_dir: jdir.clone(),
                                     control,
                                     worker,
+                                    auditor,
                                     objective: task,
                                     max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
                                     session: format!("tui-{}", std::process::id()),

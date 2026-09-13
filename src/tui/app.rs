@@ -2660,6 +2660,12 @@ impl App {
             }
             Some(SettingsRow::Role(role)) => {
                 let mut items: Vec<String> = self.profiles.keys().cloned().collect();
+                // external ACP agents are selectable per-role as acp:<name>
+                items.extend(
+                    config::agent_names(None)
+                        .into_iter()
+                        .map(|n| format!("acp:{n}")),
+                );
                 if role == Role::Auditor {
                     items.insert(0, "(same as orchestrator)".into());
                 }

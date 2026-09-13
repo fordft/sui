@@ -61,12 +61,18 @@ impl Gate {
     /// Returns true if the action may proceed. `run` ties the prompt to
     /// the activity group that spawned it.
     pub async fn check(&mut self, summary: &str, agent: &str, run: u64) -> bool {
+        self.decide(summary, agent, run).await != GateChoice::Deny
+    }
+
+    /// Same gate as `check` but returns the typed decision — ACP permission
+    /// requests need Once vs Session to pick the matching option kind.
+    pub async fn decide(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
         if self.open() {
             // Under a UI (sink set) raw writes would corrupt the alt screen.
             if self.sink.is_none() {
                 eprintln!("» allow (auto): {summary}");
             }
-            return true;
+            return GateChoice::Session;
         }
         if let Some(tx) = self.sink.clone() {
             self.seq += 1;
@@ -85,19 +91,20 @@ impl Gate {
             loop {
                 tokio::select! {
                     choice = reply_rx.recv() => match choice {
-                        Some(GateChoice::Once) => return true,
-                        Some(GateChoice::Session) => {
-                            // Raise the shared session flag — revocable by
-                            // the UI toggle. Local session_allow stays for
-                            // the stdin path below.
-                            if let Some(f) = &self.session {
-                                f.store(true, Ordering::Relaxed);
-                            } else {
-                                self.session_allow = true;
+                        Some(c @ (GateChoice::Once | GateChoice::Session | GateChoice::Deny)) => {
+                            if matches!(c, GateChoice::Session) {
+                                // Raise the shared session flag — revocable by
+                                // the UI toggle. Local session_allow stays for
+                                // the stdin path below.
+                                if let Some(f) = &self.session {
+                                    f.store(true, Ordering::Relaxed);
+                                } else {
+                                    self.session_allow = true;
+                                }
                             }
-                            return true;
+                            return c;
                         }
-                        Some(GateChoice::Deny) | None => return false, // None = UI gone
+                        None => return GateChoice::Deny, // UI gone
                     },
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
                         if self
@@ -106,7 +113,7 @@ impl Gate {
                             .map(|c| c.load(Ordering::Relaxed))
                             .unwrap_or(false)
                         {
-                            return false;
+                            return GateChoice::Deny;
                         }
                     }
                 }
@@ -116,15 +123,15 @@ impl Gate {
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().lock().read_line(&mut line).is_err() {
-            return false;
+            return GateChoice::Deny;
         }
         match line.trim().to_lowercase().as_str() {
-            "y" | "yes" | "" => true, // empty = yes, single-keystroke flow
+            "y" | "yes" | "" => GateChoice::Once, // empty = yes, single-keystroke flow
             "a" | "all" => {
                 self.session_allow = true;
-                true
+                GateChoice::Session
             }
-            _ => false,
+            _ => GateChoice::Deny,
         }
     }
 }

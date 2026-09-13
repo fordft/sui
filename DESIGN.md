@@ -185,6 +185,43 @@ Accepted | Failed | Cancelled`, with `Repairing` as a bounded side-state.
   Cancellation drops in-flight work; the process-group guard kills
   children either way (verified: no orphans).
 
+### External agent backends (ACP)
+
+Each mission role resolves to `Backend::Native(Profile)` (the loop above)
+or `Backend::Acp(AcpSpec)` — a trusted external coding agent over ACP
+stdio (`devin acp`, `@agentclientprotocol/codex-acp@<pinned>`). External
+agents are never modeled as provider URLs. Select per role:
+`sui-mission --worker-agent devin` / TUI role picker `acp:<name>`.
+
+- **Trust**: `[agents.<name>]` lives in user-owned config only, requires
+  `approved = true` (explicit install approval — Sui never installs).
+  Auth is the agent CLI's own (`devin login`, codex auth); Sui injects no
+  credentials. The child spawns with `env_clear` + a safe whitelist —
+  provider keys, AWS/cloud creds, and `SUI_*` never reach it — in its own
+  process group for bounded tree teardown.
+- **Protocol**: official `agent-client-protocol` SDK (pinned) over
+  subprocess stdio. `initialize` + `session/new` per session; sessions
+  persist across task follow-ups (repair reuses the task's session).
+  Cancellation is protocol-first (`session/cancel`), then a bounded
+  process-group kill. A mid-prompt transport failure poisons the session —
+  no blind replay of possibly-side-effected work.
+- **Evidence**: `session/update` notifications normalize into the same
+  transcript/journal/export pipeline as native execution (message chunks
+  → Delta, thought chunks → Reason, tool calls → ToolStart/ToolDone).
+  Tool notifications are agent-REPORTED evidence — Sui never re-executes
+  them; ownership/acceptance gates remain the contract. `UsageUpdate` is
+  journaled raw, never summed into per-request token fields — one ACP
+  prompt is not one LLM request, and missing metrics stay unknown.
+- **Artifacts**: control roles submit deliverables via a session-scoped
+  MCP stdio bridge (`sui acp-bridge`, attached through
+  `session/new.mcp_servers`), which shape-validates and drops
+  `NNN.json` files the runtime re-validates authoritatively. An ACP
+  `Plan` update or `end_turn` is never contract proof.
+- **Models**: `spec.model` applies via the session-advertised
+  config option (category=Model); Devin also accepts `--model`/
+  `DEVIN_MODEL`. No paid fallback, cloud handoff, or nested delegation
+  is enabled by default.
+
 `--compare` is a pilot harness, not a verdict. It runs three strategies —
 strong-only, cheap-only, and the mission — each in a **separate disposable
 `git clone`** of the same committed base. That is *repository* separation

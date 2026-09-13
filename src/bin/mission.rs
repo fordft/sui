@@ -9,7 +9,7 @@
 //! fixed external acceptance suite frozen before any strategy runs.
 //! Mission-internal checks never define the yardstick.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use serde_json::Value;
 use std::fmt::Write;
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use sui::agent::{Agent, Identity, Limits};
+use sui::backend::Backend;
 use sui::config::{self, Profile};
 use sui::context;
 use sui::journal::Journal;
@@ -34,11 +35,31 @@ use sui::tools::ToolContext;
 )]
 struct Cli {
     /// Strong model profile (orchestrator + auditor + escalation)
+    #[arg(
+        long,
+        conflicts_with = "control_agent",
+        required_unless_present = "control_agent"
+    )]
+    control_profile: Option<String>,
+    /// External ACP agent ([agents.<name>]) for the control plane
     #[arg(long)]
-    control_profile: String,
+    control_agent: Option<String>,
     /// Cheap model profile (worker pool — homogeneous)
+    #[arg(
+        long,
+        conflicts_with = "worker_agent",
+        required_unless_present = "worker_agent"
+    )]
+    worker_profile: Option<String>,
+    /// External ACP agent ([agents.<name>]) for the worker pool
     #[arg(long)]
-    worker_profile: String,
+    worker_agent: Option<String>,
+    /// Auditor profile (default: follows the control plane)
+    #[arg(long, conflicts_with = "auditor_agent")]
+    auditor_profile: Option<String>,
+    /// External ACP agent for the auditor (default: follows control)
+    #[arg(long)]
+    auditor_agent: Option<String>,
     /// Mission objective
     #[arg(long)]
     task: String,
@@ -257,7 +278,13 @@ async fn external_acceptance(
     (rows, if cmds.is_empty() { None } else { Some(all_ok) })
 }
 
-fn est_cost(u: &mission::UsageAgg, p: &Profile) -> Option<f64> {
+fn est_cost(u: &mission::UsageAgg, b: &Backend) -> Option<f64> {
+    let p = match b {
+        Backend::Native(p) => p,
+        // ACP telemetry is partial and priced by the agent's own billing;
+        // reporting $0 here would be a lie.
+        Backend::Acp(_) => return None,
+    };
     let pr = p.pricing.as_ref()?;
     if u.telemetry_known == 0 {
         return None;
@@ -286,8 +313,28 @@ async fn main() -> Result<()> {
         .workspace
         .unwrap_or(std::env::current_dir()?)
         .canonicalize()?;
-    let control = config::resolve_profile(&cli.control_profile, cli.config.as_deref())?;
-    let worker = config::resolve_profile(&cli.worker_profile, cli.config.as_deref())?;
+    // A role resolves to a native provider profile or a trusted
+    // [agents.<name>] ACP spec — never both, never a provider URL.
+    let resolve = |agent: &Option<String>, prof: &Option<String>| -> Result<Option<Backend>> {
+        if let Some(a) = agent {
+            return Ok(Some(Backend::Acp(config::resolve_agent(
+                a,
+                cli.config.as_deref(),
+            )?)));
+        }
+        match prof {
+            Some(p) => Ok(Some(Backend::Native(config::resolve_profile(
+                p,
+                cli.config.as_deref(),
+            )?))),
+            None => Ok(None),
+        }
+    };
+    let control = resolve(&cli.control_agent, &cli.control_profile)?
+        .context("need --control-profile or --control-agent")?;
+    let worker = resolve(&cli.worker_agent, &cli.worker_profile)?
+        .context("need --worker-profile or --worker-agent")?;
+    let auditor = resolve(&cli.auditor_agent, &cli.auditor_profile)?;
     let max_workers = cli.max_workers.clamp(1, 2);
 
     let ts = std::time::SystemTime::now()
@@ -301,9 +348,15 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&run_dir)?;
 
     eprintln!("mission {session}");
-    eprintln!("  control: {} → {}", cli.control_profile, control.model);
-    eprintln!("  worker:  {} → {}", cli.worker_profile, worker.model);
-    let verified = control.api_key.is_some() && worker.api_key.is_some();
+    eprintln!("  control: {} → {}", control.label(), control.model());
+    eprintln!("  worker:  {} → {}", worker.label(), worker.model());
+    if let Some(a) = &auditor {
+        eprintln!("  auditor: {} → {}", a.label(), a.model());
+    }
+    let verified = match (&control, &worker) {
+        (Backend::Native(c), Backend::Native(w)) => c.api_key.is_some() && w.api_key.is_some(),
+        _ => true, // external agents authenticate via their own CLIs
+    };
     if !verified {
         eprintln!("  warning: credentials missing — report will be UNVERIFIED");
     }
@@ -316,6 +369,7 @@ async fn main() -> Result<()> {
         run_dir: rd.to_path_buf(),
         control: control.clone(),
         worker: worker.clone(),
+        auditor: auditor.clone(),
         objective: cli.task.clone(),
         max_workers,
         session: sess.to_string(),
@@ -335,6 +389,12 @@ async fn main() -> Result<()> {
     let mut rows: Vec<TrialRow> = vec![];
 
     if cli.compare {
+        let (control_p, worker_p) = match (&control, &worker) {
+            (Backend::Native(c), Backend::Native(w)) => (c, w),
+            _ => anyhow::bail!(
+                "--compare solo baselines need native profiles; external agents have no solo strategy"
+            ),
+        };
         // strategies rotate per trial so order effects are visible
         let order = [Strat::StrongOnly, Strat::CheapOnly, Strat::Mission];
         for trial in 0..cli.trials {
@@ -359,7 +419,7 @@ async fn main() -> Result<()> {
                             &mrd,
                             &format!("strong-{trial}"),
                             &session,
-                            &control,
+                            control_p,
                             &cli.task,
                         )
                         .await?
@@ -370,7 +430,7 @@ async fn main() -> Result<()> {
                             &mrd,
                             &format!("cheap-{trial}"),
                             &session,
-                            &worker,
+                            worker_p,
                             &cli.task,
                         )
                         .await?
