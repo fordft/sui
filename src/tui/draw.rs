@@ -143,6 +143,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false }),
         rows[3],
     );
+    // clicking the input box focuses it (exits transcript nav)
+    app.hits.borrow_mut().push(HitZone {
+        x: rows[3].x,
+        y: rows[3].y,
+        w: rows[3].width,
+        h: rows[3].height,
+        hit: Hit::Input,
+    });
 
     // footer
     let keys =
@@ -630,6 +638,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                     Line::from("mouse:"),
                     Line::from("  wheel scrolls   click selects/expands   drag copies (osc52)"),
                     Line::from("  shift+drag = native terminal select   Settings → mouse toggles"),
+                    Line::from("  paste: Ctrl+V / Shift+Insert (right-click paste needs capture off)"),
                     Line::from("  /mission /solo /export /help — settings: run mode · export report"),
                     Line::from(""),
                     Line::from("shell execution is NOT a sandbox — approvals are per-action"),

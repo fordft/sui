@@ -2487,3 +2487,55 @@ fn mouse_settings_row_toggles() {
         "terminal capture disabled live"
     );
 }
+
+/// A stale Perm zone must never eat a different modal — the click
+/// handler only decides when the modal actually is Permission.
+#[test]
+fn mouse_stale_perm_zone_cannot_close_other_modal() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    // draw a real permission modal → Perm zones exist in the hitmap
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        run: 1,
+        id: 9,
+        agent: "w1".into(),
+        summary: "bash: x".into(),
+        reply: tx,
+    });
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let (cx, cy) = zone(&app, |h| {
+        matches!(h, Hit::Perm(sui::events::GateChoice::Once))
+    });
+    // modal swapped before the next draw — the zone is now stale
+    app.modal = Some(sui::tui::app::Modal::Help);
+    click(&mut app, cx, cy);
+    assert!(
+        matches!(app.modal, Some(sui::tui::app::Modal::Help)),
+        "stale Perm click must not close the Help modal"
+    );
+}
+
+/// Clicking the input box focuses it — it must NOT enter transcript nav;
+/// clicking inside the transcript does.
+#[test]
+fn mouse_click_input_focuses_not_nav() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.nav = true;
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let (cx, cy) = zone(&app, |h| matches!(h, Hit::Input));
+    click(&mut app, cx, cy);
+    assert!(!app.nav, "input click exits nav, not enters it");
+
+    // inside the transcript pane → nav focus
+    let g = app.chat_geom.get();
+    click(&mut app, g.x + 3, g.y + g.h - 1);
+    assert!(app.nav, "transcript-area click enters nav");
+}

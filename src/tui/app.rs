@@ -63,6 +63,8 @@ pub enum Hit {
     Setting(usize),
     /// Wheel-scrollable details modal body.
     ViewScroll,
+    /// The chat input box — clicking focuses it (exits transcript nav).
+    Input,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1613,8 +1615,12 @@ impl App {
             .map(|z| z.hit);
         match hit {
             Some(Hit::Perm(c)) => {
-                if let Some(Modal::Permission { reply, .. }) = self.modal.take() {
-                    self.modal = self.decide_perm(c, reply);
+                // only a live Permission modal may be decided — a stale
+                // zone must never eat a different modal
+                if matches!(self.modal, Some(Modal::Permission { .. })) {
+                    if let Some(Modal::Permission { reply, .. }) = self.modal.take() {
+                        self.modal = self.decide_perm(c, reply);
+                    }
                 }
             }
             Some(Hit::Tab(t)) if self.modal.is_none() => {
@@ -1637,13 +1643,21 @@ impl App {
                 }
             }
             Some(Hit::ViewScroll) => {} // inside the details view — not a dismiss click
+            Some(Hit::Input) if self.modal.is_none() => {
+                self.nav = false; // clicking the input focuses it
+            }
             _ => {
-                // click outside a dismissible modal closes it; a plain
-                // transcript click focuses it for keyboard nav
+                // click outside a dismissible modal closes it; a click
+                // inside the transcript pane focuses it for keyboard nav
                 match self.modal {
                     Some(Modal::Help) | Some(Modal::View { .. }) => self.modal = None,
                     _ => {
-                        if self.modal.is_none() && self.tab == Tab::Chat {
+                        let g = self.chat_geom.get();
+                        let inside = col >= g.x
+                            && col < g.x + g.w
+                            && row >= g.y.saturating_sub(1) // border counts too
+                            && row < g.y + g.h;
+                        if self.modal.is_none() && self.tab == Tab::Chat && inside {
                             self.nav = true;
                         }
                     }
