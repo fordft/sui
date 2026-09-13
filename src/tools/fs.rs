@@ -16,7 +16,9 @@ const READ_MAX: usize = 400;
 /// TOCTOU window between validation and open; true containment needs
 /// openat2/RESOLVE_BENEATH or an OS sandbox. bash is NOT covered at all.
 pub fn resolve(workspace: &Path, rel: &str) -> Result<PathBuf> {
-    let root = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
     let joined = if Path::new(rel).is_absolute() {
         PathBuf::from(rel)
     } else {
@@ -61,8 +63,8 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let limit = (args["limit"].as_u64().unwrap_or(READ_DEFAULT as u64) as usize).min(READ_MAX);
     let p = resolve(&ctx.workspace, path)?;
 
-    let text = std::fs::read_to_string(&p)
-        .with_context(|| format!("cannot read {}", p.display()))?;
+    let text =
+        std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
     let start = offset.saturating_sub(1);
@@ -72,7 +74,10 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
         ));
     }
     let end = (start + limit).min(total);
-    let mut out = format!("status: success\npath: {path}\nlines: {total}\nshowing: {}-{end}\n", start + 1);
+    let mut out = format!(
+        "status: success\npath: {path}\nlines: {total}\nshowing: {}-{end}\n",
+        start + 1
+    );
     for (i, l) in lines[start..end].iter().enumerate() {
         out.push_str(&format!("{:>5}  {}\n", start + i + 1, l));
     }
@@ -107,8 +112,8 @@ pub fn edit_file(ctx: &ToolContext, args: &Value) -> Result<String> {
         return Ok("status: error\nerror: old_str equals new_str".into());
     }
     let p = resolve(&ctx.workspace, path)?;
-    let text = std::fs::read_to_string(&p)
-        .with_context(|| format!("cannot read {}", p.display()))?;
+    let text =
+        std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
 
     let count = text.matches(old).count();
     match count {

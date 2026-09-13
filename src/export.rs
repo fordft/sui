@@ -31,14 +31,14 @@ pub struct ExportOpts {
 }
 
 fn runs_root(o: &ExportOpts) -> PathBuf {
-    o.runs_root.clone().unwrap_or_else(|| {
-        dirs_home().join(".local/share/sui/runs")
-    })
+    o.runs_root
+        .clone()
+        .unwrap_or_else(|| dirs_home().join(".local/share/sui/runs"))
 }
 fn out_root(o: &ExportOpts) -> PathBuf {
-    o.out_root.clone().unwrap_or_else(|| {
-        dirs_home().join(".local/share/sui/exports")
-    })
+    o.out_root
+        .clone()
+        .unwrap_or_else(|| dirs_home().join(".local/share/sui/exports"))
 }
 fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
@@ -64,9 +64,10 @@ fn resolve_run_dir(o: &ExportOpts) -> Result<(String, PathBuf)> {
             .unwrap_or(std::time::UNIX_EPOCH)
     });
     if let Some(id) = &o.run_id {
-        if let Some(p) = dirs.iter().find(|p| {
-            p.file_name().and_then(|n| n.to_str()) == Some(id.as_str())
-        }) {
+        if let Some(p) = dirs
+            .iter()
+            .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(id.as_str()))
+        {
             return Ok((id.clone(), p.clone()));
         }
         let hits: Vec<_> = dirs
@@ -153,17 +154,20 @@ fn journal_files(dir: &Path) -> Vec<PathBuf> {
                 .collect()
         })
         .unwrap_or_default();
-    let rank = |p: &PathBuf| {
-        match p.file_name().and_then(|n| n.to_str()).unwrap_or("") {
-            "mission.jsonl" => 0,
-            "solo.jsonl" => 1,
-            "orchestrator.jsonl" => 2,
-            "auditor.jsonl" => 3,
-            "escalation.jsonl" => 4,
-            _ => 5,
-        }
+    let rank = |p: &PathBuf| match p.file_name().and_then(|n| n.to_str()).unwrap_or("") {
+        "mission.jsonl" => 0,
+        "solo.jsonl" => 1,
+        "orchestrator.jsonl" => 2,
+        "auditor.jsonl" => 3,
+        "escalation.jsonl" => 4,
+        _ => 5,
     };
-    files.sort_by_key(|p| (rank(p), p.file_name().map(|n| n.to_string_lossy().to_string())));
+    files.sort_by_key(|p| {
+        (
+            rank(p),
+            p.file_name().map(|n| n.to_string_lossy().to_string()),
+        )
+    });
     files
 }
 
@@ -192,11 +196,7 @@ impl Redactor {
     }
 
     fn bump(&mut self, cat: &str) {
-        let n = self
-            .counts
-            .get(cat)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let n = self.counts.get(cat).and_then(|v| v.as_u64()).unwrap_or(0);
         self.counts.insert(cat.to_string(), json!(n + 1));
     }
 
@@ -398,7 +398,10 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 "assistant" => {
                     let mut d = d.clone();
                     // reasoning content is private — never exported
-                    if d.get("reasoning_content").map(|r| !r.is_null()).unwrap_or(false) {
+                    if d.get("reasoning_content")
+                        .map(|r| !r.is_null())
+                        .unwrap_or(false)
+                    {
                         d.as_object_mut().map(|m| m.remove("reasoning_content"));
                         red.bump("model reasoning (omitted)");
                     }
@@ -458,15 +461,16 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 }
                 "tool" => agent.timeline.push(tl(ts, "tool", d.clone())),
                 "warn" | "budget_exceeded" | "interrupted" => {
-                    agent.timeline.push(tl(ts, e["type"].as_str().unwrap(), d.clone()))
+                    agent
+                        .timeline
+                        .push(tl(ts, e["type"].as_str().unwrap(), d.clone()))
                 }
                 "mission" => {
-                    mission_states.push((
-                        ts,
-                        field_str(d, "state").unwrap_or_else(|| "?".into()),
-                    ));
+                    mission_states.push((ts, field_str(d, "state").unwrap_or_else(|| "?".into())));
                     if let Some(why) = field_str(d, "why") {
-                        mission_states.last_mut().map(|(_, s)| *s = format!("{s} — {why}"));
+                        mission_states
+                            .last_mut()
+                            .map(|(_, s)| *s = format!("{s} — {why}"));
                     }
                 }
                 "plan" => plan = Some(d.clone()),
@@ -493,9 +497,8 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
         .and_then(|s| field_str(s, "approval"))
         .unwrap_or_else(|| "Not recorded.".into());
     if session.is_none() {
-        ctx.limitations.push(
-            "no session event — workspace, approval mode and version not recorded".into(),
-        );
+        ctx.limitations
+            .push("no session event — workspace, approval mode and version not recorded".into());
     }
     let mode = session
         .as_ref()
@@ -566,9 +569,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
         } else {
             Some(PathBuf::from(&workspace))
         };
-        let base = plan
-            .as_ref()
-            .and_then(|p| field_str(p, "base_commit"));
+        let base = plan.as_ref().and_then(|p| field_str(p, "base_commit"));
         let head = accepted
             .as_ref()
             .and_then(|a| field_str(a, "sha"))
@@ -637,7 +638,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
     });
     let mut report = report;
     red.value(&mut report); // redact every string in the assembled report
-    // counts go in last — they must reflect the final pass itself
+                            // counts go in last — they must reflect the final pass itself
     report["redactions"] = json!(red.counts);
 
     // ── write ───────────────────────────────────────────────────────
@@ -773,7 +774,10 @@ fn git_diff(ws: &Path, base: &str, head: &str, ctx: &mut Ctx) -> Value {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).to_string();
             if s.len() > 200_000 {
-                (format!("{}…<export truncated at 200KB>", &s[..200_000]), true)
+                (
+                    format!("{}…<export truncated at 200KB>", &s[..200_000]),
+                    true,
+                )
             } else {
                 (s, false)
             }
@@ -789,14 +793,21 @@ fn git_diff(ws: &Path, base: &str, head: &str, ctx: &mut Ctx) -> Value {
 // ── markdown render ───────────────────────────────────────────────────
 
 fn md_str(v: &Value) -> String {
-    v.as_str()
-        .map(String::from)
-        .unwrap_or_else(|| if v.is_null() { "Unknown".into() } else { v.to_string() })
+    v.as_str().map(String::from).unwrap_or_else(|| {
+        if v.is_null() {
+            "Unknown".into()
+        } else {
+            v.to_string()
+        }
+    })
 }
 
 fn render_md(r: &Value) -> String {
     let mut m = String::new();
-    m.push_str(&format!("# Sui run report — {}\n\n", r["run_id"].as_str().unwrap_or("?")));
+    m.push_str(&format!(
+        "# Sui run report — {}\n\n",
+        r["run_id"].as_str().unwrap_or("?")
+    ));
     m.push_str("> Review before sharing: this report may contain project code and commands.\n\n");
 
     m.push_str("## Run overview\n\n");
@@ -828,22 +839,46 @@ fn render_md(r: &Value) -> String {
                 md_str(&a["role"]),
                 md_str(&a["provider"]),
                 md_str(&a["requested_model"]),
-                a["returned_models"].as_array().map(|v| v.iter().map(|x| x.as_str().unwrap_or("?")).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                a["returned_models"]
+                    .as_array()
+                    .map(|v| v
+                        .iter()
+                        .map(|x| x.as_str().unwrap_or("?"))
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default(),
                 a["requests"].as_u64().unwrap_or(0),
             ));
         }
     }
     if let Some(plan) = r["plan"].as_object() {
         m.push_str("\n### Mission plan\n\n");
-        m.push_str(&format!("- base commit: `{}`\n", md_str(&plan["base_commit"])));
+        m.push_str(&format!(
+            "- base commit: `{}`\n",
+            md_str(&plan["base_commit"])
+        ));
         if let Some(tasks) = plan["tasks"].as_array() {
             for t in tasks {
                 m.push_str(&format!(
                     "- **{}** — {} — owns `{}` — deps: `{}` — acceptance: {} cmd(s)\n",
                     md_str(&t["id"]),
                     md_str(&t["objective"]),
-                    t["owned_paths"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
-                    t["depends_on"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                    t["owned_paths"]
+                        .as_array()
+                        .map(|a| a
+                            .iter()
+                            .map(|x| x.as_str().unwrap_or(""))
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default(),
+                    t["depends_on"]
+                        .as_array()
+                        .map(|a| a
+                            .iter()
+                            .map(|x| x.as_str().unwrap_or(""))
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default(),
                     t["acceptance"].as_array().map(|a| a.len()).unwrap_or(0),
                 ));
             }
@@ -889,10 +924,20 @@ fn render_md(r: &Value) -> String {
                 md_str(&t["id"]),
                 if t["ok"] == true { "passed" } else { "failed" },
                 md_str(&t["sha"]),
-                t["changed"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+                t["changed"]
+                    .as_array()
+                    .map(|a| a
+                        .iter()
+                        .map(|x| x.as_str().unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default(),
             ));
             if let Some(c) = t["capsule"].as_str().filter(|c| !c.is_empty()) {
-                m.push_str(&format!("  - failure capsule:\n\n```\n{}\n```\n", cap(c, 3000)));
+                m.push_str(&format!(
+                    "  - failure capsule:\n\n```\n{}\n```\n",
+                    cap(c, 3000)
+                ));
             }
             if let Some(gs) = t["gates"].as_array().filter(|g| !g.is_empty()) {
                 for g in gs {
@@ -904,20 +949,34 @@ fn render_md(r: &Value) -> String {
     if let Some(auds) = r["audits"].as_array().filter(|a| !a.is_empty()) {
         m.push_str("\n### Auditor verdicts\n\n");
         for a in auds {
-            m.push_str(&format!("```json\n{}\n```\n", cap(&serde_json::to_string_pretty(a).unwrap_or_default(), 4000)));
+            m.push_str(&format!(
+                "```json\n{}\n```\n",
+                cap(&serde_json::to_string_pretty(a).unwrap_or_default(), 4000)
+            ));
         }
     }
     m.push('\n');
 
     m.push_str("## Repository result\n\n");
     if let Some(acc) = r["accepted"].as_object() {
-        m.push_str(&format!("- accepted sha: `{}`\n- branch: `{}`\n", md_str(&acc["sha"]), md_str(&acc["branch"])));
+        m.push_str(&format!(
+            "- accepted sha: `{}`\n- branch: `{}`\n",
+            md_str(&acc["sha"]),
+            md_str(&acc["branch"])
+        ));
     } else {
-        m.push_str(&format!("- accepted sha: {}\n", md_str(&r["accepted"]["sha"])));
+        m.push_str(&format!(
+            "- accepted sha: {}\n",
+            md_str(&r["accepted"]["sha"])
+        ));
     }
     if let Some(d) = r["diff"].as_object() {
-        m.push_str(&format!("\n### Diff `{}..{}`\n\n```diff\n{}\n```\n",
-            md_str(&d["base"]), md_str(&d["head"]), md_str(&d["diff"])));
+        m.push_str(&format!(
+            "\n### Diff `{}..{}`\n\n```diff\n{}\n```\n",
+            md_str(&d["base"]),
+            md_str(&d["head"]),
+            md_str(&d["diff"])
+        ));
         if d["truncated_by_export"] == true {
             m.push_str("_Diff truncated by export at 200KB._\n");
         }
@@ -926,7 +985,9 @@ fn render_md(r: &Value) -> String {
 
     m.push_str("## Usage and timing\n\n");
     if let Some(rows) = r["usage"]["per_agent"].as_array() {
-        m.push_str("| agent | requests | in | cached | written | out |\n|---|---|---|---|---|---|\n");
+        m.push_str(
+            "| agent | requests | in | cached | written | out |\n|---|---|---|---|---|---|\n",
+        );
         for a in rows {
             m.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
@@ -963,7 +1024,11 @@ fn render_md(r: &Value) -> String {
     if let Some(red) = r["redactions"].as_object().filter(|m| !m.is_empty()) {
         m.push_str("\n### Redactions\n\n");
         for (k, v) in red {
-            m.push_str(&format!("- {}: {} occurrence(s)\n", k, v.as_u64().unwrap_or(0)));
+            m.push_str(&format!(
+                "- {}: {} occurrence(s)\n",
+                k,
+                v.as_u64().unwrap_or(0)
+            ));
         }
         m.push_str("\n_Redaction is best-effort — review before sharing._\n");
     }
@@ -975,10 +1040,16 @@ fn render_event(m: &mut String, e: &Value) {
     let d = &e["data"];
     match kind {
         "user" => {
-            m.push_str(&format!("**user:** {}\n\n", cap(&md_str(&d["content"]), 4000)));
+            m.push_str(&format!(
+                "**user:** {}\n\n",
+                cap(&md_str(&d["content"]), 4000)
+            ));
         }
         "task" => {
-            m.push_str(&format!("**task submitted** (approval: {})\n\n", md_str(&d["approval"])));
+            m.push_str(&format!(
+                "**task submitted** (approval: {})\n\n",
+                md_str(&d["approval"])
+            ));
         }
         "task_done" => {
             m.push_str(&format!("**task finished:** {}\n\n", md_str(&d["outcome"])));
@@ -1012,7 +1083,9 @@ fn render_event(m: &mut String, e: &Value) {
             if let Some(res) = d["result"].as_str() {
                 m.push_str(&format!("```\n{}\n```\n", cap(res, 8000)));
                 if res.contains("truncated: true") {
-                    m.push_str("_Output was truncated during capture; omitted content unavailable._\n");
+                    m.push_str(
+                        "_Output was truncated during capture; omitted content unavailable._\n",
+                    );
                 }
             }
             m.push('\n');
@@ -1060,7 +1133,10 @@ fn render_gate(m: &mut String, g: &Value) {
         md_str(&g["kind"]),
         md_str(&g["cmd"]),
         md_str(&g["cwd"]),
-        g["exit_code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+        g["exit_code"]
+            .as_i64()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into()),
         if g["ok"] == true { "pass" } else { "FAIL" },
     ));
     let err = md_str(&g["stderr_tail"]);
@@ -1085,5 +1161,7 @@ fn cap(s: &str, n: usize) -> String {
 }
 
 fn num_or_unknown(v: &Value) -> String {
-    v.as_u64().map(|n| n.to_string()).unwrap_or_else(|| "Unknown".into())
+    v.as_u64()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "Unknown".into())
 }

@@ -43,26 +43,38 @@ fn solo_run(dir: &Path) {
         dir,
         "solo",
         &[
-            jline("session", json!({"mode":"solo","workspace":"/tmp/proj","sui_version":"0.0.0-test","approval":"ask"})),
+            jline(
+                "session",
+                json!({"mode":"solo","workspace":"/tmp/proj","sui_version":"0.0.0-test","approval":"ask"}),
+            ),
             jline("task", json!({"task":"fix the bug","approval":"ask"})),
             jline("user", json!({"content":"fix the bug"})),
-            jline("request", json!({
-                "request_id":0,"agent_id":"solo","role":"worker",
-                "provider_profile":"http://x/v1","requested_model":"m1","returned_model":"m1",
-                "usage":{"input_tokens":10,"output_tokens":5,"complete":true},
-                "timing":{"request_total_ms":100},"finish_reason":"tool_calls",
-            })),
-            jline("assistant", json!({
-                "content":"I'll run the tests.",
-                "reasoning_content":"private chain-of-thought must never appear",
-                "tool_calls":[{"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"cargo test -- --api sk-livesecret0123456789\"}"}}],
-            })),
-            jline("tool", json!({
-                "tool_call_id":"c1","name":"bash",
-                "args":"{\"command\":\"cargo test -- --api sk-livesecret0123456789\"}",
-                "executed":true,"execution_ms":1200,
-                "result":"status: failed\nexit_code: 1\nstdout: test failed\nstderr: hint: use --key sk-livesecret0123456789\ntruncated: false",
-            })),
+            jline(
+                "request",
+                json!({
+                    "request_id":0,"agent_id":"solo","role":"worker",
+                    "provider_profile":"http://x/v1","requested_model":"m1","returned_model":"m1",
+                    "usage":{"input_tokens":10,"output_tokens":5,"complete":true},
+                    "timing":{"request_total_ms":100},"finish_reason":"tool_calls",
+                }),
+            ),
+            jline(
+                "assistant",
+                json!({
+                    "content":"I'll run the tests.",
+                    "reasoning_content":"private chain-of-thought must never appear",
+                    "tool_calls":[{"id":"c1","function":{"name":"bash","arguments":"{\"command\":\"cargo test -- --api sk-livesecret0123456789\"}"}}],
+                }),
+            ),
+            jline(
+                "tool",
+                json!({
+                    "tool_call_id":"c1","name":"bash",
+                    "args":"{\"command\":\"cargo test -- --api sk-livesecret0123456789\"}",
+                    "executed":true,"execution_ms":1200,
+                    "result":"status: failed\nexit_code: 1\nstdout: test failed\nstderr: hint: use --key sk-livesecret0123456789\ntruncated: false",
+                }),
+            ),
             jline("task_done", json!({"outcome":"done"})),
         ],
     );
@@ -86,7 +98,10 @@ fn solo_run_renders_and_redacts() {
     assert!(md.contains("ask"), "approval mode");
     assert!(md.contains("**Mode:** solo"));
     // secret must not appear anywhere
-    assert!(!md.contains("sk-livesecret0123456789"), "key leaked in args/result");
+    assert!(
+        !md.contains("sk-livesecret0123456789"),
+        "key leaked in args/result"
+    );
     assert!(md.contains("«redacted"), "redaction marker present");
     // private reasoning never exported
     assert!(!md.contains("private chain-of-thought"));
@@ -94,7 +109,10 @@ fn solo_run_renders_and_redacts() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
 
@@ -138,7 +156,10 @@ fn malformed_and_incomplete_lines_tolerated() {
     );
     let p = run_export(&opts(&runs, &out, "tui-3-1")).unwrap();
     let md = std::fs::read_to_string(&p).unwrap();
-    assert!(md.contains("malformed journal line"), "limitations must flag skipped lines");
+    assert!(
+        md.contains("malformed journal line"),
+        "limitations must flag skipped lines"
+    );
     assert!(md.contains("do it"));
 }
 
@@ -154,17 +175,23 @@ fn missing_usage_is_unknown_not_zero() {
         "solo",
         &[
             jline("user", json!({"content":"x"})),
-            jline("request", json!({
-                "request_id":0,"agent_id":"solo","role":"worker",
-                "provider_profile":"http://x","requested_model":"m",
-                "usage": null, "finish_reason":"stop",
-            })),
+            jline(
+                "request",
+                json!({
+                    "request_id":0,"agent_id":"solo","role":"worker",
+                    "provider_profile":"http://x","requested_model":"m",
+                    "usage": null, "finish_reason":"stop",
+                }),
+            ),
             jline("task_done", json!({"outcome":"done"})),
         ],
     );
     let p = run_export(&opts(&runs, &out, "tui-4-1")).unwrap();
     let md = std::fs::read_to_string(&p).unwrap();
-    assert!(md.contains("Unknown"), "missing usage → Unknown, never zero");
+    assert!(
+        md.contains("Unknown"),
+        "missing usage → Unknown, never zero"
+    );
     assert!(!md.contains("| solo | 1 | 0 |"), "must not fabricate zeros");
 }
 
@@ -178,7 +205,10 @@ fn running_snapshot_labeled() {
     write_journal(
         &run,
         "solo",
-        &[jline("session", json!({"mode":"solo","workspace":"/w"})), jline("user", json!({"content":"go"}))],
+        &[
+            jline("session", json!({"mode":"solo","workspace":"/w"})),
+            jline("user", json!({"content":"go"})),
+        ],
     );
     let mut o = opts(&runs, &out, "tui-5-1");
     o.running = true;
@@ -200,7 +230,10 @@ fn unicode_and_cancelled() {
         &[
             jline("user", json!({"content":"修正 tëst — 🚀 émoji"})),
             jline("interrupted", json!({"request_id":0,"phase":"tool"})),
-            jline("tool", json!({"tool_call_id":"x","name":"bash","args":"{}","executed":false,"execution_ms":1,"result":"status: cancelled\nerror: interrupted by user"})),
+            jline(
+                "tool",
+                json!({"tool_call_id":"x","name":"bash","args":"{}","executed":false,"execution_ms":1,"result":"status: cancelled\nerror: interrupted by user"}),
+            ),
         ],
     );
     let p = run_export(&opts(&runs, &out, "tui-6-1")).unwrap();
@@ -230,11 +263,25 @@ fn latest_picks_matching_workspace() {
     // older dir: other workspace
     let a = runs.join("tui-old-1");
     std::fs::create_dir_all(&a).unwrap();
-    write_journal(&a, "solo", &[jline("session", json!({"mode":"solo","workspace":"/other"})), jline("user", json!({"content":"old"}))]);
+    write_journal(
+        &a,
+        "solo",
+        &[
+            jline("session", json!({"mode":"solo","workspace":"/other"})),
+            jline("user", json!({"content":"old"})),
+        ],
+    );
     // newer dir: our workspace
     let b = runs.join("tui-new-1");
     std::fs::create_dir_all(&b).unwrap();
-    write_journal(&b, "solo", &[jline("session", json!({"mode":"solo","workspace":"/ws"})), jline("user", json!({"content":"new"}))]);
+    write_journal(
+        &b,
+        "solo",
+        &[
+            jline("session", json!({"mode":"solo","workspace":"/ws"})),
+            jline("user", json!({"content":"new"})),
+        ],
+    );
     std::thread::sleep(std::time::Duration::from_millis(30));
     // touch b later so mtime ordering picks it
     std::fs::write(b.join("marker"), b"x").unwrap();

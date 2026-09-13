@@ -24,7 +24,11 @@ use sui::tools::ToolContext;
 use sui::types::Message;
 
 #[derive(Parser)]
-#[command(name = "sui-certify", version, about = "bounded live-provider certification")]
+#[command(
+    name = "sui-certify",
+    version,
+    about = "bounded live-provider certification"
+)]
 struct Cli {
     /// Profiles to certify, in order (cheap worker first, then strong).
     #[arg(long, required = true)]
@@ -143,7 +147,11 @@ fn replay_history(path: &Path, max_users: usize) -> Result<Vec<Message>> {
             Some("assistant") => {
                 let c = e["data"]["content"].as_str().unwrap_or("");
                 out.push(Message::Assistant {
-                    content: if c.is_empty() { None } else { Some(c.to_string()) },
+                    content: if c.is_empty() {
+                        None
+                    } else {
+                        Some(c.to_string())
+                    },
                     // empty [] must round-trip to None — the field is absent
                     // in the original serialization
                     tool_calls: serde_json::from_value::<Vec<sui::types::ToolCall>>(
@@ -183,7 +191,11 @@ fn request_rows(path: &Path, scenario: &str) -> Vec<Value> {
 /// event in a scenario journal — the request whose context began with it.
 fn fp_after_nth_user(path: &Path, n: usize) -> Option<String> {
     let mut users = 0;
-    for line in std::fs::read_to_string(path).ok()?.lines().collect::<Vec<_>>() {
+    for line in std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .collect::<Vec<_>>()
+    {
         let e: Value = serde_json::from_str(line).ok()?;
         match e["type"].as_str() {
             Some("user") => users += 1,
@@ -206,7 +218,10 @@ fn tool_exec_count(path: &Path) -> usize {
 }
 
 async fn run_profile(prof: &Profile, max_req: u64, keep: bool) -> Result<()> {
-    eprintln!("\n══ profile '{}' → {} · model {} ══", prof.name, prof.base_url, prof.model);
+    eprintln!(
+        "\n══ profile '{}' → {} · model {} ══",
+        prof.name, prof.base_url, prof.model
+    );
     if prof.api_key.is_none() {
         eprintln!("  no credentials resolved — will run but verdict is UNVERIFIED");
     }
@@ -371,20 +386,35 @@ fn report(ctx: &Ctx, run_dir: &Path, prof: &Profile) -> Result<()> {
     match (s1_target, fp_of("s3_restart_replay", 0)) {
         (Some(a), Some(b)) => p!(
             "- restart/replay fingerprint: {}",
-            if a == b { "EQUAL ✓ (journal reconstructs identical request)" }
-                      else { "DIFFERENT ✗ (persistence altered serialization)" }
+            if a == b {
+                "EQUAL ✓ (journal reconstructs identical request)"
+            } else {
+                "DIFFERENT ✗ (persistence altered serialization)"
+            }
         ),
         _ => p!("- restart/replay fingerprint: incomplete data"),
     }
     match (hash_of("s1_tool_cycle"), hash_of("s5_prefix_mutation")) {
         (Some(a), Some(b)) => p!(
             "- prefix mutation detection: {}",
-            if a != b { "DETECTED ✓" } else { "NOT DETECTED ✗" }
+            if a != b {
+                "DETECTED ✓"
+            } else {
+                "NOT DETECTED ✗"
+            }
         ),
         _ => p!("- prefix mutation detection: incomplete data"),
     }
-    if let (Some(a), Some(b)) = (cred_of("s1_tool_cycle", 0), cred_of("s2_identical_replay", 0)) {
-        p!("- replay cache_read: first={} replay={} (Δ {:+})", a, b, b as i64 - a as i64);
+    if let (Some(a), Some(b)) = (
+        cred_of("s1_tool_cycle", 0),
+        cred_of("s2_identical_replay", 0),
+    ) {
+        p!(
+            "- replay cache_read: first={} replay={} (Δ {:+})",
+            a,
+            b,
+            b as i64 - a as i64
+        );
     }
     p!("");
 

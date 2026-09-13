@@ -10,7 +10,11 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .context("spawn git")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
-        bail!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(stdout.trim().to_string())
 }
@@ -74,7 +78,10 @@ pub fn diff(wt: &Path, base: &str) -> Result<String> {
 /// Merge `branch` into the integration worktree. On conflict, abort the
 /// merge and report the conflicted files.
 pub fn merge(integration_wt: &Path, branch: &str) -> Result<()> {
-    match git(integration_wt, &["merge", "--no-ff", "-m", &format!("merge {branch}"), branch]) {
+    match git(
+        integration_wt,
+        &["merge", "--no-ff", "-m", &format!("merge {branch}"), branch],
+    ) {
         Ok(_) => Ok(()),
         Err(e) => {
             let conflicts = git(integration_wt, &["diff", "--name-only", "--diff-filter=U"])

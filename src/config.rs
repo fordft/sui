@@ -141,18 +141,16 @@ pub fn profiles(config_path: Option<&Path>) -> Result<BTreeMap<String, ProfileCf
 /// profile's key_env env var, or an inline api_key in the user-owned file.
 pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile> {
     let all = profiles(config_path)?;
-    let p = all
-        .get(name)
-        .with_context(|| {
-            format!(
-                "unknown profile '{name}' (defined: {})",
-                if all.is_empty() {
-                    "none — add [profiles.<name>] to ~/.config/sui/config.toml".into()
-                } else {
-                    all.keys().cloned().collect::<Vec<_>>().join(", ")
-                }
-            )
-        })?;
+    let p = all.get(name).with_context(|| {
+        format!(
+            "unknown profile '{name}' (defined: {})",
+            if all.is_empty() {
+                "none — add [profiles.<name>] to ~/.config/sui/config.toml".into()
+            } else {
+                all.keys().cloned().collect::<Vec<_>>().join(", ")
+            }
+        )
+    })?;
     let api_key = p
         .key_env
         .as_deref()
@@ -300,11 +298,31 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .or(gp.prompt_cache_key);
 
     let max_turns = fa.max_turns.or(pa.max_turns).or(ga.max_turns).unwrap_or(60);
-    let bash_timeout_ms = fa.bash_timeout_ms.or(pa.bash_timeout_ms).or(ga.bash_timeout_ms).unwrap_or(120_000);
-    let bash_timeout_max_ms = fa.bash_timeout_max_ms.or(pa.bash_timeout_max_ms).or(ga.bash_timeout_max_ms).unwrap_or(600_000);
-    let request_timeout_ms = fa.request_timeout_ms.or(pa.request_timeout_ms).or(ga.request_timeout_ms).unwrap_or(300_000);
-    let context_token_budget = fa.context_token_budget.or(pa.context_token_budget).or(ga.context_token_budget).unwrap_or(120_000);
-    let context_reserve_tokens = fa.context_reserve_tokens.or(pa.context_reserve_tokens).or(ga.context_reserve_tokens).unwrap_or(8_192);
+    let bash_timeout_ms = fa
+        .bash_timeout_ms
+        .or(pa.bash_timeout_ms)
+        .or(ga.bash_timeout_ms)
+        .unwrap_or(120_000);
+    let bash_timeout_max_ms = fa
+        .bash_timeout_max_ms
+        .or(pa.bash_timeout_max_ms)
+        .or(ga.bash_timeout_max_ms)
+        .unwrap_or(600_000);
+    let request_timeout_ms = fa
+        .request_timeout_ms
+        .or(pa.request_timeout_ms)
+        .or(ga.request_timeout_ms)
+        .unwrap_or(300_000);
+    let context_token_budget = fa
+        .context_token_budget
+        .or(pa.context_token_budget)
+        .or(ga.context_token_budget)
+        .unwrap_or(120_000);
+    let context_reserve_tokens = fa
+        .context_reserve_tokens
+        .or(pa.context_reserve_tokens)
+        .or(ga.context_reserve_tokens)
+        .unwrap_or(8_192);
 
     let session_id = format!("{}-{}", unix_ts(), std::process::id());
     let run_dir = std::env::home_dir()
@@ -321,7 +339,12 @@ pub fn load(ov: Overrides) -> Result<Config> {
         workspace,
         run_dir,
         session_id,
-        auto_approve: ov.auto_approve || fa.auto_approve.or(pa.auto_approve).or(ga.auto_approve).unwrap_or(false),
+        auto_approve: ov.auto_approve
+            || fa
+                .auto_approve
+                .or(pa.auto_approve)
+                .or(ga.auto_approve)
+                .unwrap_or(false),
         max_turns,
         bash_timeout_ms,
         bash_timeout_max_ms,
@@ -344,6 +367,8 @@ pub struct UiSettings {
     /// None = auditor uses the orchestrator profile.
     pub auditor_profile: Option<String>,
     pub worker_count: Option<usize>,
+    /// Reasoning display preference: "auto" | "hidden" | "expanded".
+    pub reasoning: Option<String>,
     pub acceptance: Vec<String>,
 }
 
@@ -373,7 +398,10 @@ pub fn save_ui(ui: &UiSettings) -> Result<()> {
         .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
     doc.as_table_mut()
         .context("config root not a table")?
-        .insert("ui".into(), toml::Value::try_from(ui).context("serialize ui settings")?);
+        .insert(
+            "ui".into(),
+            toml::Value::try_from(ui).context("serialize ui settings")?,
+        );
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }

@@ -80,7 +80,11 @@ one-line summary.",
         c.id,
         c.objective,
         c.owned_paths.join(", "),
-        if c.read_paths.is_empty() { "any".into() } else { c.read_paths.join(", ") },
+        if c.read_paths.is_empty() {
+            "any".into()
+        } else {
+            c.read_paths.join(", ")
+        },
         c.acceptance.join("; "),
         worktree_name,
     )
@@ -98,12 +102,7 @@ Acceptance must pass: {}",
     )
 }
 
-pub fn audit_task(
-    plan: &MissionPlan,
-    diff: &str,
-    gate_results: &str,
-    risks: &str,
-) -> String {
+pub fn audit_task(plan: &MissionPlan, diff: &str, gate_results: &str, risks: &str) -> String {
     format!(
         "ROLE: auditor. Review the integrated candidate objectively.\n\
 PAYLOAD SHAPE: {{\"verdict\": \"PASS\"|\"FAIL\", \"findings\": [{{\"severity\": \"blocker\"|\"minor\", \"detail\": \"...\"}}], \"required_fixes\": [\"...\"]}}\n\

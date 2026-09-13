@@ -70,7 +70,11 @@ pub fn layer_hashes(tools: &[Value], system: &str) -> LayerHashes {
 /// Hash of the fully-serialized request — changes every turn as history
 /// grows (normal); drift in EARLY layers is what matters.
 pub fn request_fingerprint(messages: &[Message]) -> String {
-    sha256_hex(serde_json::to_string(messages).unwrap_or_default().as_bytes())
+    sha256_hex(
+        serde_json::to_string(messages)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {

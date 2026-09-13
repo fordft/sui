@@ -48,7 +48,11 @@ pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
     let out = std::process::Command::new("git")
         .args(["-C"])
         .arg(repo)
-        .args(["rev-parse", "--verify", &format!("{}^{{commit}}", plan.base_commit)])
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", plan.base_commit),
+        ])
         .output()
         .context("git rev-parse")?;
     if !out.status.success() {
@@ -92,8 +96,11 @@ pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
                 *indeg.entry(&t.id).or_insert(0) += 1;
             }
         }
-        let mut q: VecDeque<&str> =
-            indeg.iter().filter(|(_, &d)| d == 0).map(|(&k, _)| k).collect();
+        let mut q: VecDeque<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(&k, _)| k)
+            .collect();
         let mut seen = 0;
         while let Some(k) = q.pop_front() {
             seen += 1;
@@ -119,7 +126,10 @@ pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
                     if patterns_overlap(pa, pb) {
                         bail!(
                             "plan: tasks {} and {} overlap on ownership ({} vs {})",
-                            a.id, b.id, pa, pb
+                            a.id,
+                            b.id,
+                            pa,
+                            pb
                         );
                     }
                 }

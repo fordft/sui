@@ -34,7 +34,12 @@ impl Gate {
 
     /// Interactive mode: decisions arrive via UiEvent::Permission replies.
     /// `session` is the live session-approval flag shared with the UI.
-    pub fn set_ui(&mut self, sink: Sink, cancel: Arc<AtomicBool>, session: Option<Arc<AtomicBool>>) {
+    pub fn set_ui(
+        &mut self,
+        sink: Sink,
+        cancel: Arc<AtomicBool>,
+        session: Option<Arc<AtomicBool>>,
+    ) {
         self.sink = Some(sink);
         self.cancel = Some(cancel);
         self.session = session;
@@ -46,11 +51,16 @@ impl Gate {
     fn open(&self) -> bool {
         self.auto
             || self.session_allow
-            || self.session.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false)
+            || self
+                .session
+                .as_ref()
+                .map(|f| f.load(Ordering::Relaxed))
+                .unwrap_or(false)
     }
 
-    /// Returns true if the action may proceed.
-    pub async fn check(&mut self, summary: &str, agent: &str) -> bool {
+    /// Returns true if the action may proceed. `run` ties the prompt to
+    /// the activity group that spawned it.
+    pub async fn check(&mut self, summary: &str, agent: &str, run: u64) -> bool {
         if self.open() {
             // Under a UI (sink set) raw writes would corrupt the alt screen.
             if self.sink.is_none() {
@@ -62,6 +72,7 @@ impl Gate {
             self.seq += 1;
             let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = tx.send(UiEvent::Permission {
+                run,
                 id: self.seq,
                 agent: agent.to_string(),
                 summary: summary.to_string(),

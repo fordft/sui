@@ -66,6 +66,9 @@ pub struct MissionCfg {
     pub cancel: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
     /// Shared session-approval flag from the UI (see Gate::set_ui).
     pub session_approve: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Activity-run id stamped on UI events — one mission = one run
+    /// group in the transcript. Headless callers pass 1.
+    pub run: u64,
 }
 
 #[derive(Default)]
@@ -150,8 +153,14 @@ fn mk_agent(
     );
     a.set_quiet(true);
     a.set_system(system.to_string());
+    a.set_run_id(cfg.run);
     if let (Some(sink), Some((n, f))) = (&cfg.events, &cfg.cancel) {
-        a.wire_ui(sink.clone(), n.clone(), f.clone(), cfg.session_approve.clone());
+        a.wire_ui(
+            sink.clone(),
+            n.clone(),
+            f.clone(),
+            cfg.session_approve.clone(),
+        );
     }
     Ok(a)
 }
@@ -202,7 +211,9 @@ fn control_agent(
                 c.rejects += 1;
                 c.last_error = Some(format!("{e:#}"));
                 if c.rejects >= 2 {
-                    Some(Intercept::Finish(format!("status: error\npayload rejected: {e:#}")))
+                    Some(Intercept::Finish(format!(
+                        "status: error\npayload rejected: {e:#}"
+                    )))
                 } else {
                     Some(Intercept::Result(format!(
                         "status: error\npayload rejected: {e:#}\nfix and resubmit"
@@ -360,16 +371,19 @@ async fn finish_task(
         "ok": in_scope,
     }));
     if !in_scope {
-        out.capsule = capsule("out_of_scope", &format!(
-            "changed: {}",
-            out.gates[0]["out_of_scope"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        out.capsule = capsule(
+            "out_of_scope",
+            &format!(
+                "changed: {}",
+                out.gates[0]["out_of_scope"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
         return Ok(out);
     }
     out.sha = worktree::commit_all(wt, &format!("task {} [{}]", c.id, cfg.session))?;
@@ -380,6 +394,7 @@ async fn finish_task(
             Duration::from_secs(120),
             Duration::from_secs(300),
             std::future::pending(),
+            None,
         )
         .await?;
         out.gates.push(gate_rec("acceptance", cmd, wt, &r));
@@ -438,8 +453,8 @@ async fn escalate(
     prev: &TaskOut,
     budget_left: usize,
 ) -> Result<Option<TaskContract>> {
-    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> = Arc::new(|p| {
-        match p["decision"].as_str() {
+    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> =
+        Arc::new(|p| match p["decision"].as_str() {
             Some("abort") => Ok(()),
             Some("retry") => {
                 serde_json::from_value::<TaskContract>(p["revised_task"].clone())
@@ -447,13 +462,16 @@ async fn escalate(
                 Ok(())
             }
             _ => bail!("decision must be retry or abort"),
-        }
-    });
+        });
     let (mut esc, cap) = control_agent(cfg, &cfg.repo, "escalation", check)?;
     let contract_json = serde_json::to_string_pretty(c).unwrap_or_default();
-    esc.run_turn(&prompts::escalation_task(&contract_json, &prev.capsule, budget_left))
-        .await
-        .context("escalation session")?;
+    esc.run_turn(&prompts::escalation_task(
+        &contract_json,
+        &prev.capsule,
+        budget_left,
+    ))
+    .await
+    .context("escalation session")?;
     let c2 = cap.lock().unwrap();
     match &c2.payload {
         Some(p) if p["decision"] == "retry" => {
@@ -464,11 +482,7 @@ async fn escalate(
 }
 
 /// Merge all task branches into integration, run integration checks.
-async fn integrate_all(
-    integ_wt: &Path,
-    branches: &[String],
-    plan: &MissionPlan,
-) -> Result<()> {
+async fn integrate_all(integ_wt: &Path, branches: &[String], plan: &MissionPlan) -> Result<()> {
     for b in branches {
         worktree::merge(integ_wt, b)?;
     }
@@ -479,12 +493,15 @@ async fn integrate_all(
             Duration::from_secs(120),
             Duration::from_secs(300),
             std::future::pending(),
+            None,
         )
         .await?;
         if r.code != Some(0) {
             bail!(
                 "integration check failed: {cmd}\nexit: {:?}\nstdout:\n{}\nstderr:\n{}",
-                r.code, r.stdout, r.stderr
+                r.code,
+                r.stdout,
+                r.stderr
             );
         }
     }
@@ -503,6 +520,7 @@ async fn gate_summary(plan: &MissionPlan, integ_wt: &Path) -> String {
                 Duration::from_secs(120),
                 Duration::from_secs(300),
                 std::future::pending(),
+                None,
             )
             .await;
             match r {
@@ -518,6 +536,7 @@ async fn gate_summary(plan: &MissionPlan, integ_wt: &Path) -> String {
             Duration::from_secs(120),
             Duration::from_secs(300),
             std::future::pending(),
+            None,
         )
         .await;
         match r {
@@ -537,14 +556,14 @@ async fn audit_once(
     gates: &str,
     risks: &str,
 ) -> Result<(String, Value)> {
-    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> = Arc::new(|p| {
-        match p["verdict"].as_str() {
+    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> =
+        Arc::new(|p| match p["verdict"].as_str() {
             Some("PASS") | Some("FAIL") => Ok(()),
             _ => bail!("verdict must be PASS or FAIL"),
-        }
-    });
+        });
     let (mut a, cap) = control_agent(cfg, integ_wt, "auditor", check)?;
-    a.run_turn(&prompts::audit_task(plan, diff, gates, risks)).await?;
+    a.run_turn(&prompts::audit_task(plan, diff, gates, risks))
+        .await?;
     let c = cap.lock().unwrap();
     let p = c
         .payload
@@ -620,6 +639,7 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     }
     if let Some(tx) = &cfg.events {
         let _ = tx.send(crate::events::UiEvent::RunDone {
+            run: cfg.run,
             outcome: report.outcome.clone(),
             accepted_sha: report.accepted_sha.clone(),
         });
@@ -657,14 +677,17 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
         }
     }
     report.elapsed_ms = t0.elapsed().as_millis();
-    journal.log("result", json!({
-        "outcome": report.outcome,
-        "accepted_sha": report.accepted_sha,
-        "branch": report.branch,
-        "elapsed_ms": report.elapsed_ms,
-        "repairs": report.repairs,
-        "escalations": report.escalations,
-    }));
+    journal.log(
+        "result",
+        json!({
+            "outcome": report.outcome,
+            "accepted_sha": report.accepted_sha,
+            "branch": report.branch,
+            "elapsed_ms": report.elapsed_ms,
+            "repairs": report.repairs,
+            "escalations": report.escalations,
+        }),
+    );
 
     // worktrees persist on failure/cancel for inspection; cleaned on accept
     if report.outcome == "accepted" && !cfg.keep_worktrees {
@@ -678,11 +701,7 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
 
 /// The mission state machine. Returns the terminal Flow; every transition
 /// is journaled. `report` accumulates evidence as states complete.
-async fn body(
-    cfg: &MissionCfg,
-    report: &mut MissionReport,
-    journal: &mut Journal,
-) -> Result<Flow> {
+async fn body(cfg: &MissionCfg, report: &mut MissionReport, journal: &mut Journal) -> Result<Flow> {
     let mut escalations_left = 1usize;
     let mut audit_repairs_left = 1usize;
 
@@ -708,12 +727,11 @@ async fn body(
     state!(S::Planning);
     let base = worktree::head(&cfg.repo)?;
     let repo = cfg.repo.clone();
-    let check_plan: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> =
-        Arc::new(move |p| {
-            let plan: MissionPlan = serde_json::from_value(p.clone())
-                .context("payload is not a mission plan")?;
-            plan::validate(&plan, &repo)
-        });
+    let check_plan: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> = Arc::new(move |p| {
+        let plan: MissionPlan =
+            serde_json::from_value(p.clone()).context("payload is not a mission plan")?;
+        plan::validate(&plan, &repo)
+    });
     let (mut orch, cap) = control_agent(cfg, &cfg.repo, "orchestrator", check_plan)?;
     let overview = {
         let out = spawn_bounded(
@@ -722,12 +740,17 @@ async fn body(
             Duration::from_secs(10),
             Duration::from_secs(10),
             std::future::pending(),
+            None,
         )
         .await;
         out.map(|o| o.stdout).unwrap_or_default()
     };
     if let Err(e) = orch
-        .run_turn(&prompts::orchestrator_task(&cfg.objective, &base, &overview))
+        .run_turn(&prompts::orchestrator_task(
+            &cfg.objective,
+            &base,
+            &overview,
+        ))
         .await
     {
         fail!(format!("orchestrator error: {e:#}"));
@@ -741,14 +764,18 @@ async fn body(
             },
             None => fail!(format!(
                 "orchestrator produced no valid plan{}",
-                c.last_error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
+                c.last_error
+                    .as_ref()
+                    .map(|e| format!(": {e}"))
+                    .unwrap_or_default()
             )),
         }
     };
     journal.log("plan", serde_json::to_value(&plan).unwrap_or_default());
     if let Some(tx) = &cfg.events {
         let _ = tx.send(crate::events::UiEvent::TaskRows(
-            serde_json::to_value(&plan.tasks).unwrap_or_default()));
+            serde_json::to_value(&plan.tasks).unwrap_or_default(),
+        ));
     }
     report.plan = Some(plan.clone());
 
@@ -804,15 +831,22 @@ async fn body(
                 },
             };
             if !out.ok {
-                // one repair round
+                // one repair round — the transcript gets the reason and
+                // attempt number, not just a bare stage name
                 state!(S::Repairing);
                 report.repairs += 1;
+                if let Some(tx) = &cfg.events {
+                    let why = out.capsule.lines().take(2).collect::<Vec<_>>().join(" ");
+                    let _ = tx.send(crate::events::UiEvent::Phase {
+                        run: cfg.run,
+                        agent: "mission".into(),
+                        text: format!("repair attempt 1 for {} — {}", contract.id, why),
+                    });
+                }
                 match repair_task(cfg, &contract, &out, &task_base).await {
                     Ok(o2) if o2.ok => out = o2,
                     Ok(o2) => out = o2,
-                    Err(e) => {
-                        out.capsule = format!("{}\nrepair error: {e:#}", out.capsule)
-                    }
+                    Err(e) => out.capsule = format!("{}\nrepair error: {e:#}", out.capsule),
                 }
             }
             if !out.ok {
@@ -824,6 +858,14 @@ async fn body(
                 }
                 escalations_left -= 1;
                 report.escalations += 1;
+                if let Some(tx) = &cfg.events {
+                    let why = out.capsule.lines().take(2).collect::<Vec<_>>().join(" ");
+                    let _ = tx.send(crate::events::UiEvent::Phase {
+                        run: cfg.run,
+                        agent: "mission".into(),
+                        text: format!("escalating {} to control — {}", contract.id, why),
+                    });
+                }
                 match escalate(cfg, &contract, &out, escalations_left).await {
                     Ok(Some(newc)) => {
                         let r2 = spawn_task(cfg, &newc, &base, &integ_branch)
@@ -835,7 +877,11 @@ async fn body(
                                 report.tasks.push(json!({
                                     "id": newc.id, "status": "ok_after_escalation",
                                     "sha": out.sha, "changed": out.changed }));
-                                if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
+                                if let Some(tx) = &cfg.events {
+                                    let _ = tx.send(crate::events::UiEvent::TaskRows(json!(
+                                        report.tasks
+                                    )));
+                                }
                             }
                             _ => fail!(format!(
                                 "task {} still failed after escalation",
@@ -852,18 +898,23 @@ async fn body(
                 report.tasks.push(json!({
                     "id": contract.id, "status": "ok",
                     "sha": out.sha, "changed": out.changed }));
-                if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
+                if let Some(tx) = &cfg.events {
+                    let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks)));
+                }
             }
-            journal.log("task_result", json!({
-                "id": contract.id,
-                "ok": out.ok,
-                "branch": out.branch,
-                "sha": out.sha,
-                "changed": out.changed,
-                "task_base": out.task_base,
-                "capsule": out.capsule,
-                "gates": out.gates,
-            }));
+            journal.log(
+                "task_result",
+                json!({
+                    "id": contract.id,
+                    "ok": out.ok,
+                    "branch": out.branch,
+                    "sha": out.sha,
+                    "changed": out.changed,
+                    "task_base": out.task_base,
+                    "capsule": out.capsule,
+                    "gates": out.gates,
+                }),
+            );
             // serialize integration: merge each passing task immediately
             state!(S::Integrating);
             if let Err(e) = worktree::merge(&integ_wt, &out.branch) {
@@ -889,7 +940,11 @@ async fn body(
                                         "id": newc.id,
                                         "status": "ok_after_escalation",
                                         "sha": o4.sha, "changed": o4.changed }));
-                                    if let Some(tx) = &cfg.events { let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks))); }
+                                    if let Some(tx) = &cfg.events {
+                                        let _ = tx.send(crate::events::UiEvent::TaskRows(json!(
+                                            report.tasks
+                                        )));
+                                    }
                                 }
                                 _ => fail!(format!("merge conflict persists for {}", contract.id)),
                             }
@@ -914,6 +969,7 @@ async fn body(
             Duration::from_secs(120),
             Duration::from_secs(300),
             std::future::pending(),
+            None,
         )
         .await?;
         journal.log("gate", gate_rec("integration", cmd, &integ_wt, &r));
@@ -939,10 +995,11 @@ async fn body(
             "repairs used: {}; escalations used: {}",
             report.repairs, report.escalations
         );
-        let (verdict, payload) = match audit_once(cfg, &integ_wt, &plan, &diff, &gates, &risks).await {
-            Ok(v) => v,
-            Err(e) => fail!(format!("audit error: {e:#}")),
-        };
+        let (verdict, payload) =
+            match audit_once(cfg, &integ_wt, &plan, &diff, &gates, &risks).await {
+                Ok(v) => v,
+                Err(e) => fail!(format!("audit error: {e:#}")),
+            };
         report.audit = Some(payload.clone());
         journal.log("audit", payload.clone());
         if let Some(tx) = &cfg.events {
@@ -957,6 +1014,19 @@ async fn body(
         audit_repairs_left -= 1;
         report.repairs += 1;
         state!(S::Repairing);
+        if let Some(tx) = &cfg.events {
+            let _ = tx.send(crate::events::UiEvent::Phase {
+                run: cfg.run,
+                agent: "mission".into(),
+                text: format!(
+                    "audit repair round — {} fix(es) required by auditor",
+                    payload["required_fixes"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0)
+                ),
+            });
+        }
         let fixes = serde_json::to_string_pretty(&payload["required_fixes"]).unwrap_or_default();
         let mut any_ok = false;
         for t in plan.tasks.clone() {
@@ -1006,10 +1076,21 @@ async fn body(
     let sha = worktree::git_rev(&cfg.repo, &integ_branch).unwrap_or_default();
     report.accepted_sha = Some(sha.clone());
     if let Some(tx) = &cfg.events {
-        let files: Vec<String> = report.tasks.iter()
-            .flat_map(|t| t["changed"].as_array().into_iter().flatten()
-                .filter_map(|v| v.as_str().map(String::from))).collect();
-        let _ = tx.send(crate::events::UiEvent::ChangeSet { files, sha: Some(sha.clone()) });
+        let files: Vec<String> = report
+            .tasks
+            .iter()
+            .flat_map(|t| {
+                t["changed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(String::from))
+            })
+            .collect();
+        let _ = tx.send(crate::events::UiEvent::ChangeSet {
+            files,
+            sha: Some(sha.clone()),
+        });
     }
     journal.log(
         "accepted",

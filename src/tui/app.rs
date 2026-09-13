@@ -5,17 +5,17 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, atomic::AtomicBool};
-use tokio::sync::mpsc::UnboundedSender;
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use super::text::Buf;
 use crate::config::{self, ProfileCfg, UiSettings};
 use crate::events::{GateChoice, UiEvent};
 use crate::mission::UsageAgg;
 use crate::provider::Probe;
-use super::text::Buf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -32,7 +32,13 @@ pub enum Tab {
     Settings = 4,
 }
 impl Tab {
-    pub const ALL: [Tab; 5] = [Tab::Chat, Tab::Tasks, Tab::Changes, Tab::Usage, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Chat,
+        Tab::Tasks,
+        Tab::Changes,
+        Tab::Usage,
+        Tab::Settings,
+    ];
     pub fn name(self) -> &'static str {
         ["Chat", "Tasks", "Changes", "Usage", "Settings"][self as usize]
     }
@@ -146,7 +152,7 @@ pub struct ProvForm {
     pub key: Buf, // masked in the view
     pub store: Store,
     pub model: Buf,
-    pub focus: usize, // index into fields()
+    pub focus: usize,            // index into fields()
     pub editing: Option<String>, // original name when editing existing
     pub endpoint: String,        // preview of the real request destination
     pub status: String,
@@ -201,7 +207,10 @@ impl ProvForm {
         f
     }
     pub fn refresh_endpoint(&mut self) {
-        self.endpoint = format!("{}/chat/completions", self.base_url.text().trim_end_matches('/'));
+        self.endpoint = format!(
+            "{}/chat/completions",
+            self.base_url.text().trim_end_matches('/')
+        );
     }
 
     /// The visible row set for the current provider type + auth mode.
@@ -277,17 +286,19 @@ impl ProvForm {
         let key = self.key.text();
         let key = if key.is_empty() { None } else { Some(key) };
         match self.ptype {
-            ProvType::DeepSeek | ProvType::OpenRouter => (
-                Some(self.ptype.default_env().to_string()),
-                key,
-                self.store,
-            ),
+            ProvType::DeepSeek | ProvType::OpenRouter => {
+                (Some(self.ptype.default_env().to_string()), key, self.store)
+            }
             ProvType::Custom => match self.auth {
                 AuthMode::None => (None, None, self.store),
                 AuthMode::ApiKey => (None, key, self.store),
                 AuthMode::Advanced => {
                     let env = self.key_env.text();
-                    (if env.is_empty() { None } else { Some(env) }, None, self.store)
+                    (
+                        if env.is_empty() { None } else { Some(env) },
+                        None,
+                        self.store,
+                    )
                 }
             },
         }
@@ -305,7 +316,7 @@ pub struct Picker {
 
 #[derive(Clone, PartialEq)]
 pub enum PickTarget {
-    ProvModel,            // into ProvForm.model
+    ProvModel, // into ProvForm.model
     Role(Role),
     ModelForRole(String), // after profile chosen → pick model
     NewProvider,          // provider type → open its form
@@ -325,12 +336,206 @@ impl Role {
     }
 }
 
+/// Reasoning display preference — visibility only, never a request change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReasonPref {
+    /// Live bounded preview while streaming, collapsed after.
+    Auto,
+    /// Never render reasoning rows (still stored on the item).
+    Hidden,
+    /// Always show full reasoning text.
+    Expanded,
+}
+impl ReasonPref {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReasonPref::Auto => "auto",
+            ReasonPref::Hidden => "hidden",
+            ReasonPref::Expanded => "expanded",
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            ReasonPref::Auto => ReasonPref::Hidden,
+            ReasonPref::Hidden => ReasonPref::Expanded,
+            ReasonPref::Expanded => ReasonPref::Auto,
+        }
+    }
+}
+
+/// One activity entry inside a run group. `id` is a per-app stable id for
+/// navigation/scroll anchoring — unrelated to model/tool identity, which
+/// is carried by `req`/`call`.
 #[derive(Clone)]
-pub enum ChatItem {
-    User { text: String, at: String },
-    Assistant { agent: String, text: String, live: bool, at: String },
-    Tool { agent: String, name: String, summary: String, done: bool, ok: bool, result: String, at: String },
-    Sys { text: String, at: String },
+pub enum Act {
+    /// A request in flight (renders an honest waiting row until output).
+    Req {
+        id: u64,
+        agent: String,
+        req: u64,
+        done: bool,
+        had_output: bool,
+        ms: u128,
+    },
+    /// Assistant message for one request — streams via Delta.
+    Assistant {
+        id: u64,
+        agent: String,
+        req: u64,
+        text: String,
+        done: bool,
+        at: String,
+    },
+    /// Provider-exposed reasoning for one request.
+    Reason {
+        id: u64,
+        agent: String,
+        req: u64,
+        text: String,
+        done: bool,
+        expanded: bool,
+        at: String,
+    },
+    /// One tool call. `status` None = running; live holds a bounded tail
+    /// of streamed output for the active preview only.
+    Tool {
+        id: u64,
+        agent: String,
+        call: String,
+        name: String,
+        summary: String,
+        status: Option<crate::events::ToolStatus>,
+        exit: Option<i32>,
+        /// Bounded captured result excerpt (≤8KB) — display + detail view.
+        result: String,
+        /// The captured result itself was truncated at the capture cap.
+        truncated: bool,
+        /// Live-preview chunks the tap dropped (channel full).
+        dropped: u64,
+        live: String,
+        ms: u128,
+        expanded: bool,
+        at: String,
+    },
+    /// Phase notes (repair reason + attempt) and sys/error lines.
+    Note {
+        id: u64,
+        agent: Option<String>,
+        text: String,
+        err: bool,
+        at: String,
+    },
+}
+impl Act {
+    pub fn id(&self) -> u64 {
+        match self {
+            Act::Req { id, .. }
+            | Act::Assistant { id, .. }
+            | Act::Reason { id, .. }
+            | Act::Tool { id, .. }
+            | Act::Note { id, .. } => *id,
+        }
+    }
+    /// Full text for the detail/transcript view — captured data, never
+    /// the shortened preview.
+    pub fn detail(&self) -> String {
+        match self {
+            Act::Assistant { text, .. } | Act::Reason { text, .. } => text.clone(),
+            Act::Tool {
+                name,
+                summary,
+                result,
+                truncated,
+                dropped,
+                ..
+            } => {
+                let mut s = format!("{name}: {summary}\n\n{result}");
+                if *truncated {
+                    s.push_str("\n\n[captured output truncated at the capture cap — the omitted portion was never retained]");
+                }
+                if *dropped > 0 {
+                    s.push_str(&format!("\n\n[{dropped} live-preview chunks dropped — the captured result above is unaffected]"));
+                }
+                s
+            }
+            Act::Req { agent, req, ms, .. } => format!("{agent} request #{req} — {ms}ms"),
+            Act::Note { text, .. } => text.clone(),
+        }
+    }
+}
+
+/// One submitted task = one activity group. While running, items stream
+/// live; on success the group collapses to a summary (task + final answer
+/// stay visible). Failures never auto-collapse.
+#[derive(Clone)]
+pub struct ActGroup {
+    pub id: u64,
+    /// The submitted task ("" for implicit/session groups).
+    pub task: String,
+    pub at: String,
+    pub started: Instant,
+    pub done: bool,
+    pub failed: bool,
+    pub outcome: String,
+    /// User-forced open — overrides auto-collapse until closed.
+    pub expanded: bool,
+    /// User-forced closed — allowed even on failure (still shows the
+    /// red one-line outcome, never hidden silently).
+    pub collapsed: bool,
+    pub items: Vec<Act>,
+    pub dur_ms: u128,
+    pub reqs: u32,
+    pub tools_ok: u32,
+    /// Real failures: nonzero exit, runtime error, timeout.
+    pub tools_bad: u32,
+    /// Non-failures that still aren't ok: denied/skipped/intercepted/
+    /// cancelled — counted separately so "1 denied" never reads as a
+    /// green "1 tool" nor a red "1 failed".
+    pub tools_other: u32,
+}
+impl ActGroup {
+    /// Effective fold state: running → open; failed → open unless the
+    /// user closed it; done-ok → collapsed unless manually expanded.
+    pub fn folded(&self) -> bool {
+        if !self.done {
+            return false;
+        }
+        if self.expanded {
+            return false;
+        }
+        if self.failed {
+            return self.collapsed;
+        }
+        true
+    }
+    /// Deterministic one-line summary — counts/duration, no LLM text.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!("{} req", self.reqs)];
+        if self.tools_ok > 0 {
+            parts.push(format!(
+                "{} tool{} ok",
+                self.tools_ok,
+                if self.tools_ok == 1 { "" } else { "s" }
+            ));
+        }
+        if self.tools_bad > 0 {
+            parts.push(format!("{} failed", self.tools_bad));
+        }
+        if self.tools_other > 0 {
+            parts.push(format!("{} denied/skipped", self.tools_other));
+        }
+        parts.push(format!("{}s", self.dur_ms / 1000));
+        parts.join(" · ")
+    }
+}
+
+/// Largest index ≤ i on a char boundary (same as agent::floor_char —
+/// duplicated here because the live-preview cap trims by bytes).
+fn floor_char(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Wall-clock HH:MM UTC label for chat items — dim, and honest about TZ.
@@ -353,9 +558,27 @@ pub struct TaskRow {
 pub enum Modal {
     Provider(ProvForm),
     Picker(Picker),
-    Permission { id: u64, agent: String, summary: String, reply: UnboundedSender<GateChoice> },
-    ConfirmTest { name: String }, // warn: probe costs one small request
-    Text { title: String, buf: Buf, target: TextTarget },
+    Permission {
+        id: u64,
+        agent: String,
+        summary: String,
+        reply: UnboundedSender<GateChoice>,
+    },
+    ConfirmTest {
+        name: String,
+    }, // warn: probe costs one small request
+    Text {
+        title: String,
+        buf: Buf,
+        target: TextTarget,
+    },
+    /// Full-details/transcript viewer for one activity item or run group.
+    /// Shows captured records (bounded excerpts), not display previews.
+    View {
+        title: String,
+        text: String,
+        scroll: usize,
+    },
     Help,
 }
 
@@ -367,16 +590,39 @@ pub enum TextTarget {
 
 /// Side-effect the loop must execute — keeps App pure.
 pub enum Effect {
-    SendTask { task: String, mode: Mode },
+    SendTask {
+        task: String,
+        mode: Mode,
+        run: u64,
+    },
     Stop,
     Quit,
-    SaveProfile { name: String, base_url: String, model: String, key_env: Option<String>, key: Option<String>, store: Store },
+    SaveProfile {
+        name: String,
+        base_url: String,
+        model: String,
+        key_env: Option<String>,
+        key: Option<String>,
+        store: Store,
+    },
     SaveUi,
     /// Export this session's journals to a sanitized report file.
     ExportRun,
-    FetchModels { base_url: String, key: Option<String>, target: PickTarget },
-    Probe { name: String, base_url: String, model: String, key: Option<String> },
-    KeyringStore { profile: String, key: String },
+    FetchModels {
+        base_url: String,
+        key: Option<String>,
+        target: PickTarget,
+    },
+    Probe {
+        name: String,
+        base_url: String,
+        model: String,
+        key: Option<String>,
+    },
+    KeyringStore {
+        profile: String,
+        key: String,
+    },
 }
 
 pub struct App {
@@ -385,8 +631,29 @@ pub struct App {
     pub sidebar: bool,
     pub mode: Mode,
     pub input: Buf,
-    pub chat: Vec<ChatItem>,
+    /// Activity transcript: one group per submitted run. Display state
+    /// (folding, live previews) lives here only — model-visible history
+    /// and journals are untouched by expansion/collapse.
+    pub groups: Vec<ActGroup>,
+    /// Run-id counter — each submitted task gets the next one.
+    pub next_run: u64,
+    /// Stable per-item id counter (navigation + scroll anchor).
+    next_item: u64,
+    /// Activity-navigation mode: Tab on Chat focuses the transcript;
+    /// Enter/Space expand, 'v' opens the detail view, Esc/Tab return.
+    pub nav: bool,
+    /// Index into the focusable list (transcript order).
+    pub nav_sel: usize,
+    /// Reasoning display preference (persisted via [ui]).
+    pub reasoning: ReasonPref,
+    /// Scroll offset in rows from the bottom; 0 = follow live output.
     pub scroll: usize,
+    /// Anchor while scrolled: (group id, item id, rows-into-block) of the
+    /// top visible row — survives folding, appends, and resizes.
+    anchor: Option<(u64, Option<u64>, usize)>,
+    /// Last rendered chat viewport, for anchor math. Set by the renderer.
+    pub view_w: std::cell::Cell<usize>,
+    pub view_h: std::cell::Cell<usize>,
     pub tasks: Vec<TaskRow>,
     pub changes: Vec<String>,
     pub diff_text: String,
@@ -421,7 +688,12 @@ pub struct App {
     /// Permission asks that arrived while one was already open — a
     /// mission can have several workers wanting approval at once.
     /// Replies stay parked here; nothing is denied by overwrite.
-    pub pending_perms: std::collections::VecDeque<(u64, String, String, tokio::sync::mpsc::UnboundedSender<crate::events::GateChoice>)>,
+    pub pending_perms: std::collections::VecDeque<(
+        u64,
+        String,
+        String,
+        tokio::sync::mpsc::UnboundedSender<crate::events::GateChoice>,
+    )>,
     /// Submitted tasks, oldest first — Up recalls when input is empty.
     pub history: Vec<String>,
     pub hist_i: Option<usize>,
@@ -496,7 +768,11 @@ impl App {
             }
         }
         Self {
-            screen: if no_profiles { Screen::Setup } else { Screen::Main },
+            screen: if no_profiles {
+                Screen::Setup
+            } else {
+                Screen::Main
+            },
             tab: Tab::Chat,
             sidebar: true,
             mode: match ui.mode.as_deref() {
@@ -504,8 +780,47 @@ impl App {
                 _ => Mode::Solo,
             },
             input: Buf::new(),
-            chat: vec![ChatItem::Sys { text: "welcome — configure a provider (Settings → add), pick models per role, then type a task".into(), at: now_hm() }],
+            groups: {
+                // session group 0: welcome + stray notes, never collapses
+                let mut g = ActGroup {
+                    id: 0,
+                    task: String::new(),
+                    at: now_hm(),
+                    started: Instant::now(),
+                    done: false,
+                    failed: false,
+                    outcome: String::new(),
+                    expanded: true,
+                    collapsed: false,
+                    items: vec![Act::Note {
+                        id: 0,
+                        agent: None,
+                        text: "welcome — configure a provider (Settings → add), pick models per role, then type a task".into(),
+                        err: false,
+                        at: now_hm(),
+                    }],
+                    dur_ms: 0,
+                    reqs: 0,
+                    tools_ok: 0,
+                    tools_bad: 0,
+                    tools_other: 0,
+                };
+                g.id = 0;
+                vec![g]
+            },
+            next_run: 0,
+            next_item: 1,
+            nav: false,
+            nav_sel: 0,
+            reasoning: match ui.reasoning.as_deref() {
+                Some("hidden") => ReasonPref::Hidden,
+                Some("expanded") => ReasonPref::Expanded,
+                _ => ReasonPref::Auto,
+            },
             scroll: 0,
+            anchor: None,
+            view_w: std::cell::Cell::new(80),
+            view_h: std::cell::Cell::new(20),
             tasks: vec![],
             changes: vec![],
             diff_text: String::new(),
@@ -561,7 +876,9 @@ impl App {
             .or_else(|| p.key_env.as_deref().and_then(|e| std::env::var(e).ok()))
             .or_else(|| p.api_key.clone());
         Some((
-            p.base_url.clone().unwrap_or_else(|| "https://api.openai.com/v1".into()),
+            p.base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".into()),
             key,
             p.model.clone().unwrap_or_default(),
         ))
@@ -582,63 +899,405 @@ impl App {
     }
 
     // ── event application ───────────────────────────────────────────
-    /// Bounded in-memory display buffer; full history lives in journals.
-    const CHAT_CAP: usize = 2000;
+    /// Bounded display state; full evidence lives in the journals.
+    const GROUP_CAP: usize = 60;
+    /// Items per group (display only — never a capture limit).
+    const ITEM_CAP: usize = 400;
+    /// Live-preview tail kept per running tool (bytes).
+    const LIVE_CAP: usize = 12_000;
+
+    fn next_id(&mut self) -> u64 {
+        let i = self.next_item;
+        self.next_item += 1;
+        i
+    }
+
+    /// Group index for a run id — created lazily so late events still
+    /// land in the right place (session group 0 catches run-less noise).
+    fn group_for(&mut self, run: u64) -> usize {
+        if let Some(i) = self.groups.iter().position(|g| g.id == run) {
+            return i;
+        }
+        self.groups.push(ActGroup {
+            id: run,
+            task: String::new(),
+            at: now_hm(),
+            started: Instant::now(),
+            done: false,
+            failed: false,
+            outcome: String::new(),
+            expanded: false,
+            collapsed: false,
+            items: vec![],
+            dur_ms: 0,
+            reqs: 0,
+            tools_ok: 0,
+            tools_bad: 0,
+            tools_other: 0,
+        });
+        self.groups.len() - 1
+    }
+
+    fn find_item(
+        items: &mut [Act],
+        agent: &str,
+        req: u64,
+        call: Option<&str>,
+        want: u8,
+    ) -> Option<usize> {
+        items.iter_mut().rposition(|it| match (it, want) {
+            (
+                Act::Req {
+                    agent: a,
+                    req: r,
+                    done,
+                    ..
+                },
+                0,
+            ) => *a == agent && *r == req && !*done,
+            (
+                Act::Assistant {
+                    agent: a, req: r, ..
+                },
+                1,
+            ) => *a == agent && *r == req,
+            (
+                Act::Reason {
+                    agent: a, req: r, ..
+                },
+                2,
+            ) => *a == agent && *r == req,
+            (
+                Act::Tool {
+                    agent: a,
+                    call: c,
+                    status,
+                    ..
+                },
+                3,
+            ) => *a == agent && Some(c.as_str()) == call && status.is_none(),
+            _ => false,
+        })
+    }
 
     pub fn apply_event(&mut self, e: UiEvent) {
-        if self.chat.len() > Self::CHAT_CAP {
-            self.chat.drain(..self.chat.len() - Self::CHAT_CAP);
-        }
         match e {
-            UiEvent::Delta { agent, text } => {
-                let appendable = matches!(
-                    self.chat.last(),
-                    Some(ChatItem::Assistant { agent: a, live: true, .. }) if *a == agent
-                );
-                if appendable {
-                    if let Some(ChatItem::Assistant { text: t, .. }) = self.chat.last_mut() {
-                        t.push_str(&text);
-                    }
-                } else {
-                    self.chat.push(ChatItem::Assistant { agent, text, live: true, at: now_hm() });
+            UiEvent::ReqStart { run, agent, req } => {
+                let id = self.next_id();
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if items.len() >= Self::ITEM_CAP {
+                    items.remove(0);
                 }
-            }
-            UiEvent::ToolStart { agent, name, summary } => {
-                self.chat.push(ChatItem::Tool {
-                    agent, name, summary, done: false, ok: false, result: String::new(), at: now_hm(),
+                items.push(Act::Req {
+                    id,
+                    agent,
+                    req,
+                    done: false,
+                    had_output: false,
+                    ms: 0,
                 });
             }
-            UiEvent::ToolDone { agent, name, ms, ok, result } => {
-                for it in self.chat.iter_mut().rev() {
-                    if let ChatItem::Tool { agent: a, name: n, done, ok: k, result: r, .. } = it {
-                        if *a == agent && *n == name && !*done {
+            UiEvent::Delta {
+                run,
+                agent,
+                req,
+                text,
+            } => {
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if let Some(i) = Self::find_item(items, &agent, req, None, 0) {
+                    if let Act::Req { had_output, .. } = &mut items[i] {
+                        *had_output = true;
+                    }
+                }
+                if let Some(r) = Self::find_item(items, &agent, req, None, 2) {
+                    if let Act::Reason { done, .. } = &mut items[r] {
+                        *done = true; // content following reasoning ends the block
+                    }
+                }
+                match Self::find_item(items, &agent, req, None, 1) {
+                    Some(i) => {
+                        if let Act::Assistant { text: t, .. } = &mut items[i] {
+                            t.push_str(&text);
+                        }
+                    }
+                    None => {
+                        let id = self.next_id();
+                        let items = &mut self.groups[g].items;
+                        if items.len() >= Self::ITEM_CAP {
+                            items.remove(0);
+                        }
+                        items.push(Act::Assistant {
+                            id,
+                            agent,
+                            req,
+                            text,
+                            done: false,
+                            at: now_hm(),
+                        });
+                    }
+                }
+            }
+            UiEvent::Reason {
+                run,
+                agent,
+                req,
+                text,
+            } => {
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if let Some(i) = Self::find_item(items, &agent, req, None, 0) {
+                    if let Act::Req { had_output, .. } = &mut items[i] {
+                        *had_output = true;
+                    }
+                }
+                match Self::find_item(items, &agent, req, None, 2) {
+                    Some(i) => {
+                        if let Act::Reason { text: t, .. } = &mut items[i] {
+                            t.push_str(&text);
+                        }
+                    }
+                    None => {
+                        let id = self.next_id();
+                        let items = &mut self.groups[g].items;
+                        if items.len() >= Self::ITEM_CAP {
+                            items.remove(0);
+                        }
+                        items.push(Act::Reason {
+                            id,
+                            agent,
+                            req,
+                            text,
+                            done: false,
+                            expanded: false,
+                            at: now_hm(),
+                        });
+                    }
+                }
+            }
+            UiEvent::ReqDone {
+                run,
+                agent,
+                req,
+                ms,
+                ..
+            } => {
+                let g = self.group_for(run);
+                self.groups[g].reqs += 1;
+                let items = &mut self.groups[g].items;
+                for it in items.iter_mut() {
+                    match it {
+                        Act::Req {
+                            agent: a,
+                            req: r,
+                            done,
+                            ms: m,
+                            ..
+                        } if *a == agent && *r == req => {
                             *done = true;
-                            *k = ok;
-                            *r = format!("[{ms}ms] {result}");
-                            break;
+                            *m = ms;
+                        }
+                        Act::Assistant {
+                            agent: a,
+                            req: r,
+                            done,
+                            ..
+                        } if *a == agent && *r == req => {
+                            *done = true;
+                        }
+                        Act::Reason {
+                            agent: a,
+                            req: r,
+                            done,
+                            ..
+                        } if *a == agent && *r == req => {
+                            *done = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            UiEvent::ToolStart {
+                run,
+                agent,
+                req: _,
+                call,
+                name,
+                summary,
+            } => {
+                let id = self.next_id();
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if items.len() >= Self::ITEM_CAP {
+                    items.remove(0);
+                }
+                items.push(Act::Tool {
+                    id,
+                    agent,
+                    call,
+                    name,
+                    summary,
+                    status: None,
+                    exit: None,
+                    result: String::new(),
+                    truncated: false,
+                    dropped: 0,
+                    live: String::new(),
+                    ms: 0,
+                    expanded: false,
+                    at: now_hm(),
+                });
+            }
+            UiEvent::ToolOut {
+                run,
+                agent,
+                call,
+                err: _,
+                text,
+            } => {
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if let Some(i) = Self::find_item(items, &agent, 0, Some(&call), 3) {
+                    if let Act::Tool { live, .. } = &mut items[i] {
+                        live.push_str(&text);
+                        if live.len() > Self::LIVE_CAP {
+                            let start = floor_char(live, live.len() - Self::LIVE_CAP);
+                            live.drain(..start);
                         }
                     }
                 }
             }
-            UiEvent::Usage { agent, model, input, cached, written, output, complete } => {
-                let ent = self.usage.entry(agent).or_insert_with(|| (model.clone(), UsageAgg::default()));
+            UiEvent::ToolDone {
+                run,
+                agent,
+                call,
+                name,
+                ms,
+                status,
+                exit,
+                result,
+                truncated,
+                dropped,
+            } => {
+                let g = self.group_for(run);
+                match status {
+                    crate::events::ToolStatus::Ok => self.groups[g].tools_ok += 1,
+                    // real failures only — denied/skipped/intercepted/
+                    // cancelled are user/plane choices, not command errors
+                    crate::events::ToolStatus::Failed
+                    | crate::events::ToolStatus::Error
+                    | crate::events::ToolStatus::Timeout => self.groups[g].tools_bad += 1,
+                    _ => self.groups[g].tools_other += 1,
+                }
+                let items = &mut self.groups[g].items;
+                let at = now_hm();
+                match Self::find_item(items, &agent, 0, Some(&call), 3) {
+                    Some(i) => {
+                        if let Act::Tool {
+                            status: s,
+                            exit: x,
+                            result: r,
+                            truncated: tr,
+                            dropped: d,
+                            ms: m,
+                            ..
+                        } = &mut items[i]
+                        {
+                            *s = Some(status);
+                            *x = exit;
+                            *r = result;
+                            *tr = truncated;
+                            *d = dropped;
+                            *m = ms;
+                        }
+                    }
+                    // no ToolStart seen — the call never executed (denied,
+                    // skipped, intercepted); create it already-finished
+                    None => {
+                        let id = self.next_id();
+                        let items = &mut self.groups[g].items;
+                        if items.len() >= Self::ITEM_CAP {
+                            items.remove(0);
+                        }
+                        items.push(Act::Tool {
+                            id,
+                            agent,
+                            call,
+                            name,
+                            summary: String::new(),
+                            status: Some(status),
+                            exit,
+                            result,
+                            truncated,
+                            dropped,
+                            live: String::new(),
+                            ms,
+                            expanded: false,
+                            at,
+                        });
+                    }
+                }
+            }
+            UiEvent::Usage {
+                agent,
+                model,
+                input,
+                cached,
+                written,
+                output,
+                complete,
+                ..
+            } => {
+                let ent = self
+                    .usage
+                    .entry(agent)
+                    .or_insert_with(|| (model.clone(), UsageAgg::default()));
                 ent.0 = model;
                 let u = &mut ent.1;
                 u.requests += 1;
-                if complete { u.telemetry_known += 1; }
+                if complete {
+                    u.telemetry_known += 1;
+                }
                 u.input += input.unwrap_or(0);
                 u.cache_read += cached.unwrap_or(0);
                 u.cache_write += written.unwrap_or(0);
                 u.output += output.unwrap_or(0);
             }
-            UiEvent::Permission { id, agent, summary, reply } => {
+            UiEvent::Permission {
+                id,
+                agent,
+                summary,
+                reply,
+                ..
+            } => {
                 // never overwrite an open prompt — the dropped reply
                 // channel would silently deny the parked request
                 if matches!(self.modal, Some(Modal::Permission { .. })) {
                     self.pending_perms.push_back((id, agent, summary, reply));
                 } else {
-                    self.modal = Some(Modal::Permission { id, agent, summary, reply });
+                    self.modal = Some(Modal::Permission {
+                        id,
+                        agent,
+                        summary,
+                        reply,
+                    });
                 }
+            }
+            UiEvent::Phase { run, agent, text } => {
+                let id = self.next_id();
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if items.len() >= Self::ITEM_CAP {
+                    items.remove(0);
+                }
+                items.push(Act::Note {
+                    id,
+                    agent: Some(agent),
+                    text,
+                    err: false,
+                    at: now_hm(),
+                });
             }
             UiEvent::MissionState(s) => {
                 self.stage = s;
@@ -651,8 +1310,13 @@ impl App {
                     .map(|t| TaskRow {
                         id: t["id"].as_str().unwrap_or("?").into(),
                         status: t["status"].as_str().unwrap_or("planned").into(),
-                        owned: t["owned_paths"].as_array().into_iter().flatten()
-                            .filter_map(|p| p.as_str()).collect::<Vec<_>>().join(" "),
+                        owned: t["owned_paths"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|p| p.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" "),
                         sha: t["sha"].as_str().unwrap_or("").chars().take(8).collect(),
                     })
                     .collect();
@@ -665,18 +1329,298 @@ impl App {
             UiEvent::AuditResult(v) => {
                 self.audit = Some(serde_json::to_string_pretty(&v).unwrap_or_default());
             }
-            UiEvent::RunDone { outcome, accepted_sha } => {
+            UiEvent::RunDone {
+                run,
+                outcome,
+                accepted_sha,
+            } => {
                 self.running = false;
                 self.outcome = outcome.clone();
                 if let Some(s) = accepted_sha {
                     self.accepted_sha = Some(s);
                 }
-                self.chat.push(ChatItem::Sys { text: format!("run finished: {outcome}"), at: now_hm() });
+                let id = self.next_id();
+                let g = self.group_for(run);
+                let grp = &mut self.groups[g];
+                grp.done = true;
+                grp.failed = !matches!(outcome.as_str(), "done" | "accepted");
+                grp.outcome = outcome.clone();
+                grp.dur_ms = grp.started.elapsed().as_millis();
+                grp.items.push(Act::Note {
+                    id,
+                    agent: None,
+                    text: format!("run finished: {outcome}"),
+                    err: grp.failed,
+                    at: now_hm(),
+                });
             }
-            UiEvent::Error { agent, msg } => {
-                self.chat.push(ChatItem::Sys { text: format!("error [{agent}]: {msg}"), at: now_hm() });
+            UiEvent::Error { run, agent, msg } => {
+                let id = self.next_id();
+                let g = self.group_for(run);
+                let items = &mut self.groups[g].items;
+                if items.len() >= Self::ITEM_CAP {
+                    items.remove(0);
+                }
+                items.push(Act::Note {
+                    id,
+                    agent: Some(agent),
+                    text: format!("error: {msg}"),
+                    err: true,
+                    at: now_hm(),
+                });
             }
         }
+        // oldest folded groups drop first when over the group cap —
+        // the session group and anything running always stay
+        while self.groups.len() > Self::GROUP_CAP {
+            if let Some(i) = self.groups.iter().position(|g| g.id != 0 && g.done) {
+                self.groups.remove(i);
+            } else {
+                break;
+            }
+        }
+        self.fix_anchor();
+    }
+
+    // ── scroll anchoring ────────────────────────────────────────────
+    /// Capture the top visible row's (group, item, offset) so folding,
+    /// appends, and resizes can restore the same visual position.
+    fn capture_anchor(&mut self) {
+        let rows = super::transcript::rows(self, self.view_w.get());
+        let h = self.view_h.get().max(1);
+        let total = rows.len();
+        if total == 0 {
+            return;
+        }
+        let top = total
+            .saturating_sub(h)
+            .saturating_sub(self.scroll)
+            .min(total - 1);
+        let owner = rows[top].owner;
+        let start = rows.iter().position(|r| r.owner == owner).unwrap_or(top);
+        self.anchor = Some((owner.0, owner.1, top - start));
+    }
+
+    /// After content changes, restore scroll so the anchored row stays
+    /// put. No-op while following (scroll == 0) or when the anchored
+    /// item left the display buffer.
+    fn fix_anchor(&mut self) {
+        if self.scroll == 0 {
+            self.anchor = None;
+            return;
+        }
+        let Some((g, i, off)) = self.anchor else {
+            return;
+        };
+        let rows = super::transcript::rows(self, self.view_w.get());
+        let total = rows.len();
+        let h = self.view_h.get().max(1);
+        if let Some(idx) = rows.iter().position(|r| r.owner == (g, i)) {
+            let top = idx + off;
+            self.scroll = total.saturating_sub(h).saturating_sub(top.min(total));
+        }
+    }
+
+    /// Scroll by `d` rows (positive = up). Entering scrolled state
+    /// captures the anchor so later appends don't shift the viewport.
+    pub fn scroll_by(&mut self, d: isize) {
+        if d > 0 && self.scroll == 0 {
+            self.capture_anchor();
+        }
+        self.scroll = if d > 0 {
+            self.scroll.saturating_add(d as usize)
+        } else {
+            self.scroll.saturating_sub((-d) as usize)
+        };
+        if self.scroll == 0 {
+            self.anchor = None;
+        } else {
+            self.capture_anchor();
+        }
+    }
+
+    /// Back to live output.
+    pub fn follow(&mut self) {
+        self.scroll = 0;
+        self.anchor = None;
+    }
+
+    /// Terminal resized — resolve the anchor against the new viewport
+    /// dims (mirrors draw.rs layout math so scroll survives a resize
+    /// even while no events are flowing).
+    pub fn on_resize(&mut self, w: u16, h: u16) {
+        let narrow = w < 90;
+        let side = self.sidebar && !narrow;
+        let chat_w = if side {
+            (w as usize * 70) / 100
+        } else {
+            w as usize
+        };
+        self.view_w.set(chat_w.saturating_sub(2));
+        // header 1 + tabs 1 + input 3 + footer 1 → body; chat inner = −2 borders
+        self.view_h
+            .set((h as usize).saturating_sub(6).saturating_sub(2));
+        self.fix_anchor();
+    }
+
+    // ── activity navigation ─────────────────────────────────────────
+    /// Focusable targets in transcript order: folded/done groups get a
+    /// summary row; open groups expose each item.
+    pub fn focusables(&self) -> Vec<(usize, Option<usize>)> {
+        let mut v = Vec::new();
+        for (gi, g) in self.groups.iter().enumerate() {
+            if g.id == 0 {
+                for (ii, _) in g.items.iter().enumerate() {
+                    v.push((gi, Some(ii)));
+                }
+                continue;
+            }
+            if g.folded() {
+                v.push((gi, None));
+            } else {
+                if g.done {
+                    v.push((gi, None)); // status row = collapse handle
+                }
+                for (ii, it) in g.items.iter().enumerate() {
+                    // request markers render as the group's waiting row —
+                    // not individually focusable
+                    if !matches!(it, Act::Req { .. }) {
+                        v.push((gi, Some(ii)));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Toggle expansion at the current nav target — or open the detail
+    /// view for leaf items that don't fold.
+    pub fn nav_activate(&mut self) {
+        let fs = self.focusables();
+        let Some(&(gi, ii)) = fs.get(self.nav_sel) else {
+            return;
+        };
+        match ii {
+            None => {
+                let g = &mut self.groups[gi];
+                if g.folded() {
+                    g.expanded = true;
+                    g.collapsed = false;
+                } else {
+                    g.expanded = false;
+                    g.collapsed = true;
+                }
+                self.fix_anchor();
+            }
+            Some(i) => match &mut self.groups[gi].items[i] {
+                Act::Tool { expanded, .. } | Act::Reason { expanded, .. } => {
+                    *expanded = !*expanded;
+                    self.fix_anchor();
+                }
+                other => {
+                    let title = match other {
+                        Act::Assistant { agent, .. } => format!("{agent} — message"),
+                        Act::Note { .. } => "note".into(),
+                        Act::Req { .. } => "request".into(),
+                        _ => "item".into(),
+                    };
+                    self.modal = Some(Modal::View {
+                        title,
+                        text: other.detail(),
+                        scroll: 0,
+                    });
+                }
+            },
+        }
+    }
+
+    /// 'v' — full details/transcript for the current nav target.
+    pub fn nav_view(&mut self) {
+        let fs = self.focusables();
+        let Some(&(gi, ii)) = fs.get(self.nav_sel) else {
+            return;
+        };
+        match ii {
+            Some(i) => {
+                let it = &self.groups[gi].items[i];
+                let title = match it {
+                    Act::Tool { name, call, .. } => format!("{name} — {call}"),
+                    Act::Reason { agent, .. } => format!("{agent} — reasoning"),
+                    Act::Assistant { agent, .. } => format!("{agent} — message"),
+                    Act::Note { .. } => "note".into(),
+                    Act::Req { agent, req, .. } => format!("{agent} — request #{req}"),
+                };
+                self.modal = Some(Modal::View {
+                    title,
+                    text: it.detail(),
+                    scroll: 0,
+                });
+            }
+            None => {
+                // whole-run transcript: deterministic dump of the group
+                let g = &self.groups[gi];
+                let mut s = format!("task: {}\noutcome: {}\n\n", g.task, g.outcome);
+                for it in &g.items {
+                    let head = match it {
+                        Act::Req { agent, req, ms, .. } => {
+                            format!("[request] {agent} #{req} {ms}ms")
+                        }
+                        Act::Assistant { agent, .. } => format!("[assistant] {agent}"),
+                        Act::Reason { agent, .. } => format!("[reasoning] {agent}"),
+                        Act::Tool {
+                            agent,
+                            name,
+                            summary,
+                            status,
+                            exit,
+                            ..
+                        } => format!(
+                            "[tool] {agent} {name} {} — {}{}",
+                            status.map(|s| s.label()).unwrap_or("running"),
+                            summary.lines().next().unwrap_or(""),
+                            exit.map(|e| format!(" exit {e}")).unwrap_or_default(),
+                        ),
+                        Act::Note { text, .. } => {
+                            format!("[note] {}", text.lines().next().unwrap_or(""))
+                        }
+                    };
+                    s.push_str(&head);
+                    s.push('\n');
+                    match it {
+                        Act::Assistant { text, .. } | Act::Reason { text, .. } => {
+                            for l in text.lines() {
+                                s.push_str("    ");
+                                s.push_str(l);
+                                s.push('\n');
+                            }
+                        }
+                        Act::Tool { result, .. } if !result.is_empty() => {
+                            for l in result.lines() {
+                                s.push_str("    ");
+                                s.push_str(l);
+                                s.push('\n');
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.modal = Some(Modal::View {
+                    title: format!("run transcript — {}", g.task.lines().next().unwrap_or("")),
+                    text: s,
+                    scroll: 0,
+                });
+            }
+        }
+    }
+
+    /// Cycle reasoning display pref — view-only, no request parameters
+    /// change; persisted in [ui].
+    pub fn cycle_reasoning(&mut self) {
+        self.reasoning = self.reasoning.next();
+        self.ui.reasoning = Some(self.reasoning.name().into());
+        self.effects.push(Effect::SaveUi);
+        self.status = format!("reasoning display: {}", self.reasoning.name());
+        self.fix_anchor();
     }
 
     // ── input handling → effects ────────────────────────────────────
@@ -735,20 +1679,51 @@ impl App {
         if !press {
             return;
         }
-        match (ctrl, k.code) {
-            (true, KeyCode::Char('t')) => {
-                self.tab = Tab::ALL[((self.tab as usize) + 1) % 5]
+        // Activity-navigation mode: ↑/↓ select, Enter/Space expand or
+        // collapse, 'v' full details, End returns to live, Tab/Esc exits
+        // back to the input box. Enter here never sends.
+        if self.nav && self.tab == Tab::Chat {
+            match k.code {
+                KeyCode::Esc | KeyCode::Tab => self.nav = false,
+                KeyCode::Up => self.nav_sel = self.nav_sel.saturating_sub(1),
+                KeyCode::Down => {
+                    let n = self.focusables().len();
+                    if n > 0 && self.nav_sel + 1 < n {
+                        self.nav_sel += 1;
+                    }
+                }
+                KeyCode::PageUp => self.scroll_by(10),
+                KeyCode::PageDown => self.scroll_by(-10),
+                KeyCode::Enter | KeyCode::Char(' ') => self.nav_activate(),
+                KeyCode::Char('v') => self.nav_view(),
+                KeyCode::End => self.follow(),
+                _ => {}
             }
+            return;
+        }
+        match (ctrl, k.code) {
+            (true, KeyCode::Char('t')) => self.tab = Tab::ALL[((self.tab as usize) + 1) % 5],
             (true, KeyCode::Char('b')) => self.sidebar = !self.sidebar,
             // Ctrl+M is byte 0x0D == Enter in most terminals; Ctrl+O (0x0F)
             // is the portable chord. 'm' stays for kitty/CSI-u keyboards.
             (true, KeyCode::Char('m')) | (true, KeyCode::Char('o')) => self.toggle_mode(),
+            // Ctrl+R cycles the reasoning display preference — a view
+            // option only; no request parameters change.
+            (true, KeyCode::Char('r')) => self.cycle_reasoning(),
             // NB: Ctrl+J is 0x0A = Enter on legacy terminals — binding it
             // would submit the task instead of inserting a newline.
             (true, KeyCode::Char('n')) => self.input.insert('\n'),
             (_, KeyCode::F(1)) => self.modal = Some(Modal::Help),
-            (_, KeyCode::PageUp) => self.scroll = self.scroll.saturating_add(10),
-            (_, KeyCode::PageDown) => self.scroll = self.scroll.saturating_sub(10),
+            (_, KeyCode::PageUp) => self.scroll_by(10),
+            (_, KeyCode::PageDown) => self.scroll_by(-10),
+            (_, KeyCode::Tab) => {
+                if self.tab == Tab::Chat {
+                    // focus the transcript — selection starts at the
+                    // latest focusable row
+                    self.nav = true;
+                    self.nav_sel = self.focusables().len().saturating_sub(1);
+                }
+            }
             (_, KeyCode::Enter) => {
                 if self.tab == Tab::Chat && !self.input.is_empty() && self.running {
                     self.status = "run in progress — Ctrl+S stops it; text kept".into();
@@ -773,21 +1748,51 @@ impl App {
                                 self.input.clear();
                             }
                             _ => {
-                                self.status = format!("unknown command '{task}' — /mission /solo /export /help");
+                                self.status = format!(
+                                    "unknown command '{task}' — /mission /solo /export /help"
+                                );
                             }
                         }
                         return;
                     }
                     self.input.clear();
-                    self.chat.push(ChatItem::User { text: task.clone(), at: now_hm() });
+                    // one activity group per submitted task — events with
+                    // this run id route here until RunDone
+                    self.next_run += 1;
+                    let run = self.next_run;
+                    self.groups.push(ActGroup {
+                        id: run,
+                        task: task.clone(),
+                        at: now_hm(),
+                        started: Instant::now(),
+                        done: false,
+                        failed: false,
+                        outcome: String::new(),
+                        expanded: false,
+                        collapsed: false,
+                        items: vec![],
+                        dur_ms: 0,
+                        reqs: 0,
+                        tools_ok: 0,
+                        tools_bad: 0,
+                        tools_other: 0,
+                    });
                     self.history.push(task.clone());
-                    if self.history.len() > 200 { self.history.remove(0); }
+                    if self.history.len() > 200 {
+                        self.history.remove(0);
+                    }
                     self.hist_i = None;
                     self.running = true;
                     self.started = Some(Instant::now());
                     self.outcome.clear();
-                    self.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.effects.push(Effect::SendTask { task, mode: self.mode });
+                    self.follow();
+                    self.stop_flag
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.effects.push(Effect::SendTask {
+                        task,
+                        mode: self.mode,
+                        run,
+                    });
                 } else if self.tab == Tab::Settings {
                     self.settings_activate(self.settings_sel);
                 }
@@ -806,7 +1811,7 @@ impl App {
                     self.hist_i = Some(i);
                     self.input.set(&self.history[i]);
                 } else {
-                    self.scroll = self.scroll.saturating_add(1);
+                    self.scroll_by(1);
                 }
             }
             (_, KeyCode::Down) => {
@@ -825,7 +1830,14 @@ impl App {
                         self.input.set(&self.history[i]);
                     }
                 } else {
-                    self.scroll = self.scroll.saturating_sub(1);
+                    self.scroll_by(-1);
+                }
+            }
+            (_, KeyCode::End) => {
+                if self.tab == Tab::Chat && self.scroll > 0 {
+                    self.follow();
+                } else if self.tab == Tab::Chat {
+                    self.input.end();
                 }
             }
             (_, KeyCode::Esc) => {
@@ -834,25 +1846,33 @@ impl App {
                 }
             }
             (_, KeyCode::Backspace) => {
-                if self.tab == Tab::Chat { self.input.backspace(); }
+                if self.tab == Tab::Chat {
+                    self.input.backspace();
+                }
             }
             (_, KeyCode::Delete) => {
-                if self.tab == Tab::Chat { self.input.delete(); }
+                if self.tab == Tab::Chat {
+                    self.input.delete();
+                }
             }
             (_, KeyCode::Left) => {
-                if self.tab == Tab::Chat { self.input.left(); }
+                if self.tab == Tab::Chat {
+                    self.input.left();
+                }
             }
             (_, KeyCode::Right) => {
-                if self.tab == Tab::Chat { self.input.right(); }
+                if self.tab == Tab::Chat {
+                    self.input.right();
+                }
             }
             (_, KeyCode::Home) => {
-                if self.tab == Tab::Chat { self.input.home(); }
+                if self.tab == Tab::Chat {
+                    self.input.home();
+                }
             }
-            (_, KeyCode::End) => {
-                if self.tab == Tab::Chat { self.input.end(); }
-            }
-            (_, KeyCode::Char(c)) => {
-                if self.tab == Tab::Chat { self.input.insert(c); self.hist_i = None; }
+            (_, KeyCode::Char(c)) if self.tab == Tab::Chat => {
+                self.input.insert(c);
+                self.hist_i = None;
             }
             _ => {}
         }
@@ -912,7 +1932,8 @@ impl App {
 
     pub fn stop(&mut self) {
         if self.running {
-            self.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.stop_flag
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             self.cancel.notify_waiters();
             self.effects.push(Effect::Stop);
             self.status = "stopping…".into();
@@ -923,7 +1944,12 @@ impl App {
     /// Handlers consume the modal and return the next modal state.
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
         match m {
-            Modal::Permission { id, agent, summary, reply } => {
+            Modal::Permission {
+                id,
+                agent,
+                summary,
+                reply,
+            } => {
                 let decided = match k.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => Some(GateChoice::Once),
                     KeyCode::Char('a') | KeyCode::Char('A') => Some(GateChoice::Session),
@@ -935,16 +1961,26 @@ impl App {
                     _ => None,
                 };
                 match decided {
-                    None => Some(Modal::Permission { id, agent, summary, reply }),
+                    None => Some(Modal::Permission {
+                        id,
+                        agent,
+                        summary,
+                        reply,
+                    }),
                     Some(c) => {
                         if c == GateChoice::Session {
                             self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         let _ = reply.send(c);
                         // next parked ask becomes the modal
-                        self.pending_perms.pop_front().map(|(id, agent, summary, reply)| {
-                            Modal::Permission { id, agent, summary, reply }
-                        })
+                        self.pending_perms
+                            .pop_front()
+                            .map(|(id, agent, summary, reply)| Modal::Permission {
+                                id,
+                                agent,
+                                summary,
+                                reply,
+                            })
                     }
                 }
             }
@@ -955,10 +1991,52 @@ impl App {
                     Some(Modal::Help)
                 }
             }
+            Modal::View {
+                title,
+                text,
+                scroll,
+            } => match k.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => None,
+                KeyCode::Up => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: scroll.saturating_sub(1),
+                }),
+                KeyCode::Down => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: scroll + 1,
+                }),
+                KeyCode::PageUp => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: scroll.saturating_sub(10),
+                }),
+                KeyCode::PageDown => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: scroll + 10,
+                }),
+                KeyCode::Home => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: 0,
+                }),
+                _ => Some(Modal::View {
+                    title,
+                    text,
+                    scroll,
+                }),
+            },
             Modal::ConfirmTest { name } => match k.code {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     if let Some((base, key, model)) = self.resolve(&name) {
-                        self.effects.push(Effect::Probe { name, base_url: base, model, key });
+                        self.effects.push(Effect::Probe {
+                            name,
+                            base_url: base,
+                            model,
+                            key,
+                        });
                     }
                     None
                 }
@@ -967,7 +2045,11 @@ impl App {
             },
             Modal::Provider(f) => self.provider_key(k, f),
             Modal::Picker(p) => self.picker_key(k, p),
-            Modal::Text { title, mut buf, target } => match k.code {
+            Modal::Text {
+                title,
+                mut buf,
+                target,
+            } => match k.code {
                 KeyCode::Esc => None,
                 KeyCode::Enter => {
                     let v = buf.text();
@@ -1068,7 +2150,8 @@ impl App {
                     });
                     self.form_stash = Some(f);
                     return Some(Modal::Picker(Picker {
-                        title: "models (type to filter; Enter picks filter text if no match)".into(),
+                        title: "models (type to filter; Enter picks filter text if no match)"
+                            .into(),
                         items: vec![],
                         filter: Buf::new(),
                         sel: 0,
@@ -1079,11 +2162,15 @@ impl App {
                 _ => f.cycle(1), // selectors advance on Enter too
             },
             KeyCode::Backspace => {
-                if let Some(b) = f.cur() { b.backspace(); }
+                if let Some(b) = f.cur() {
+                    b.backspace();
+                }
                 f.refresh_endpoint();
             }
             KeyCode::Delete => {
-                if let Some(b) = f.cur() { b.delete(); }
+                if let Some(b) = f.cur() {
+                    b.delete();
+                }
                 f.refresh_endpoint();
             }
             KeyCode::Char(c) => {
@@ -1109,15 +2196,27 @@ impl App {
             KeyCode::Up => p.sel = p.sel.saturating_sub(1),
             KeyCode::Down => {
                 let n = self.filtered(&p).len();
-                if p.sel + 1 < n { p.sel += 1; }
+                if p.sel + 1 < n {
+                    p.sel += 1;
+                }
             }
-            KeyCode::Backspace => { p.filter.backspace(); p.sel = 0; }
-            KeyCode::Char(c) => { p.filter.insert(c); p.sel = 0; }
+            KeyCode::Backspace => {
+                p.filter.backspace();
+                p.sel = 0;
+            }
+            KeyCode::Char(c) => {
+                p.filter.insert(c);
+                p.sel = 0;
+            }
             KeyCode::Enter => {
                 let list = self.filtered(&p);
                 let choice = list.get(p.sel).cloned().or_else(|| {
                     let t = p.filter.text();
-                    if t.is_empty() { None } else { Some(t) }
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
                 });
                 if let Some(c) = choice {
                     return self.pick(p.target.clone(), c);
@@ -1140,7 +2239,10 @@ impl App {
     fn pick(&mut self, target: PickTarget, choice: String) -> Option<Modal> {
         match target {
             PickTarget::ProvModel => {
-                let mut f = self.form_stash.take().unwrap_or_else(|| ProvForm::new(ProvType::Custom));
+                let mut f = self
+                    .form_stash
+                    .take()
+                    .unwrap_or_else(|| ProvForm::new(ProvType::Custom));
                 f.model.set(&choice);
                 f.refresh_endpoint();
                 Some(Modal::Provider(f))
@@ -1219,10 +2321,18 @@ impl App {
                     p.items = models
                         .iter()
                         .map(|m| {
-                            let ctx = m.context_length.map(|c| format!(" ctx={}", c)).unwrap_or_default();
-                            let tools = m.tools_claimed.map(|t| if t { " tools" } else { "" }).unwrap_or_default();
+                            let ctx = m
+                                .context_length
+                                .map(|c| format!(" ctx={}", c))
+                                .unwrap_or_default();
+                            let tools = m
+                                .tools_claimed
+                                .map(|t| if t { " tools" } else { "" })
+                                .unwrap_or_default();
                             let price = match (m.price_in, m.price_out) {
-                                (Some(a), Some(b)) => format!(" ${:.2}/${:.2}per-M", a * 1e6, b * 1e6),
+                                (Some(a), Some(b)) => {
+                                    format!(" ${:.2}/${:.2}per-M", a * 1e6, b * 1e6)
+                                }
                                 _ => String::new(),
                             };
                             format!("{}{}{}{}", m.id, ctx, tools, price)
@@ -1261,6 +2371,7 @@ impl App {
         v.push(SettingsRow::Mode);
         v.push(SettingsRow::Export);
         v.push(SettingsRow::Workers);
+        v.push(SettingsRow::Reasoning);
         v.push(SettingsRow::Auto);
         v.push(SettingsRow::Workspace);
         v.push(SettingsRow::Acceptance);
@@ -1315,6 +2426,7 @@ impl App {
                 });
                 self.effects.push(Effect::SaveUi);
             }
+            Some(SettingsRow::Reasoning) => self.cycle_reasoning(),
             Some(SettingsRow::Auto) => {
                 // session-scoped YOLO toggle — flips the flag the live gate
                 // already watches, so Ask→Auto→Ask lands on the very next
@@ -1349,6 +2461,7 @@ pub enum SettingsRow {
     Mode,
     Export,
     Workers,
+    Reasoning,
     Auto,
     Workspace,
     Acceptance,

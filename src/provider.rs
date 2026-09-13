@@ -63,12 +63,18 @@ impl Provider {
         }
     }
 
-    /// One streaming request. `on_delta` receives content fragments as they arrive.
+    /// One streaming request. `on_delta` receives content fragments as they
+    /// arrive; `on_reasoning` receives provider-exposed reasoning fragments
+    /// (`reasoning_content`, or OpenRouter-style `reasoning` when the former
+    /// is absent — never both for the same delta). Opaque reasoning blobs
+    /// (e.g. reasoning_details objects) are preserved in the outcome but
+    /// never pushed through `on_reasoning` — they aren't displayable text.
     pub async fn stream_chat(
         &self,
         messages: &[Message],
         tools: &[Value],
         mut on_delta: impl FnMut(&str),
+        mut on_reasoning: impl FnMut(&str),
     ) -> Result<StreamOutcome> {
         let start = Instant::now();
         let mut body = json!({
@@ -90,7 +96,11 @@ impl Provider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            bail!("provider http {}: {}", status.as_u16(), truncate(&text, 500));
+            bail!(
+                "provider http {}: {}",
+                status.as_u16(),
+                truncate(&text, 500)
+            );
         }
 
         let mut stream = resp.bytes_stream();
@@ -147,8 +157,15 @@ impl Provider {
                         content.push_str(t);
                         on_delta(t);
                     }
-                    if let Some(r) = d["reasoning_content"].as_str() {
+                    // Normalize reasoning fields: prefer reasoning_content,
+                    // fall back to `reasoning` (OpenRouter). Equivalent
+                    // fields are never both emitted for one delta.
+                    if let Some(r) = d["reasoning_content"]
+                        .as_str()
+                        .or_else(|| d["reasoning"].as_str())
+                    {
                         reasoning.get_or_insert_with(String::new).push_str(r);
+                        on_reasoning(r);
                     }
                     for tc in d["tool_calls"].as_array().into_iter().flatten() {
                         if first_delta_ms.is_none() {
@@ -235,7 +252,9 @@ pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<Mo
             id: id.to_string(),
             context_length: m["context_length"].as_u64(),
             price_in: m["pricing"]["prompt"].as_str().and_then(|s| s.parse().ok()),
-            price_out: m["pricing"]["completion"].as_str().and_then(|s| s.parse().ok()),
+            price_out: m["pricing"]["completion"]
+                .as_str()
+                .and_then(|s| s.parse().ok()),
             tools_claimed,
         });
     }
@@ -266,18 +285,33 @@ pub async fn probe(base_url: &str, api_key: Option<&str>, model: &str) -> Result
     })];
     let mut streamed = false;
     let out = p
-        .stream_chat(&msgs, &tools, |_| {
-            streamed = true;
-        })
+        .stream_chat(
+            &msgs,
+            &tools,
+            |_| {
+                streamed = true;
+            },
+            |_| {},
+        )
         .await?;
     Ok(Probe {
-        streaming: if streamed { CapStatus::Verified } else { CapStatus::Unsupported },
-        tool_calls: if !out.tool_calls.is_empty() || out.finish_reason.as_deref() == Some("tool_calls") {
+        streaming: if streamed {
+            CapStatus::Verified
+        } else {
+            CapStatus::Unsupported
+        },
+        tool_calls: if !out.tool_calls.is_empty()
+            || out.finish_reason.as_deref() == Some("tool_calls")
+        {
             CapStatus::Verified
         } else {
             CapStatus::Unverified
         },
-        usage: if out.usage.is_some() { CapStatus::Verified } else { CapStatus::Unverified },
+        usage: if out.usage.is_some() {
+            CapStatus::Verified
+        } else {
+            CapStatus::Unverified
+        },
         model: out.returned_model.unwrap_or_else(|| model.to_string()),
     })
 }

@@ -31,7 +31,11 @@ enum Sub {
 }
 
 #[derive(Parser)]
-#[command(name = "sui", version, about = "cache-first multi-agent coding harness (v0: fast path)")]
+#[command(
+    name = "sui",
+    version,
+    about = "cache-first multi-agent coding harness (v0: fast path)"
+)]
 struct Cli {
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -63,7 +67,13 @@ async fn main() -> Result<()> {
     if let Some(Sub::Tui { mission }) = &cli.sub {
         return sui::tui::run(*mission).await;
     }
-    if let Some(Sub::Export { latest, run, format, include_diff }) = &cli.sub {
+    if let Some(Sub::Export {
+        latest,
+        run,
+        format,
+        include_diff,
+    }) = &cli.sub
+    {
         if !latest && run.is_none() {
             anyhow::bail!("specify --latest or --run <run-id> (see ~/.local/share/sui/runs/)");
         }
@@ -179,7 +189,9 @@ async fn repl(agent: &mut agent::Agent) -> Result<()> {
                 let _ = rl.add_history_entry(line);
                 match line {
                     "/quit" | "/q" | "/exit" => break,
-                    "/help" => eprintln!("commands: /quit /help — anything else is sent to the agent"),
+                    "/help" => {
+                        eprintln!("commands: /quit /help — anything else is sent to the agent")
+                    }
                     _ => {
                         if let Err(e) = agent.run_turn(line).await {
                             eprintln!("error: {e:#}");

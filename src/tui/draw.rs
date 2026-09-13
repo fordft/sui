@@ -31,7 +31,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(area);
 
     // header
-    let ws = app.workspace.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+    let ws = app
+        .workspace
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?");
     let mode = match app.mode {
         Mode::Solo => "Solo",
         Mode::Mission => "Mission",
@@ -42,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Span::styled(format!("· workspace: {ws} · Mode: {mode}"), dim()),
             Span::styled(
                 if app.running {
-                    const SPIN: &[char] = &['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+                    const SPIN: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                     let e = app.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
                     // wall-clock driven — animates on the heartbeat redraw
                     let frame = (std::time::SystemTime::now()
@@ -57,7 +61,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 Style::default().fg(Color::Yellow),
             ),
             Span::styled(
-                if app.auto.load(std::sync::atomic::Ordering::Relaxed) { " · AUTO" } else { "" },
+                if app.auto.load(std::sync::atomic::Ordering::Relaxed) {
+                    " · AUTO"
+                } else {
+                    ""
+                },
                 Style::default().fg(Color::Magenta),
             ),
         ])),
@@ -107,7 +115,13 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     // input
-    let hint = if app.running { "running… (Ctrl+S stop)" } else { "type a task — Enter sends · Ctrl+N newline · /mission /solo" };
+    let hint = if app.nav && app.tab == Tab::Chat {
+        "transcript focused — ↑↓ select · Enter expand · v details · Esc back"
+    } else if app.running {
+        "running… (Ctrl+S stop · Tab selects activity)"
+    } else {
+        "type a task — Enter sends · Tab selects activity · Ctrl+N newline · /mission /solo"
+    };
     f.render_widget(
         Paragraph::new(app.input.text())
             .block(Block::default().borders(Borders::ALL).title(hint))
@@ -116,7 +130,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     );
 
     // footer
-    let keys = " Ctrl+T tabs · Ctrl+O solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit";
+    let keys =
+        " Ctrl+T tabs · Ctrl+O solo/mission · Ctrl+B sidebar · Ctrl+S stop · F1 help · Ctrl+Q quit";
     let room = (area.width as usize).saturating_sub(keys.len() + 3);
     let st = if app.status.chars().count() > room && room > 12 {
         // middle-truncate long paths/messages instead of clipping the tail
@@ -165,63 +180,39 @@ pub fn draw(f: &mut Frame, app: &App) {
         // clamp inside the box — the paragraph doesn't scroll, so a
         // longer input clips and the caret must stay on its last row
         let cy = cy.min(rows[3].height.saturating_sub(2).saturating_sub(1) as usize);
-        f.set_cursor_position((rows[3].x + 1 + cx.min(w - 1) as u16, rows[3].y + 1 + cy as u16));
+        f.set_cursor_position((
+            rows[3].x + 1 + cx.min(w - 1) as u16,
+            rows[3].y + 1 + cy as u16,
+        ));
     }
 }
 
 fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
-    let mut lines: Vec<Line> = vec![];
-    for it in &app.chat {
-        match it {
-            ChatItem::User { text: t, at } => {
-                lines.push(Line::from(vec![
-                    Span::styled("you", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {at}"), dim()),
-                ]));
-                for l in t.lines() {
-                    lines.push(Line::from(format!("  {l}")));
-                }
-            }
-            ChatItem::Assistant { agent, text, at, .. } => {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{agent}"), acc().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {at}"), dim()),
-                ]));
-                for l in text.lines() {
-                    lines.push(Line::from(format!("  {l}")));
-                }
-            }
-            ChatItem::Tool { name, summary, done, ok, result, .. } => {
-                let mark = if !*done {
-                    "▸ …"
-                } else if *ok {
-                    "▸ ok"
-                } else {
-                    "▸ !"
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {mark} {name}: "), Style::default().fg(Color::Magenta)),
-                    Span::styled(summary.lines().next().unwrap_or("").to_string(), dim()),
-                ]));
-                if *done && !result.is_empty() {
-                    for l in result.lines().take(4) {
-                        lines.push(Line::from(Span::styled(format!("      {l}"), dim())));
-                    }
-                }
-            }
-            ChatItem::Sys { text: t, at } => {
-                lines.push(Line::from(Span::styled(format!("· {t}  {at}"), dim())));
-            }
-        }
-    }
+    let inner_w = a.width.saturating_sub(2).max(1) as usize;
     let inner_h = a.height.saturating_sub(2) as usize;
-    let total = lines.len();
+    // the transcript projection needs the real viewport for wrap math;
+    // the cells feed App's scroll-anchor math (read-only here)
+    app.view_w.set(inner_w);
+    app.view_h.set(inner_h);
+    let rows = super::transcript::rows(app, inner_w);
+    let total = rows.len();
     let top = total.saturating_sub(inner_h).saturating_sub(app.scroll);
-    let view: Vec<Line> = lines.into_iter().skip(top).take(inner_h).collect();
-    let title = if app.scroll > 0 {
-        format!("conversation — scrolled ▲ {} rows · PgDn to resume", app.scroll)
+    let view: Vec<Line> = rows
+        .into_iter()
+        .skip(top)
+        .take(inner_h)
+        .map(|r| r.line)
+        .collect();
+    let title = if app.nav {
+        "activity — ↑↓ select · Enter/Space expand/collapse · v details · Esc/Tab input · End live"
+            .into()
+    } else if app.scroll > 0 {
+        format!(
+            "activity — scrolled ▲ {} rows · End/PgDn to live · Tab selects",
+            app.scroll
+        )
     } else {
-        "conversation".into()
+        "activity — Tab selects · Enter sends".into()
     };
     f.render_widget(
         Paragraph::new(view).block(Block::default().borders(Borders::ALL).title(title)),
@@ -294,7 +285,10 @@ fn draw_changes(f: &mut Frame, app: &App, a: Rect) {
 
 fn draw_usage(f: &mut Frame, app: &App, a: Rect) {
     let mut lines = vec![Line::from(Span::styled(
-        format!("{:<14} {:<22} {:>5} {:>8} {:>8} {:>8} {:>8}", "agent", "model", "reqs", "in", "cached", "wr", "out"),
+        format!(
+            "{:<14} {:<22} {:>5} {:>8} {:>8} {:>8} {:>8}",
+            "agent", "model", "reqs", "in", "cached", "wr", "out"
+        ),
         acc(),
     ))];
     for (agent, (model, u)) in &app.usage {
@@ -361,6 +355,13 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 format!("  worker concurrency: {} (max 2)", app.ui.worker_count.unwrap_or(1)),
                 Style::default(),
             ),
+            SettingsRow::Reasoning => (
+                format!(
+                    "  reasoning display: {} (auto hides after streaming · Ctrl+R cycles · view-only)",
+                    app.reasoning.name()
+                ),
+                Style::default(),
+            ),
             SettingsRow::Auto => {
                 let on = app.auto.load(std::sync::atomic::Ordering::Relaxed);
                 (
@@ -382,7 +383,11 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
         };
         items.push(ListItem::new(Line::from(Span::styled(
             text,
-            if sel { Style::default().bg(Color::DarkGray) } else { sty },
+            if sel {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                sty
+            },
         ))));
     }
     f.render_widget(
@@ -433,12 +438,22 @@ fn draw_sidebar(f: &mut Frame, app: &App, a: Rect) {
         Line::from(format!(
             "elapsed: {}",
             if app.running {
-                format!("{}s", app.started.map(|s| s.elapsed().as_secs()).unwrap_or(0))
+                format!(
+                    "{}s",
+                    app.started.map(|s| s.elapsed().as_secs()).unwrap_or(0)
+                )
             } else {
                 "—".into()
             }
         )),
-        Line::from(format!("outcome: {}", if app.outcome.is_empty() { "—" } else { &app.outcome })),
+        Line::from(format!(
+            "outcome: {}",
+            if app.outcome.is_empty() {
+                "—"
+            } else {
+                &app.outcome
+            }
+        )),
         Line::from(Span::styled(format!("run: {run_id}"), dim())),
         Line::from(Span::styled("export: /export or sui export", dim())),
     ];
@@ -453,11 +468,19 @@ fn draw_sidebar(f: &mut Frame, app: &App, a: Rect) {
 fn centered(w: u16, h: u16, a: Rect) -> Rect {
     let v = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Fill(1), Constraint::Length(h.min(a.height)), Constraint::Fill(1)])
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(h.min(a.height)),
+            Constraint::Fill(1),
+        ])
         .split(a);
     let h2 = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Fill(1), Constraint::Length(w.min(a.width)), Constraint::Fill(1)])
+        .constraints([
+            Constraint::Fill(1),
+            Constraint::Length(w.min(a.width)),
+            Constraint::Fill(1),
+        ])
         .split(v[1]);
     h2[1]
 }
@@ -469,21 +492,35 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             let more = app.pending_perms.len();
             let title = format!(
                 "permission — {agent}{} — [y] once [a] session [n/Esc] deny",
-                if more > 0 { format!(" · +{more} pending") } else { String::new() }
+                if more > 0 {
+                    format!(" · +{more} pending")
+                } else {
+                    String::new()
+                }
             );
             // bounded preview: never approve a command you can't read —
             // heredocs/very long commands show head lines + a marker
             let sl: Vec<&str> = summary.lines().collect();
             let show = 8usize;
-            let mut lines: Vec<Line> = sl.iter().take(show).map(|l| Line::from((*l).to_string())).collect();
+            let mut lines: Vec<Line> = sl
+                .iter()
+                .take(show)
+                .map(|l| Line::from((*l).to_string()))
+                .collect();
             if sl.len() > show {
                 lines.push(Line::from(Span::styled(
-                    format!("… {} more line(s) — review the full command in the run export", sl.len() - show),
+                    format!(
+                        "… {} more line(s) — review the full command in the run export",
+                        sl.len() - show
+                    ),
                     dim(),
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("[y/Y] once   [a/A] session   [n/N/Esc] deny", acc())));
+            lines.push(Line::from(Span::styled(
+                "[y/Y] once   [a/A] session   [n/N/Esc] deny",
+                acc(),
+            )));
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(lines)
@@ -493,14 +530,17 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             );
         }
         Modal::Help => {
-            let r = centered(70, 14, area);
+            let r = centered(74, 16, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(vec![
                     Line::from("keys"),
-                    Line::from("  Ctrl+T cycle tabs   Ctrl+O solo/mission   Ctrl+B sidebar"),
-                    Line::from("  Ctrl+N newline   PgUp/PgDn scroll   ↑ recall last task (input empty)"),
+                    Line::from("  Ctrl+T cycle tabs   Ctrl+O solo/mission   Ctrl+B sidebar   Ctrl+R reasoning"),
+                    Line::from("  Ctrl+N newline   PgUp/PgDn scroll   End back to live   ↑ recall task"),
                     Line::from("  Enter send/activate   Esc close/back   Ctrl+S stop   Ctrl+Q quit"),
+                    Line::from("activity transcript (Chat tab):"),
+                    Line::from("  Tab focus transcript   ↑↓ select   Enter/Space expand/collapse"),
+                    Line::from("  v full details   Esc/Tab back to input"),
                     Line::from("  /mission /solo /export /help — settings: run mode · export report"),
                     Line::from(""),
                     Line::from("shell execution is NOT a sandbox — approvals are per-action"),
@@ -547,9 +587,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                             Field::BaseUrl => pf.base_url.text(),
                             Field::Model => pf.model.text(),
                             Field::KeyEnv => pf.key_env.text(),
-                            Field::ApiKey => {
-                                "•".repeat(pf.key.text().chars().count().min(24))
-                            }
+                            Field::ApiKey => "•".repeat(pf.key.text().chars().count().min(24)),
                             Field::Auth => format!("◀ {} ▶", pf.auth.name()),
                             Field::CredSrc => "Environment variable".to_string(),
                             Field::Store => format!("◀ {} ▶", pf.store.name()),
@@ -602,7 +640,8 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
         Modal::Picker(p) => {
             let r = centered(70, 16, area);
             f.render_widget(Clear, r);
-            let mut items: Vec<ListItem> = vec![ListItem::new(format!("filter: {}", p.filter.text()))];
+            let mut items: Vec<ListItem> =
+                vec![ListItem::new(format!("filter: {}", p.filter.text()))];
             if p.loading {
                 items.push(ListItem::new(Span::styled("loading…", dim())));
             }
@@ -618,11 +657,19 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             for (i, it) in list.iter().enumerate().take(12) {
                 items.push(ListItem::new(Line::from(Span::styled(
                     it.clone(),
-                    if i == p.sel { Style::default().bg(Color::DarkGray) } else { Style::default() },
+                    if i == p.sel {
+                        Style::default().bg(Color::DarkGray)
+                    } else {
+                        Style::default()
+                    },
                 ))));
             }
             f.render_widget(
-                List::new(items).block(Block::default().borders(Borders::ALL).title(p.title.clone())),
+                List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(p.title.clone()),
+                ),
                 r,
             );
         }
@@ -634,7 +681,42 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                     Line::from(format!("probe '{name}' sends one small live request.")),
                     Line::from(Span::styled("[y] proceed   [n] cancel", acc())),
                 ])
-                .block(Block::default().borders(Borders::ALL).title("test connection")),
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("test connection"),
+                ),
+                r,
+            );
+        }
+        Modal::View {
+            title,
+            text,
+            scroll,
+        } => {
+            // full-details viewer: captured text, sanitized + wrapped.
+            let r = centered(90, area.height.saturating_sub(4).min(34), area);
+            f.render_widget(Clear, r);
+            let inner_w = r.width.saturating_sub(2).max(1) as usize;
+            let lines: Vec<Line> = text
+                .split('\n')
+                .flat_map(|l| super::transcript::wrap(&super::transcript::clean(l), inner_w))
+                .map(|s| Line::from(s.to_string()))
+                .collect();
+            let inner_h = r.height.saturating_sub(2) as usize;
+            let max_scroll = lines.len().saturating_sub(inner_h);
+            let s = (*scroll).min(max_scroll);
+            let more = if lines.len() > inner_h + s {
+                format!(" ▼ +{}", lines.len() - inner_h - s)
+            } else {
+                String::new()
+            };
+            f.render_widget(
+                Paragraph::new(lines.into_iter().skip(s).take(inner_h).collect::<Vec<_>>()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("{title} — ↑↓ PgUp/PgDn scroll{more} · Esc close")),
+                ),
                 r,
             );
         }

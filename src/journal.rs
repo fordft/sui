@@ -39,7 +39,9 @@ impl Journal {
             "type": kind,
             "data": data,
         });
-        let _ = self.f.write_all(serde_json::to_string(&ev).unwrap_or_default().as_bytes());
+        let _ = self
+            .f
+            .write_all(serde_json::to_string(&ev).unwrap_or_default().as_bytes());
         let _ = self.f.write_all(b"\n");
         let _ = self.f.flush();
     }

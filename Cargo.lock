@@ -1747,6 +1747,8 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

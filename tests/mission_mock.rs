@@ -21,12 +21,12 @@ fn lock() -> &'static Mutex<()> {
 
 struct Script {
     plan_payload: Value,
-    worker_first: Value,     // tool_calls to emit on a fresh worker turn
+    worker_first: Value, // tool_calls to emit on a fresh worker turn
     /// (marker in first user msg, tool_calls) — per-task routing
     worker_routes: Vec<(&'static str, Value)>,
-    worker_repair: Value,    // on "REPAIR ROUND" / "AUDIT REPAIR"
+    worker_repair: Value, // on "REPAIR ROUND" / "AUDIT REPAIR"
     audit_verdicts: Vec<String>,
-    escalation: Value,       // payload for ESCALATION
+    escalation: Value, // payload for ESCALATION
 }
 
 fn tc(id: &str, name: &str, args: &str) -> Value {
@@ -35,7 +35,11 @@ fn tc(id: &str, name: &str, args: &str) -> Value {
 }
 
 fn submit(payload: Value) -> Value {
-    json!([tc("s1", "submit_result", &json!({"payload": payload}).to_string())])
+    json!([tc(
+        "s1",
+        "submit_result",
+        &json!({"payload": payload}).to_string()
+    )])
 }
 
 fn sse_tool_calls(calls: Value) -> String {
@@ -182,7 +186,12 @@ fn git(repo: &PathBuf, args: &[&str]) {
         .args(args)
         .output()
         .unwrap();
-    assert!(o.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 fn fixture_repo() -> PathBuf {
@@ -255,6 +264,7 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
         events: None,
         cancel: None,
         session_approve: None,
+        run: 1,
     }
 }
 
@@ -275,7 +285,11 @@ fn good_plan(base: &str) -> Value {
 }
 
 fn worker_writes(file: &str, content: &str) -> Value {
-    json!([tc("w1", "write_file", &json!({"path": file, "content": content}).to_string())])
+    json!([tc(
+        "w1",
+        "write_file",
+        &json!({"path": file, "content": content}).to_string()
+    )])
 }
 
 // ── tests ──────────────────────────────────────────────────────────────
@@ -303,10 +317,19 @@ async fn mission_success() {
     // the audit + gate records in the journal bind to this sha
     let sha = r.accepted_sha.expect("accepted sha recorded");
     let o = std::process::Command::new("git")
-        .arg("-C").arg(&repo)
-        .args(["rev-parse", "--verify", &format!("{}^{{commit}}", r.branch.unwrap())])
-        .output().unwrap();
-    assert!(o.status.success(), "integration branch must survive cleanup");
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", r.branch.unwrap()),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        o.status.success(),
+        "integration branch must survive cleanup"
+    );
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), sha);
 }
 
@@ -361,16 +384,29 @@ async fn mission_out_of_scope() {
         // worker writes owned file AND an out-of-scope file; repair does nothing
         worker_routes: vec![],
         worker_first: json!([
-            tc("w1","write_file",&json!({"path":"out/ok.txt","content":"ok\n"}).to_string()),
-            tc("w2","write_file",&json!({"path":"evil.txt","content":"x\n"}).to_string()),
+            tc(
+                "w1",
+                "write_file",
+                &json!({"path":"out/ok.txt","content":"ok\n"}).to_string()
+            ),
+            tc(
+                "w2",
+                "write_file",
+                &json!({"path":"evil.txt","content":"x\n"}).to_string()
+            ),
         ]),
         worker_repair: json!("text"),
         audit_verdicts: vec!["PASS".into()],
         escalation: json!({"decision": "abort"}),
     });
     let r = mission::run(cfg(port, &repo)).await.unwrap();
-    assert!(r.outcome.contains("escalat") || r.outcome.contains("aborted")
-        || r.outcome.contains("failed"), "{}", r.outcome);
+    assert!(
+        r.outcome.contains("escalat")
+            || r.outcome.contains("aborted")
+            || r.outcome.contains("failed"),
+        "{}",
+        r.outcome
+    );
     assert!(repo_clean(&repo), "out-of-scope write must not touch repo");
     assert_eq!(head(&repo), base);
 }
@@ -454,7 +490,7 @@ async fn mission_cancelled_midtask() {
         plan_payload: good_plan(&base),
         // worker runs a long bash — mission gets SIGINT during it
         worker_routes: vec![],
-        worker_first: json!([tc("w1","bash", &json!({"command":"sleep 30"}).to_string())]),
+        worker_first: json!([tc("w1", "bash", &json!({"command":"sleep 30"}).to_string())]),
         worker_repair: json!("text"),
         audit_verdicts: vec!["PASS".into()],
         escalation: json!({"decision": "abort"}),
@@ -469,8 +505,11 @@ async fn mission_cancelled_midtask() {
         .status()
         .unwrap();
     let r = h.await.unwrap().unwrap();
-    assert!(r.outcome.contains("cancelled") || r.outcome.starts_with("failed"),
-        "{}", r.outcome);
+    assert!(
+        r.outcome.contains("cancelled") || r.outcome.starts_with("failed"),
+        "{}",
+        r.outcome
+    );
     assert!(repo_clean(&repo));
     // no orphaned sleep
     let orphans = std::process::Command::new("pgrep")

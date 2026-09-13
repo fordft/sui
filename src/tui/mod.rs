@@ -7,14 +7,15 @@
 pub mod app;
 pub mod draw;
 pub mod text;
+pub mod transcript;
 
 use anyhow::{Context, Result};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -60,7 +61,10 @@ fn run_dir() -> PathBuf {
         .as_secs();
     let d = std::env::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(format!(".local/share/sui/runs/tui-{ts}-{}", std::process::id()));
+        .join(format!(
+            ".local/share/sui/runs/tui-{ts}-{}",
+            std::process::id()
+        ));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -68,12 +72,12 @@ fn run_dir() -> PathBuf {
 /// A long-lived solo agent: one conversation session (append-only
 /// history keeps the provider cache warm across chat turns).
 pub struct Solo {
-    tx: UnboundedSender<String>,
-    sig: String, // profile+model signature; change → respawn
+    tx: UnboundedSender<(u64, String)>, // (activity run id, task text)
+    sig: String,                        // profile+model signature; change → respawn
 }
 impl Solo {
-    pub fn send(&self, msg: String) {
-        let _ = self.tx.send(msg);
+    pub fn send(&self, run: u64, msg: String) {
+        let _ = self.tx.send((run, msg));
     }
 }
 
@@ -86,12 +90,17 @@ pub fn spawn_solo(
     flag: Arc<std::sync::atomic::AtomicBool>,
     session: Arc<std::sync::atomic::AtomicBool>,
 ) -> Solo {
-    let (tx, mut rx) = unbounded_channel::<String>();
+    let (tx, mut rx) = unbounded_channel::<(u64, String)>();
     let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
     let workspace_for_log = workspace.display().to_string();
     tokio::spawn(async move {
         let mut agent = Agent::new(
-            Provider::new(&prof.base_url, prof.api_key.clone(), prof.model.clone(), prof.prompt_cache_key.clone()),
+            Provider::new(
+                &prof.base_url,
+                prof.api_key.clone(),
+                prof.model.clone(),
+                prof.prompt_cache_key.clone(),
+            ),
             ToolContext {
                 workspace,
                 bash_timeout: Duration::from_secs(120),
@@ -102,6 +111,7 @@ pub fn spawn_solo(
                 Ok(j) => j,
                 Err(e) => {
                     let _ = sink.send(UiEvent::RunDone {
+                        run: 0,
                         outcome: format!("journal init: {e:#}"),
                         accepted_sha: None,
                     });
@@ -127,27 +137,54 @@ pub fn spawn_solo(
             },
         );
         agent.set_quiet(true);
-        agent.wire_ui(sink.clone(), cancel, flag, Some(session.clone()));
-        agent.jlog("session", serde_json::json!({
-            "mode": "solo",
-            "workspace": workspace_for_log,
-            "sui_version": env!("CARGO_PKG_VERSION"),
-        }));
-        while let Some(msg) = rx.recv().await {
+        agent.wire_ui(sink.clone(), cancel, flag.clone(), Some(session.clone()));
+        agent.jlog(
+            "session",
+            serde_json::json!({
+                "mode": "solo",
+                "workspace": workspace_for_log,
+                "sui_version": env!("CARGO_PKG_VERSION"),
+            }),
+        );
+        while let Some((run, msg)) = rx.recv().await {
+            agent.set_run_id(run);
             agent.jlog("task", serde_json::json!({
                 "task": msg,
+                "run": run,
                 "approval": if session.load(std::sync::atomic::Ordering::Relaxed) { "auto" } else { "ask" },
             }));
             let r = agent.run_turn(&msg).await;
+            // a user stop ends the turn cleanly but is NOT a success —
+            // the group must stay open with the interruption visible
+            let stopped = flag.load(std::sync::atomic::Ordering::Relaxed);
             match r {
                 Ok(()) => {
-                    agent.jlog("task_done", serde_json::json!({ "outcome": "done" }));
-                    let _ = sink.send(UiEvent::RunDone { outcome: "done".into(), accepted_sha: None });
+                    let outcome = if stopped { "stopped" } else { "done" };
+                    agent.jlog(
+                        "task_done",
+                        serde_json::json!({ "outcome": outcome, "run": run }),
+                    );
+                    let _ = sink.send(UiEvent::RunDone {
+                        run,
+                        outcome: outcome.into(),
+                        accepted_sha: None,
+                    });
                 }
                 Err(e) => {
-                    agent.jlog("task_done", serde_json::json!({ "outcome": format!("error: {e:#}") }));
-                    let _ = sink.send(UiEvent::Error { agent: "solo".into(), msg: format!("{e:#}") });
-                    let _ = sink.send(UiEvent::RunDone { outcome: format!("error: {e:#}"), accepted_sha: None });
+                    agent.jlog(
+                        "task_done",
+                        serde_json::json!({ "outcome": format!("error: {e:#}"), "run": run }),
+                    );
+                    let _ = sink.send(UiEvent::Error {
+                        run,
+                        agent: "solo".into(),
+                        msg: format!("{e:#}"),
+                    });
+                    let _ = sink.send(UiEvent::RunDone {
+                        run,
+                        outcome: format!("error: {e:#}"),
+                        accepted_sha: None,
+                    });
                 }
             }
         }
@@ -241,7 +278,8 @@ pub async fn run(force_mission: bool) -> Result<()> {
                 } else if let Some(Ok(Event::Paste(s))) = ev {
                     app.paste(&s);
                     dirty = true;
-                } else if let Some(Ok(Event::Resize(..))) = ev {
+                } else if let Some(Ok(Event::Resize(w, h))) = ev {
+                    app.on_resize(w, h);
                     dirty = true;
                 }
             }
@@ -280,16 +318,24 @@ pub async fn run(force_mission: bool) -> Result<()> {
             let tx = ctl_tx.clone();
             tokio::spawn(async move {
                 let out = tokio::process::Command::new("git")
-                    .arg("-C").arg(&ws)
+                    .arg("-C")
+                    .arg(&ws)
                     .args(["status", "--porcelain"])
-                    .output().await;
+                    .output()
+                    .await;
                 let diff = tokio::process::Command::new("git")
-                    .arg("-C").arg(&ws)
+                    .arg("-C")
+                    .arg(&ws)
                     .args(["diff", "--stat", "HEAD"])
-                    .output().await;
+                    .output()
+                    .await;
                 let mut s = String::new();
-                if let Ok(o) = out { s.push_str(&String::from_utf8_lossy(&o.stdout)); }
-                if let Ok(o) = diff { s.push_str(&String::from_utf8_lossy(&o.stdout)); }
+                if let Ok(o) = out {
+                    s.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
+                if let Ok(o) = diff {
+                    s.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
                 let _ = tx.send(Ctl::Diff(s));
             });
         }
@@ -299,7 +345,7 @@ pub async fn run(force_mission: bool) -> Result<()> {
             match e {
                 Effect::Quit => quit = true,
                 Effect::Stop => {} // notify+flag already fired in app.stop()
-                Effect::SendTask { task, mode } => match mode {
+                Effect::SendTask { task, mode, run } => match mode {
                     Mode::Solo => {
                         let pname = app.role_profile(Role::Solo);
                         let prof = pname.as_deref().and_then(|n| resolve_to_profile(&app, n));
@@ -317,12 +363,18 @@ pub async fn run(force_mission: bool) -> Result<()> {
                                         app.auto.clone(),
                                     ));
                                 }
-                                let _ = solo.as_ref().unwrap().tx.send(task);
+                                solo.as_ref().unwrap().send(run, task);
                             }
                             None => {
                                 app.apply_event(UiEvent::Error {
+                                    run,
                                     agent: "ui".into(),
                                     msg: "no solo profile configured — Settings → roles".into(),
+                                });
+                                app.apply_event(UiEvent::RunDone {
+                                    run,
+                                    outcome: "error: no solo profile".into(),
+                                    accepted_sha: None,
                                 });
                                 app.running = false;
                             }
@@ -355,6 +407,7 @@ pub async fn run(force_mission: bool) -> Result<()> {
                                     events: Some(ev_tx.clone()),
                                     cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
                                     session_approve: Some(app.auto.clone()),
+                                    run,
                                 };
                                 tokio::spawn(async move {
                                     let _ = mission::run(cfg).await;
@@ -362,19 +415,43 @@ pub async fn run(force_mission: bool) -> Result<()> {
                             }
                             _ => {
                                 app.apply_event(UiEvent::Error {
+                                    run,
                                     agent: "ui".into(),
-                                    msg: "mission needs orchestrator + worker profiles — Settings".into(),
+                                    msg: "mission needs orchestrator + worker profiles — Settings"
+                                        .into(),
+                                });
+                                app.apply_event(UiEvent::RunDone {
+                                    run,
+                                    outcome: "error: profiles missing".into(),
+                                    accepted_sha: None,
                                 });
                                 app.running = false;
                             }
                         }
                     }
                 },
-                Effect::SaveProfile { name, base_url, model, key_env, key, store } => {
+                Effect::SaveProfile {
+                    name,
+                    base_url,
+                    model,
+                    key_env,
+                    key,
+                    store,
+                } => {
                     // Store::ConfigFile persists the key inline; other
                     // stores keep it out of the file
-                    let inline = if store == app::Store::ConfigFile { key.clone() } else { None };
-                    match config::save_profile(&name, &base_url, &model, key_env.as_deref(), inline.as_deref()) {
+                    let inline = if store == app::Store::ConfigFile {
+                        key.clone()
+                    } else {
+                        None
+                    };
+                    match config::save_profile(
+                        &name,
+                        &base_url,
+                        &model,
+                        key_env.as_deref(),
+                        inline.as_deref(),
+                    ) {
                         Ok(()) => {
                             let note = match (&key, store) {
                                 (Some(k), app::Store::Keychain) if app.keyring_ok => {
@@ -385,8 +462,12 @@ pub async fn run(force_mission: bool) -> Result<()> {
                                         Err(_) => "keyring write failed — key is session-only",
                                     }
                                 }
-                                (Some(_), app::Store::Keychain) => "no OS keyring — key is session-only",
-                                (Some(_), app::Store::ConfigFile) => "key → config file (plaintext)",
+                                (Some(_), app::Store::Keychain) => {
+                                    "no OS keyring — key is session-only"
+                                }
+                                (Some(_), app::Store::ConfigFile) => {
+                                    "key → config file (plaintext)"
+                                }
                                 (Some(_), app::Store::Session) => "key → session only",
                                 (None, _) => "no key",
                             };
@@ -400,9 +481,11 @@ pub async fn run(force_mission: bool) -> Result<()> {
                     }
                 }
                 Effect::ExportRun => {
-                    match app.run_dir.clone().map(|d| {
-                        d.file_name().unwrap().to_string_lossy().to_string()
-                    }) {
+                    match app
+                        .run_dir
+                        .clone()
+                        .map(|d| d.file_name().unwrap().to_string_lossy().to_string())
+                    {
                         Some(id) => {
                             match crate::export::run_export(&crate::export::ExportOpts {
                                 run_id: Some(id),
@@ -414,10 +497,8 @@ pub async fn run(force_mission: bool) -> Result<()> {
                                 running: app.running,
                             }) {
                                 Ok(p) => {
-                                    app.status = format!(
-                                        "report: {} — review before sharing",
-                                        p.display()
-                                    );
+                                    app.status =
+                                        format!("report: {} — review before sharing", p.display());
                                 }
                                 Err(e) => app.status = format!("export: {e:#}"),
                             }
@@ -439,7 +520,12 @@ pub async fn run(force_mission: bool) -> Result<()> {
                         let _ = tx.send(Ctl::Models(r));
                     });
                 }
-                Effect::Probe { name, base_url, model, key } => {
+                Effect::Probe {
+                    name,
+                    base_url,
+                    model,
+                    key,
+                } => {
                     let tx = ctl_tx.clone();
                     tokio::spawn(async move {
                         let r = provider::probe(&base_url, key.as_deref(), &model)

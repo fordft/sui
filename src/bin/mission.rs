@@ -27,7 +27,11 @@ use sui::tools::bash::spawn_bounded;
 use sui::tools::ToolContext;
 
 #[derive(Parser)]
-#[command(name = "sui-mission", version, about = "bounded multi-agent mission execution")]
+#[command(
+    name = "sui-mission",
+    version,
+    about = "bounded multi-agent mission execution"
+)]
 struct Cli {
     /// Strong model profile (orchestrator + auditor + escalation)
     #[arg(long)]
@@ -234,6 +238,7 @@ async fn external_acceptance(
             Duration::from_secs(120),
             Duration::from_secs(300),
             std::future::pending(),
+            None,
         )
         .await
         {
@@ -324,6 +329,7 @@ async fn main() -> Result<()> {
         events: None,
         cancel: None,
         session_approve: None,
+        run: 1,
     };
 
     let mut rows: Vec<TrialRow> = vec![];
@@ -348,12 +354,26 @@ async fn main() -> Result<()> {
 
                 let mut row = match s {
                     Strat::StrongOnly => {
-                        solo(&env, &mrd, &format!("strong-{trial}"), &session, &control, &cli.task)
-                            .await?
+                        solo(
+                            &env,
+                            &mrd,
+                            &format!("strong-{trial}"),
+                            &session,
+                            &control,
+                            &cli.task,
+                        )
+                        .await?
                     }
                     Strat::CheapOnly => {
-                        solo(&env, &mrd, &format!("cheap-{trial}"), &session, &worker, &cli.task)
-                            .await?
+                        solo(
+                            &env,
+                            &mrd,
+                            &format!("cheap-{trial}"),
+                            &session,
+                            &worker,
+                            &cli.task,
+                        )
+                        .await?
                     }
                     Strat::Mission => {
                         let r = mission::run(mission_cfg(
@@ -378,7 +398,10 @@ async fn main() -> Result<()> {
                         // external acceptance on the integrated candidate
                         let integ = mrd.join("worktrees/integration");
                         let (ext, pass) = external_acceptance(
-                            &integ, &cli.acceptance, &cli.trusted_path, &env_base,
+                            &integ,
+                            &cli.acceptance,
+                            &cli.trusted_path,
+                            &env_base,
                         )
                         .await;
                         row.external = ext;
@@ -388,16 +411,13 @@ async fn main() -> Result<()> {
                 };
                 if !matches!(s, Strat::Mission) {
                     // solo candidate dir = its worktree
-                    let wt = worktree::worktrees_dir(&mrd).join(
-                        match s {
-                            Strat::StrongOnly => format!("strong-{trial}"),
-                            _ => format!("cheap-{trial}"),
-                        },
-                    );
-                    let (ext, pass) = external_acceptance(
-                        &wt, &cli.acceptance, &cli.trusted_path, &env_base,
-                    )
-                    .await;
+                    let wt = worktree::worktrees_dir(&mrd).join(match s {
+                        Strat::StrongOnly => format!("strong-{trial}"),
+                        _ => format!("cheap-{trial}"),
+                    });
+                    let (ext, pass) =
+                        external_acceptance(&wt, &cli.acceptance, &cli.trusted_path, &env_base)
+                            .await;
                     row.external = ext;
                     row.ext_pass = pass;
                 }
@@ -445,9 +465,18 @@ async fn main() -> Result<()> {
     }
     p!("# mission {session}");
     p!("objective: {}", cli.task);
-    p!("repo: {} (compare envs are disposable clones of committed state)", repo.display());
-    p!("external acceptance: {}",
-        if cli.acceptance.is_empty() { "none provided".into() } else { cli.acceptance.join(" && ") });
+    p!(
+        "repo: {} (compare envs are disposable clones of committed state)",
+        repo.display()
+    );
+    p!(
+        "external acceptance: {}",
+        if cli.acceptance.is_empty() {
+            "none provided".into()
+        } else {
+            cli.acceptance.join(" && ")
+        }
+    );
     p!("");
 
     p!("| strategy | outcome | ext accept | sha | reqs(c/w) | cached(c/w) | cost | elapsed | repairs | escal |");
@@ -465,11 +494,17 @@ async fn main() -> Result<()> {
             "| {} | {} | {} | {} | {}/{} | {}/{} | {} | {}ms | {} | {} |",
             r.strategy,
             r.outcome,
-            r.ext_pass.map(|b| if b { "PASS" } else { "FAIL" }.to_string())
+            r.ext_pass
+                .map(|b| if b { "PASS" } else { "FAIL" }.to_string())
                 .unwrap_or("—".into()),
-            r.candidate_sha.as_deref().map(|s| &s[..8.min(s.len())]).unwrap_or("—"),
-            r.control.requests, r.worker.requests,
-            r.control.cache_read, r.worker.cache_read,
+            r.candidate_sha
+                .as_deref()
+                .map(|s| &s[..8.min(s.len())])
+                .unwrap_or("—"),
+            r.control.requests,
+            r.worker.requests,
+            r.control.cache_read,
+            r.worker.cache_read,
             cost,
             r.elapsed_ms,
             r.repairs,
@@ -480,11 +515,13 @@ async fn main() -> Result<()> {
         }
     }
     p!("");
-    p!("telemetry: control {}/{} complete, worker {}/{} complete",
+    p!(
+        "telemetry: control {}/{} complete, worker {}/{} complete",
         rows.iter().map(|r| r.control.telemetry_known).sum::<u64>(),
         rows.iter().map(|r| r.control.requests).sum::<u64>(),
         rows.iter().map(|r| r.worker.telemetry_known).sum::<u64>(),
-        rows.iter().map(|r| r.worker.requests).sum::<u64>());
+        rows.iter().map(|r| r.worker.requests).sum::<u64>()
+    );
     p!("host: RSS {}KB (dev build)", rss_kb());
     if !verified {
         p!("");
@@ -495,7 +532,10 @@ async fn main() -> Result<()> {
     p!("note: failed runs count toward cost; cache numbers are provider-reported usage, not prefix-hash inference.");
     p!("note: compare envs are separate repositories, not a filesystem sandbox — agents could still read sibling dirs via bash; inspect transcripts for cross-strategy access.");
     if !cli.trusted_path.is_empty() {
-        p!("trusted paths restored from base before external acceptance: {}", cli.trusted_path.join(", "));
+        p!(
+            "trusted paths restored from base before external acceptance: {}",
+            cli.trusted_path.join(", ")
+        );
     }
 
     print!("{out}");

@@ -81,24 +81,76 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
+/// How a tool execution ended — typed at the source. `text` is the
+/// model-facing envelope; `kind`/`exit`/`truncated` are facts callers may
+/// rely on without re-parsing the envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecKind {
+    Success,
+    /// Ran and exited nonzero.
+    Failed,
+    /// Timeout / cancellation / runtime or argument error.
+    Error,
+    Timeout,
+    Cancelled,
+}
+
+/// One tool call's outcome: model-facing envelope + typed status.
+pub struct ExecOut {
+    pub text: String,
+    pub kind: ExecKind,
+    pub exit: Option<i32>,
+    /// The captured result itself was truncated at the capture cap.
+    pub truncated: bool,
+    /// Live-preview chunks dropped because the UI tap was full.
+    pub preview_dropped: u64,
+}
+impl ExecOut {
+    pub fn plain(text: String, kind: ExecKind) -> Self {
+        Self {
+            text,
+            kind,
+            exit: None,
+            truncated: false,
+            preview_dropped: 0,
+        }
+    }
+}
+
 /// Execute one tool call with already-validated arguments.
 /// Callers must JSON-parse arguments first; malformed args never reach here.
 /// `cancel` aborts in-flight execution (e.g. Ctrl-C) with the same
-/// kill-and-reap cleanup path as a timeout.
+/// kill-and-reap cleanup path as a timeout. `obs` is a bounded live-output
+/// tap — only bash produces chunks; fs tools finish atomically.
 pub async fn execute(
     ctx: &ToolContext,
     name: &str,
     args: &Value,
     cancel: impl std::future::Future<Output = ()>,
-) -> Result<String> {
+    obs: Option<bash::Observer>,
+) -> Result<ExecOut> {
     match name {
-        "read_file" => fs::read_file(ctx, args),
-        "write_file" => fs::write_file(ctx, args),
-        "edit_file" => fs::edit_file(ctx, args),
-        "bash" => bash::run(ctx, args, cancel).await,
+        "read_file" | "write_file" | "edit_file" => {
+            let _ = (cancel, obs);
+            let text = match name {
+                "read_file" => fs::read_file(ctx, args)?,
+                "write_file" => fs::write_file(ctx, args)?,
+                _ => fs::edit_file(ctx, args)?,
+            };
+            let kind = if text.starts_with("status: success") {
+                ExecKind::Success
+            } else {
+                ExecKind::Error
+            };
+            Ok(ExecOut::plain(text, kind))
+        }
+        "bash" => bash::run(ctx, args, cancel, obs).await,
         other => {
-            let _ = cancel;
-            Ok(format!("status: error\nerror: unknown tool '{other}'"))
+            let _ = (cancel, obs);
+            Ok(ExecOut::plain(
+                format!("status: error\nerror: unknown tool '{other}'"),
+                ExecKind::Error,
+            ))
         }
     }
 }

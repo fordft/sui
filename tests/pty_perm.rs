@@ -26,15 +26,19 @@ fn sse(payload: Value) -> String {
 }
 
 fn write_file_call(id: &str, path: &str) -> String {
-    sse(json!({"choices": [{"index": 0, "delta": {"role": "assistant",
+    sse(
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant",
         "tool_calls": [tc(id, "write_file",
             &json!({"path": path, "content": "wrote"}).to_string())]},
-        "finish_reason": "tool_calls"}]}))
+        "finish_reason": "tool_calls"}]}),
+    )
 }
 
 fn text_done() -> String {
-    sse(json!({"choices": [{"index": 0, "delta": {"role": "assistant",
-        "content": "done"}, "finish_reason": "stop"}]}))
+    sse(
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant",
+        "content": "done"}, "finish_reason": "stop"}]}),
+    )
 }
 
 /// Two protected calls in sequence: request → write_file(perm1); after a
@@ -70,9 +74,11 @@ fn mock() -> u16 {
             }
             let req: Value = serde_json::from_slice(&body).unwrap_or_default();
             let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-            let tools: Vec<&Value> =
-                msgs.iter().filter(|m| m["role"] == "tool").collect();
-            let last_tool = tools.last().and_then(|m| m["content"].as_str()).unwrap_or("");
+            let tools: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool").collect();
+            let last_tool = tools
+                .last()
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("");
             let body = if last_tool.contains("denied") || tools.len() >= 2 {
                 text_done()
             } else if tools.len() == 1 {
@@ -141,7 +147,12 @@ fn spawn(port: u16, repo: &PathBuf, home: &PathBuf) -> Pty {
     )
     .unwrap();
     let pair = NativePtySystem::default()
-        .openpty(PtySize { rows: 40, cols: 140, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 40,
+            cols: 140,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_sui"));
     cmd.arg("tui");
@@ -209,8 +220,12 @@ fn pty_a_session_single_byte() {
     wait_for("first file", Duration::from_secs(10), || f1.exists());
     // session approval: second protected call runs unprompted — nothing
     // else is sent, so a second modal would deadlock this wait
-    wait_for("second file (unprompted)", Duration::from_secs(15), || f2.exists());
-    wait_for("AUTO badge", Duration::from_secs(5), || count(&p.buf, "AUTO") > 0);
+    wait_for("second file (unprompted)", Duration::from_secs(15), || {
+        f2.exists()
+    });
+    wait_for("AUTO badge", Duration::from_secs(5), || {
+        count(&p.buf, "AUTO") > 0
+    });
     let _ = p.child.kill();
     let _ = p.child.wait();
 }
@@ -223,8 +238,12 @@ fn pty_upper_a_session_single_byte() {
     let mut p = spawn(port, &repo, &home);
     to_modal(&mut p);
     send(&mut p, b"A");
-    wait_for("first file", Duration::from_secs(10), || repo.join("out/perm1.txt").exists());
-    wait_for("second file (unprompted)", Duration::from_secs(15), || repo.join("out/perm2.txt").exists());
+    wait_for("first file", Duration::from_secs(10), || {
+        repo.join("out/perm1.txt").exists()
+    });
+    wait_for("second file (unprompted)", Duration::from_secs(15), || {
+        repo.join("out/perm2.txt").exists()
+    });
     let _ = p.child.kill();
     let _ = p.child.wait();
 }
@@ -260,7 +279,8 @@ fn pty_n_denies() {
     to_modal(&mut p);
     send(&mut p, b"n");
     wait_for("run to settle", Duration::from_secs(10), || {
-        count(&p.buf, "run finished") > 0 || !p.buf.lock().unwrap().is_empty() && count(&p.buf, "denied") > 0
+        count(&p.buf, "run finished") > 0
+            || !p.buf.lock().unwrap().is_empty() && count(&p.buf, "denied") > 0
     });
     assert!(!repo.join("out/perm1.txt").exists());
     let _ = p.child.kill();
@@ -284,7 +304,10 @@ fn pty_ctrl_s_stops_during_permission() {
         // visible as the decision or the tool result text
         let b = p.buf.lock().unwrap();
         let s = String::from_utf8_lossy(&b);
-        panic!("perm1.txt written despite stop — transcript tail:\n{}", &s[s.len().saturating_sub(3000)..]);
+        panic!(
+            "perm1.txt written despite stop — transcript tail:\n{}",
+            &s[s.len().saturating_sub(3000)..]
+        );
     }
     let _ = p.child.kill();
     let _ = p.child.wait();
@@ -311,7 +334,10 @@ fn pty_release_never_approves_next_modal() {
     std::thread::sleep(Duration::from_millis(1500));
     send(&mut p, b"\x1b[121;1:3u");
     std::thread::sleep(Duration::from_millis(1500));
-    assert!(!f2.exists(), "Release tail of 'y' approved the second prompt");
+    assert!(
+        !f2.exists(),
+        "Release tail of 'y' approved the second prompt"
+    );
 
     // a fresh Press still decides the open modal
     send(&mut p, b"y");
