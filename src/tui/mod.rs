@@ -19,7 +19,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io::{stdout, IsTerminal};
+use std::io::{stdout, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,12 +44,21 @@ enum Ctl {
     Diff(String),
 }
 
+/// Mouse capture: clicks+drags (1000/1002) + SGR encoding (1006).
+/// Deliberately not `EnableMouseCapture` — it also sets 1003 (report
+/// every mouse move), which we don't need: it floods SSH sessions with
+/// motion bytes and wakes the event loop for nothing. Drag events for
+/// selection still arrive via 1002.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1002l\x1b[?1000l\x1b[?1006l";
+
 /// Restore the terminal no matter how we leave (drop, panic, error).
 struct Term;
 impl Drop for Term {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let mut s = stdout();
+        let _ = s.write_all(MOUSE_OFF.as_bytes());
         let _ = execute!(s, LeaveAlternateScreen, DisableBracketedPaste);
     }
 }
@@ -223,6 +232,7 @@ pub async fn run(force_mission: bool) -> Result<()> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |i| {
         let _ = disable_raw_mode();
+        let _ = stdout().write_all(MOUSE_OFF.as_bytes());
         let _ = execute!(stdout(), LeaveAlternateScreen, DisableBracketedPaste);
         default_hook(i);
     }));
@@ -230,6 +240,9 @@ pub async fn run(force_mission: bool) -> Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
     let jdir = run_dir();
     let mut app = App::new(workspace.clone());
+    if app.mouse {
+        let _ = out.write_all(MOUSE_ON.as_bytes());
+    }
     app.run_dir = Some(jdir.clone());
     if force_mission {
         app.mode = app::Mode::Mission;
@@ -274,6 +287,9 @@ pub async fn run(force_mission: bool) -> Result<()> {
                         continue;
                     }
                     app.key(k);
+                    dirty = true;
+                } else if let Some(Ok(Event::Mouse(m))) = ev {
+                    app.mouse(m);
                     dirty = true;
                 } else if let Some(Ok(Event::Paste(s))) = ev {
                     app.paste(&s);
@@ -536,6 +552,25 @@ pub async fn run(force_mission: bool) -> Result<()> {
                 }
                 Effect::KeyringStore { profile, key } => {
                     let _ = keyring::Entry::new("sui", &profile).and_then(|e| e.set_password(&key));
+                }
+                Effect::Clip(text) => {
+                    // OSC52 → the local terminal's clipboard, works over
+                    // SSH. A deliberate single write, not a stray print.
+                    use base64::Engine;
+                    let mut s = stdout();
+                    let _ = s.write_all(
+                        format!(
+                            "\x1b]52;c;{}\x07",
+                            base64::engine::general_purpose::STANDARD.encode(text)
+                        )
+                        .as_bytes(),
+                    );
+                    let _ = s.flush();
+                }
+                Effect::Mouse(on) => {
+                    let mut s = stdout();
+                    let _ = s.write_all(if on { MOUSE_ON } else { MOUSE_OFF }.as_bytes());
+                    let _ = s.flush();
                 }
             }
         }

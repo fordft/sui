@@ -345,3 +345,50 @@ fn pty_release_never_approves_next_modal() {
     let _ = p.child.kill();
     let _ = p.child.wait();
 }
+
+/// Mouse wiring end-to-end: SGR wheel-up bytes arrive (MOUSE_ON was
+/// emitted at startup), crossterm parses ScrollUp, the transcript
+/// scrolls and its title says so. If capture were never enabled this
+/// is a silent no-op — the title never changes.
+#[test]
+fn pty_mouse_wheel_scrolls() {
+    let (repo, home) = fixture();
+    let port = mock();
+    let mut p = spawn(port, &repo, &home);
+    wait_for("initial paint", Duration::from_secs(10), || {
+        count(&p.buf, "Enter") > 0
+    });
+    // wheel up at (30,10) — inside the transcript pane
+    send(&mut p, b"\x1b[<64;30;10M");
+    wait_for("scroll indicator", Duration::from_secs(10), || {
+        count(&p.buf, "scrolled \u{25b2}") > 0
+    });
+    // wheel back down → live
+    send(&mut p, b"\x1b[<65;30;10M");
+    send(&mut p, b"\x1b[<65;30;10M");
+    let _ = p.child.kill();
+    let _ = p.child.wait();
+}
+
+/// Drag-select end-to-end: down/drag/release over transcript rows must
+/// emit an OSC52 clipboard write (\x1b]52;c;<b64>\x07) into the output
+/// stream — that's the "copies like opencode" path over the wire.
+#[test]
+fn pty_mouse_drag_copies_osc52() {
+    let (repo, home) = fixture();
+    let port = mock();
+    let mut p = spawn(port, &repo, &home);
+    wait_for("initial paint", Duration::from_secs(10), || {
+        count(&p.buf, "Enter") > 0
+    });
+    // wire coords are 1-based: transcript row 0 sits at internal (x,3) =
+    // wire y=4 (header y0, tabs y1, chat border y2, inner y3)
+    send(&mut p, b"\x1b[<0;13;4M"); // left down on transcript row 0
+    send(&mut p, b"\x1b[<32;41;5M"); // left drag to row 1
+    send(&mut p, b"\x1b[<0;41;5m"); // release
+    wait_for("osc52 copy sequence", Duration::from_secs(10), || {
+        count(&p.buf, "\x1b]52;c;") > 0
+    });
+    let _ = p.child.kill();
+    let _ = p.child.wait();
+}

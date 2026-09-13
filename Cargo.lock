@@ -1733,6 +1733,7 @@ name = "sui"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "futures-util",

@@ -9,7 +9,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use super::text::Buf;
 use crate::config::{self, ProfileCfg, UiSettings};
@@ -23,7 +25,7 @@ pub enum Screen {
     Main,
 }
 
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Tab {
     Chat = 0,
     Tasks = 1,
@@ -48,6 +50,46 @@ impl Tab {
 pub enum Mode {
     Solo,
     Mission,
+}
+
+/// A clickable region recorded by the renderer each frame — the mouse
+/// path hit-tests against these instead of re-deriving layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hit {
+    Tab(Tab),
+    /// Transcript row owner: group id + item id (None = group row).
+    Activity(u64, Option<u64>),
+    Perm(GateChoice),
+    Setting(usize),
+    /// Wheel-scrollable details modal body.
+    ViewScroll,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HitZone {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub hit: Hit,
+}
+impl HitZone {
+    fn has(&self, col: u16, row: u16) -> bool {
+        col >= self.x && col < self.x + self.w && row >= self.y && row < self.y + self.h
+    }
+}
+
+/// Last rendered transcript viewport — for hit-testing and mapping a
+/// screen cell to a (row, col) in transcript coordinates. Plain values
+/// so `draw` can set it through `&App`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatGeom {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    /// Transcript index of the top visible row.
+    pub top: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -529,6 +571,15 @@ impl ActGroup {
     }
 }
 
+/// Normalize a drag's two endpoints into (top-left → bottom-right).
+fn norm_sel(a: (usize, usize), b: (usize, usize)) -> (usize, usize, usize, usize) {
+    if a.0 < b.0 || (a.0 == b.0 && a.1 <= b.1) {
+        (a.0, a.1, b.0, b.1)
+    } else {
+        (b.0, b.1, a.0, a.1)
+    }
+}
+
 /// Largest index ≤ i on a char boundary (same as agent::floor_char —
 /// duplicated here because the live-preview cap trims by bytes).
 fn floor_char(s: &str, mut i: usize) -> usize {
@@ -623,6 +674,11 @@ pub enum Effect {
         profile: String,
         key: String,
     },
+    /// Write text to the local clipboard (OSC52 — reaches the SSH
+    /// client's machine through the terminal).
+    Clip(String),
+    /// Enable/disable terminal mouse capture (live settings toggle).
+    Mouse(bool),
 }
 
 pub struct App {
@@ -654,6 +710,20 @@ pub struct App {
     /// Last rendered chat viewport, for anchor math. Set by the renderer.
     pub view_w: std::cell::Cell<usize>,
     pub view_h: std::cell::Cell<usize>,
+    /// Frame hitmap for mouse dispatch — rebuilt every draw.
+    pub hits: std::cell::RefCell<Vec<HitZone>>,
+    /// Chat inner rect + top transcript row, for hit/selection mapping.
+    pub chat_geom: std::cell::Cell<ChatGeom>,
+    /// Mouse capture on/off (persisted [ui] mouse; default on).
+    /// Off = terminal keeps native click-drag selection.
+    pub mouse: bool,
+    /// Button-press cell — distinguishes click from drag on release.
+    down: Option<(u16, u16)>,
+    /// Selection anchor in transcript (row, col) while dragging.
+    sel_anchor: Option<(usize, usize)>,
+    /// Active text selection in transcript coords:
+    /// (start_row, start_col, end_row, end_col) — normalized.
+    pub sel: Option<(usize, usize, usize, usize)>,
     pub tasks: Vec<TaskRow>,
     pub changes: Vec<String>,
     pub diff_text: String,
@@ -821,6 +891,12 @@ impl App {
             anchor: None,
             view_w: std::cell::Cell::new(80),
             view_h: std::cell::Cell::new(20),
+            hits: std::cell::RefCell::new(Vec::new()),
+            chat_geom: std::cell::Cell::new(ChatGeom::default()),
+            mouse: ui.mouse.unwrap_or(true),
+            down: None,
+            sel_anchor: None,
+            sel: None,
             tasks: vec![],
             changes: vec![],
             diff_text: String::new(),
@@ -1445,6 +1521,165 @@ impl App {
         self.anchor = None;
     }
 
+    // ── mouse ────────────────────────────────────────────────────────
+    /// Mouse event → state. Click dispatches through the same code paths
+    /// as keys; drag on the transcript selects text, release copies via
+    /// OSC52. Shift+drag never reaches us — terminals keep native select.
+    pub fn mouse(&mut self, m: MouseEvent) {
+        if !self.mouse {
+            return;
+        }
+        match m.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(m.kind, MouseEventKind::ScrollUp);
+                // details modal scrolls with the wheel
+                if let Some(Modal::View { scroll, .. }) = &mut self.modal {
+                    *scroll = if up {
+                        scroll.saturating_sub(3)
+                    } else {
+                        scroll.saturating_add(3)
+                    };
+                    return;
+                }
+                match self.tab {
+                    Tab::Chat => self.scroll_by(if up { 3 } else { -3 }),
+                    // settings rows don't scroll — the wheel moves selection
+                    Tab::Settings => {
+                        let n = self.settings_rows().len();
+                        if up {
+                            self.settings_sel = self.settings_sel.saturating_sub(1);
+                        } else {
+                            self.settings_sel = (self.settings_sel + 1).min(n.saturating_sub(1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.down = Some((m.column, m.row));
+                self.sel = None;
+                self.sel_anchor = if self.modal.is_none() && self.tab == Tab::Chat {
+                    self.transcript_pos(m.column, m.row)
+                } else {
+                    None
+                };
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.modal.is_none() && self.tab == Tab::Chat {
+                    if let (Some(a), Some(b)) =
+                        (self.sel_anchor, self.transcript_pos(m.column, m.row))
+                    {
+                        if a != b {
+                            self.sel = Some(norm_sel(a, b));
+                        }
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let down = self.down.take();
+                self.sel_anchor = None;
+                if self.sel.is_some() {
+                    self.copy_selection();
+                    return;
+                }
+                if down == Some((m.column, m.row)) {
+                    self.click(m.column, m.row);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Screen cell → transcript (row, display col), clamped to the
+    /// viewport so drags off the edge extend to the nearest row.
+    fn transcript_pos(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+        let g = self.chat_geom.get();
+        if g.w == 0 || g.h == 0 {
+            return None;
+        }
+        if col < g.x || col >= g.x + g.w || row < g.y || row >= g.y + g.h {
+            return None;
+        }
+        Some((g.top + (row - g.y) as usize, (col - g.x) as usize))
+    }
+
+    /// Single-cell click → hit-test the last drawn frame.
+    fn click(&mut self, col: u16, row: u16) {
+        let hit = self
+            .hits
+            .borrow()
+            .iter()
+            .find(|z| z.has(col, row))
+            .map(|z| z.hit);
+        match hit {
+            Some(Hit::Perm(c)) => {
+                if let Some(Modal::Permission { reply, .. }) = self.modal.take() {
+                    self.modal = self.decide_perm(c, reply);
+                }
+            }
+            Some(Hit::Tab(t)) if self.modal.is_none() => {
+                self.tab = t;
+            }
+            Some(Hit::Setting(i)) if self.modal.is_none() && self.tab == Tab::Settings => {
+                self.settings_sel = i;
+                self.settings_activate(i);
+            }
+            Some(Hit::Activity(gid, iid)) if self.modal.is_none() && self.tab == Tab::Chat => {
+                // clicking a row selects it and does what Enter would do
+                self.nav = true;
+                if let Some(gi) = self.groups.iter().position(|g| g.id == gid) {
+                    let ii = iid
+                        .and_then(|iid| self.groups[gi].items.iter().position(|it| it.id() == iid));
+                    if let Some(n) = self.focusables().iter().position(|&f| f == (gi, ii)) {
+                        self.nav_sel = n;
+                        self.nav_activate();
+                    }
+                }
+            }
+            Some(Hit::ViewScroll) => {} // inside the details view — not a dismiss click
+            _ => {
+                // click outside a dismissible modal closes it; a plain
+                // transcript click focuses it for keyboard nav
+                match self.modal {
+                    Some(Modal::Help) | Some(Modal::View { .. }) => self.modal = None,
+                    _ => {
+                        if self.modal.is_none() && self.tab == Tab::Chat {
+                            self.nav = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copy the drag selection to the clipboard (OSC52) and keep the
+    /// highlight until the next press — same shape as opencode's
+    /// select-on-drag / copy-on-release.
+    fn copy_selection(&mut self) {
+        let Some((r0, c0, r1, c1)) = self.sel else {
+            return;
+        };
+        let rows = super::transcript::rows(self, self.view_w.get());
+        let mut out = String::new();
+        for (ri, r) in rows.iter().enumerate() {
+            if ri < r0 || ri > r1 {
+                continue;
+            }
+            let text: String = r.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let from = if ri == r0 { c0 } else { 0 };
+            let to = if ri == r1 { c1 } else { usize::MAX };
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&super::transcript::slice_cols(&text, from, to));
+        }
+        let n = out.chars().count();
+        if n > 0 {
+            self.effects.push(Effect::Clip(out));
+            self.status = format!("copied {n} chars — shift+drag still selects natively");
+        }
+    }
+
     /// Terminal resized — resolve the anchor against the new viewport
     /// dims (mirrors draw.rs layout math so scroll survives a resize
     /// even while no events are flowing).
@@ -1684,7 +1919,10 @@ impl App {
         // back to the input box. Enter here never sends.
         if self.nav && self.tab == Tab::Chat {
             match k.code {
-                KeyCode::Esc | KeyCode::Tab => self.nav = false,
+                KeyCode::Esc | KeyCode::Tab => {
+                    self.nav = false;
+                    self.sel = None;
+                }
                 KeyCode::Up => self.nav_sel = self.nav_sel.saturating_sub(1),
                 KeyCode::Down => {
                     let n = self.focusables().len();
@@ -1841,6 +2079,7 @@ impl App {
                 }
             }
             (_, KeyCode::Esc) => {
+                self.sel = None; // drop any drag-selection highlight
                 if self.tab == Tab::Settings {
                     self.tab = Tab::Chat;
                 }
@@ -1942,6 +2181,23 @@ impl App {
 
     // ── modal keys ──────────────────────────────────────────────────
     /// Handlers consume the modal and return the next modal state.
+    /// Apply a permission decision (key or click): session approvals
+    /// raise the live auto flag; the next parked ask becomes the modal.
+    fn decide_perm(&mut self, c: GateChoice, reply: UnboundedSender<GateChoice>) -> Option<Modal> {
+        if c == GateChoice::Session {
+            self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let _ = reply.send(c);
+        self.pending_perms
+            .pop_front()
+            .map(|(id, agent, summary, reply)| Modal::Permission {
+                id,
+                agent,
+                summary,
+                reply,
+            })
+    }
+
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
         match m {
             Modal::Permission {
@@ -1967,21 +2223,7 @@ impl App {
                         summary,
                         reply,
                     }),
-                    Some(c) => {
-                        if c == GateChoice::Session {
-                            self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        let _ = reply.send(c);
-                        // next parked ask becomes the modal
-                        self.pending_perms
-                            .pop_front()
-                            .map(|(id, agent, summary, reply)| Modal::Permission {
-                                id,
-                                agent,
-                                summary,
-                                reply,
-                            })
-                    }
+                    Some(c) => self.decide_perm(c, reply),
                 }
             }
             Modal::Help => {
@@ -2372,6 +2614,7 @@ impl App {
         v.push(SettingsRow::Export);
         v.push(SettingsRow::Workers);
         v.push(SettingsRow::Reasoning);
+        v.push(SettingsRow::Mouse);
         v.push(SettingsRow::Auto);
         v.push(SettingsRow::Workspace);
         v.push(SettingsRow::Acceptance);
@@ -2427,6 +2670,12 @@ impl App {
                 self.effects.push(Effect::SaveUi);
             }
             Some(SettingsRow::Reasoning) => self.cycle_reasoning(),
+            Some(SettingsRow::Mouse) => {
+                self.mouse = !self.mouse;
+                self.ui.mouse = Some(self.mouse);
+                self.effects.push(Effect::Mouse(self.mouse));
+                self.effects.push(Effect::SaveUi);
+            }
             Some(SettingsRow::Auto) => {
                 // session-scoped YOLO toggle — flips the flag the live gate
                 // already watches, so Ask→Auto→Ask lands on the very next
@@ -2462,6 +2711,7 @@ pub enum SettingsRow {
     Export,
     Workers,
     Reasoning,
+    Mouse,
     Auto,
     Workspace,
     Acceptance,

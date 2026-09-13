@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::*;
+use crate::events::GateChoice;
 
 fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
@@ -72,20 +73,34 @@ pub fn draw(f: &mut Frame, app: &App) {
         rows[0],
     );
 
-    // tab strip
+    // mouse hitmap is rebuilt every frame — zones below register into it
+    app.hits.borrow_mut().clear();
+
+    // tab strip — each label is a click zone
+    let mut tx = rows[1].x;
     let tabs: Vec<Span> = Tab::ALL
         .iter()
         .map(|t| {
+            let label = format!(" {} ", t.name());
+            let w = label.chars().count() as u16;
+            app.hits.borrow_mut().push(HitZone {
+                x: tx,
+                y: rows[1].y,
+                w,
+                h: 1,
+                hit: Hit::Tab(*t),
+            });
+            tx += w;
             if *t == app.tab {
                 Span::styled(
-                    format!(" {} ", t.name()),
+                    label,
                     Style::default()
                         .fg(Color::Black)
                         .bg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                Span::styled(format!(" {} ", t.name()), dim())
+                Span::styled(label, dim())
             }
         })
         .collect();
@@ -197,12 +212,45 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
     let rows = super::transcript::rows(app, inner_w);
     let total = rows.len();
     let top = total.saturating_sub(inner_h).saturating_sub(app.scroll);
-    let view: Vec<Line> = rows
+    // geometry for mouse hit-testing + drag-select mapping
+    app.chat_geom.set(ChatGeom {
+        x: a.x + 1,
+        y: a.y + 1,
+        w: inner_w.min(u16::MAX as usize) as u16,
+        h: inner_h.min(u16::MAX as usize) as u16,
+        top,
+    });
+    {
+        let mut hits = app.hits.borrow_mut();
+        for (vi, r) in rows.iter().skip(top).take(inner_h).enumerate() {
+            hits.push(HitZone {
+                x: a.x + 1,
+                y: a.y + 1 + vi as u16,
+                w: inner_w.min(u16::MAX as usize) as u16,
+                h: 1,
+                hit: Hit::Activity(r.owner.0, r.owner.1),
+            });
+        }
+    }
+    let mut view: Vec<Line> = rows
         .into_iter()
         .skip(top)
         .take(inner_h)
         .map(|r| r.line)
         .collect();
+    // drag-selection highlight — painted over the projected rows
+    if let Some((r0, c0, r1, c1)) = app.sel {
+        let hl = Style::default().bg(Color::DarkGray);
+        for (vi, line) in view.iter_mut().enumerate() {
+            let ri = top + vi;
+            if ri < r0 || ri > r1 {
+                continue;
+            }
+            let s = if ri == r0 { c0 } else { 0 };
+            let e = if ri == r1 { c1 } else { usize::MAX };
+            *line = super::transcript::paint_sel(std::mem::take(line), s, e, hl);
+        }
+    }
     let title = if app.nav {
         "activity — ↑↓ select · Enter/Space expand/collapse · v details · Esc/Tab input · End live"
             .into()
@@ -362,6 +410,17 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 ),
                 Style::default(),
             ),
+            SettingsRow::Mouse => (
+                format!(
+                    "  mouse: {} (wheel scrolls · click expands · drag copies · shift+drag selects natively)",
+                    if app.mouse { "on" } else { "off" }
+                ),
+                if app.mouse {
+                    Style::default()
+                } else {
+                    dim()
+                },
+            ),
             SettingsRow::Auto => {
                 let on = app.auto.load(std::sync::atomic::Ordering::Relaxed);
                 (
@@ -389,6 +448,16 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 sty
             },
         ))));
+        // click zone per visible settings row (list renders top-down, 1 row each)
+        if (i as u16) + 1 < a.height {
+            app.hits.borrow_mut().push(HitZone {
+                x: a.x + 1,
+                y: a.y + 1 + i as u16,
+                w: a.width.saturating_sub(2),
+                h: 1,
+                hit: Hit::Setting(i),
+            });
+        }
     }
     f.render_widget(
         List::new(items).block(
@@ -517,10 +586,27 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "[y/Y] once   [a/A] session   [n/N/Esc] deny",
-                acc(),
-            )));
+            let btn_text = "[y/Y] once   [a/A] session   [n/N/Esc] deny";
+            lines.push(Line::from(Span::styled(btn_text, acc())));
+            // clickable decision buttons — same actions as the y/a/n keys
+            {
+                let by = r.y + 1 + (lines.len() - 1) as u16;
+                let mut hits = app.hits.borrow_mut();
+                for (label, choice) in [
+                    ("[y/Y] once", GateChoice::Once),
+                    ("[a/A] session", GateChoice::Session),
+                    ("[n/N/Esc] deny", GateChoice::Deny),
+                ] {
+                    let off = btn_text.find(label).unwrap_or(0) as u16;
+                    hits.push(HitZone {
+                        x: r.x + 1 + off,
+                        y: by,
+                        w: label.len() as u16,
+                        h: 1,
+                        hit: Hit::Perm(choice),
+                    });
+                }
+            }
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(lines)
@@ -541,6 +627,9 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                     Line::from("activity transcript (Chat tab):"),
                     Line::from("  Tab focus transcript   ↑↓ select   Enter/Space expand/collapse"),
                     Line::from("  v full details   Esc/Tab back to input"),
+                    Line::from("mouse:"),
+                    Line::from("  wheel scrolls   click selects/expands   drag copies (osc52)"),
+                    Line::from("  shift+drag = native terminal select   Settings → mouse toggles"),
                     Line::from("  /mission /solo /export /help — settings: run mode · export report"),
                     Line::from(""),
                     Line::from("shell execution is NOT a sandbox — approvals are per-action"),
@@ -697,6 +786,13 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             // full-details viewer: captured text, sanitized + wrapped.
             let r = centered(90, area.height.saturating_sub(4).min(34), area);
             f.render_widget(Clear, r);
+            app.hits.borrow_mut().push(HitZone {
+                x: r.x,
+                y: r.y,
+                w: r.width,
+                h: r.height,
+                hit: Hit::ViewScroll,
+            });
             let inner_w = r.width.saturating_sub(2).max(1) as usize;
             let lines: Vec<Line> = text
                 .split('\n')

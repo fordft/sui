@@ -253,6 +253,7 @@ fn app_with_mock(repo: &PathBuf, port: u16) -> App {
         auditor_profile: None,
         worker_count: Some(1),
         reasoning: None,
+        mouse: None,
         acceptance: vec![],
     };
     App::with_state(repo.clone(), profiles, ui)
@@ -2240,5 +2241,249 @@ fn transcript_groups_repeated_calls() {
         rows.iter().any(|l| l.contains("bash") && !l.contains("×")),
         "distinct tool renders separately:\n{}",
         rows.join("\n")
+    );
+}
+
+// ── mouse ────────────────────────────────────────────────────────────
+// Headless: app.mouse() is pure state — a TestBackend draw populates
+// the hitmap/geometry first, then events are dispatched by kind+cell.
+
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use sui::tui::app::{Effect as Fx, Hit};
+
+fn mev(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+fn click(app: &mut App, col: u16, row: u16) {
+    app.mouse(mev(MouseEventKind::Down(MouseButton::Left), col, row));
+    app.mouse(mev(MouseEventKind::Up(MouseButton::Left), col, row));
+}
+fn zone(app: &App, pred: impl Fn(&Hit) -> bool) -> (u16, u16) {
+    let z = app
+        .hits
+        .borrow()
+        .iter()
+        .find(|z| pred(&z.hit))
+        .expect("hit zone present")
+        .clone();
+    (z.x + z.w / 2, z.y)
+}
+
+/// Wheel over the transcript scrolls up; wheel down returns to live.
+#[test]
+fn mouse_wheel_scrolls_transcript() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    send_task(&mut app, "x");
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let g = app.chat_geom.get();
+    let (cx, cy) = (g.x + 2, g.y + 2);
+    app.mouse(mev(MouseEventKind::ScrollUp, cx, cy));
+    assert_eq!(app.scroll, 3, "wheel up scrolls the transcript");
+    app.mouse(mev(MouseEventKind::ScrollUp, cx, cy));
+    assert_eq!(app.scroll, 6);
+    app.mouse(mev(MouseEventKind::ScrollDown, cx, cy));
+    app.mouse(mev(MouseEventKind::ScrollDown, cx, cy));
+    assert_eq!(app.scroll, 0, "wheel down returns to live");
+}
+
+/// Clicking a folded group's row expands it — same as Enter in nav mode.
+#[test]
+fn mouse_click_folded_group_expands() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let run = send_task(&mut app, "ship it");
+    req_cycle(&mut app, run, "solo", 0, "done work");
+    app.apply_event(UiEvent::RunDone {
+        run,
+        outcome: "done".into(),
+        accepted_sha: None,
+    });
+    assert!(app.groups[1].folded(), "done group starts folded");
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let (cx, cy) = zone(&app, |h| matches!(h, Hit::Activity(g, None) if *g == run));
+    click(&mut app, cx, cy);
+    assert!(app.groups[1].expanded, "click expanded the folded group");
+    assert!(app.nav, "click focused transcript nav");
+    click(&mut app, cx, cy);
+    assert!(app.groups[1].collapsed, "second click folds it again");
+}
+
+/// Permission buttons are clickable: [y] once, [a] session, [n] deny —
+/// identical decisions to the keyboard path.
+#[test]
+fn mouse_perm_buttons_decide() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        run: 1,
+        id: 9,
+        agent: "w1".into(),
+        summary: "bash: rm -rf build".into(),
+        reply: tx,
+    });
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let (cx, cy) = zone(&app, |h| {
+        matches!(h, Hit::Perm(sui::events::GateChoice::Once))
+    });
+    click(&mut app, cx, cy);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        sui::events::GateChoice::Once,
+        "click approved once"
+    );
+    assert!(app.modal.is_none(), "modal consumed by the decision");
+
+    // session button raises the live auto flag like 'a' does
+    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        run: 1,
+        id: 10,
+        agent: "w2".into(),
+        summary: "write_file: a.txt".into(),
+        reply: tx2,
+    });
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let (cx, cy) = zone(&app, |h| {
+        matches!(h, Hit::Perm(sui::events::GateChoice::Session))
+    });
+    click(&mut app, cx, cy);
+    assert_eq!(rx2.try_recv().unwrap(), sui::events::GateChoice::Session);
+    assert!(
+        app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "session approve sets auto like 'a'"
+    );
+}
+
+/// Drag across transcript rows selects; release copies via Effect::Clip
+/// (OSC52 in mod.rs). The captured text is the rendered row text.
+#[test]
+fn mouse_drag_selects_and_copies() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let g = app.chat_geom.get();
+    // drag from row 0 col 2 to row 1 col 20 — a real two-row selection
+    app.mouse(mev(MouseEventKind::Down(MouseButton::Left), g.x + 2, g.y));
+    app.mouse(mev(
+        MouseEventKind::Drag(MouseButton::Left),
+        g.x + 20,
+        g.y + 1,
+    ));
+    assert!(app.sel.is_some(), "drag created a selection");
+    app.mouse(mev(
+        MouseEventKind::Up(MouseButton::Left),
+        g.x + 20,
+        g.y + 1,
+    ));
+    let clip = app
+        .effects
+        .iter()
+        .find_map(|e| match e {
+            Fx::Clip(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("release emitted a clip effect");
+    assert!(clip.contains("welcome"), "selection text: {clip:?}");
+    assert!(app.status.contains("copied"), "status reports the copy");
+
+    // a fresh press clears the highlight; Esc clears it too
+    app.mouse(mev(MouseEventKind::Down(MouseButton::Left), g.x + 4, g.y));
+    assert!(app.sel.is_none());
+}
+
+/// Click on a transcript row does NOT select text — it expands.
+#[test]
+fn mouse_click_without_drag_is_not_a_copy() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let g = app.chat_geom.get();
+    click(&mut app, g.x + 5, g.y);
+    assert!(
+        app.effects.iter().all(|e| !matches!(e, Fx::Clip(_))),
+        "plain click must not emit a clip"
+    );
+}
+
+/// Click outside the Help modal dismisses it; inside keeps it open…
+/// and the details-view modal scrolls with the wheel.
+#[test]
+fn mouse_modal_dismiss_and_view_scroll() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.modal = Some(sui::tui::app::Modal::Help);
+    let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    click(&mut app, 2, 2); // corner — outside the centered modal
+    assert!(app.modal.is_none(), "outside click dismissed help");
+
+    // View modal: wheel scrolls its content
+    let long = (0..60)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.modal = Some(sui::tui::app::Modal::View {
+        title: "t".into(),
+        text: long,
+        scroll: 0,
+    });
+    app.mouse(mev(MouseEventKind::ScrollDown, 40, 12));
+    match &app.modal {
+        Some(sui::tui::app::Modal::View { scroll, .. }) => assert_eq!(*scroll, 3),
+        _ => panic!("view modal stayed open and scrolled"),
+    }
+}
+
+/// Mouse off = events ignored entirely (terminal keeps native select).
+#[test]
+fn mouse_toggle_off_ignores_events() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.mouse = false;
+    app.mouse(mev(MouseEventKind::ScrollUp, 10, 10));
+    assert_eq!(app.scroll, 0, "no scroll when mouse is off");
+}
+
+/// Settings → mouse row toggles the flag and emits Mouse + SaveUi.
+#[test]
+fn mouse_settings_row_toggles() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let i = app
+        .settings_rows()
+        .iter()
+        .position(|r| matches!(r, sui::tui::app::SettingsRow::Mouse))
+        .expect("mouse row exists");
+    assert!(app.mouse);
+    app.settings_activate(i);
+    assert!(!app.mouse);
+    assert_eq!(app.ui.mouse, Some(false), "toggle persisted to ui settings");
+    assert!(
+        app.effects.iter().any(|e| matches!(e, Fx::Mouse(false))),
+        "terminal capture disabled live"
     );
 }

@@ -369,6 +369,9 @@ pub struct UiSettings {
     pub worker_count: Option<usize>,
     /// Reasoning display preference: "auto" | "hidden" | "expanded".
     pub reasoning: Option<String>,
+    /// Mouse capture (clicks, wheel, drag-select + OSC52 copy).
+    /// None = on. When off the terminal keeps native text selection.
+    pub mouse: Option<bool>,
     pub acceptance: Vec<String>,
 }
 

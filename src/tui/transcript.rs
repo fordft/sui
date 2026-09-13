@@ -85,6 +85,68 @@ pub fn wrap(s: &str, w: usize) -> Vec<String> {
     out
 }
 
+/// Slice a plain-text row by terminal display columns [c0, c1) —
+/// grapheme-aware so a selection edge never splits a cluster.
+pub fn slice_cols(s: &str, c0: usize, c1: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let mut out = String::new();
+    let mut col = 0usize;
+    for g in s.graphemes(true) {
+        let gw = UnicodeWidthStr::width(g);
+        if col + gw > c0 && col < c1 {
+            out.push_str(g);
+        }
+        col += gw;
+        if col >= c1 {
+            break;
+        }
+    }
+    out
+}
+
+/// Paint a mouse-drag selection onto a rendered row: cells in [c0, c1)
+/// get the selection background, spans split at the edges. Display-width
+/// math — matches what the terminal actually shows.
+pub fn paint_sel(line: Line<'static>, c0: usize, c1: usize, sty: Style) -> Line<'static> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let mut out: Vec<Span> = Vec::new();
+    let mut col = 0usize;
+    for sp in line.spans {
+        let mut cur = String::new();
+        let mut cur_sel = false;
+        for g in sp.content.graphemes(true) {
+            let gw = UnicodeWidthStr::width(g);
+            let in_sel = col + gw > c0 && col < c1;
+            if in_sel != cur_sel && !cur.is_empty() {
+                out.push(Span::styled(
+                    std::mem::take(&mut cur),
+                    if cur_sel {
+                        sp.style.patch(sty)
+                    } else {
+                        sp.style
+                    },
+                ));
+            }
+            cur_sel = in_sel;
+            cur.push_str(g);
+            col += gw;
+        }
+        if !cur.is_empty() {
+            out.push(Span::styled(
+                cur,
+                if cur_sel {
+                    sp.style.patch(sty)
+                } else {
+                    sp.style
+                },
+            ));
+        }
+    }
+    Line::from(out)
+}
+
 /// Whole transcript as rows. `width` = inner body width.
 pub fn rows(app: &App, width: usize) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
