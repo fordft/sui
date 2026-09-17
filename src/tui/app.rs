@@ -639,6 +639,7 @@ pub enum Modal {
 pub enum TextTarget {
     Workspace,
     Acceptance,
+    WebKey,
 }
 
 /// Side-effect the loop must execute — keeps App pure.
@@ -650,6 +651,8 @@ pub enum Effect {
     },
     Stop,
     Quit,
+    /// Run one tiny web search to verify the service + credentials.
+    TestWeb,
     SaveProfile {
         name: String,
         base_url: String,
@@ -754,6 +757,12 @@ pub struct App {
     /// cleared by the toggle, workspace change, and restart. Never
     /// persisted — every launch starts in Ask.
     pub auto: Arc<AtomicBool>,
+    /// Web research service (None = disabled/unavailable).
+    pub web: Option<Arc<crate::web::WebService>>,
+    pub web_access: crate::web::WebAccess,
+    /// Optional Exa API key — session memory only, keychain when usable.
+    pub web_key: Option<String>,
+    pub web_key_env: Option<String>,
     /// This TUI session's journal dir (~/.local/share/sui/runs/<id>) —
     /// the exportable run unit. None in tests.
     pub run_dir: Option<PathBuf>,
@@ -828,6 +837,8 @@ impl App {
             rx.recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap_or(false)
         });
+        let ui_web_access = ui.web_access.clone();
+        let ui_web_key_env = ui.web_key_env.clone();
         let mut session_keys = BTreeMap::new();
         if keyring_ok {
             for name in profiles.keys() {
@@ -839,7 +850,7 @@ impl App {
                 }
             }
         }
-        Self {
+        let mut app = Self {
             screen: if no_profiles {
                 Screen::Setup
             } else {
@@ -934,12 +945,31 @@ impl App {
             effects: vec![],
             keyring_ok,
             auto: Arc::new(AtomicBool::new(false)),
+            web: None,
+            // [ui] web_access wins; absent → inherit [web].access so a
+            // config-set policy isn't silently reset by opening the TUI.
+            web_access: match ui_web_access.as_deref() {
+                Some("auto") => crate::web::WebAccess::Auto,
+                Some("ask") => crate::web::WebAccess::Ask,
+                Some("off") => crate::web::WebAccess::Off,
+                _ => crate::web::load_cfg(None).access,
+            },
+            web_key_env: ui_web_key_env,
+            web_key: if keyring_ok {
+                keyring::Entry::new("sui", "web")
+                    .and_then(|e| e.get_password())
+                    .ok()
+            } else {
+                None
+            },
             run_dir: None,
             pending_perms: Default::default(),
             history: Vec::new(),
             hist_i: None,
             held: std::collections::HashSet::new(),
-        }
+        };
+        app.rebuild_web();
+        app
     }
 
     // ── model resolution ────────────────────────────────────────────
@@ -1868,6 +1898,18 @@ impl App {
 
     /// Cycle reasoning display pref — view-only, no request parameters
     /// change; persisted in [ui].
+    /// Rebuild the web service from current access/key settings.
+    fn rebuild_web(&mut self) {
+        let mut c = crate::web::load_cfg(None);
+        c.access = self.web_access;
+        c.api_key = self.web_key.clone().or_else(|| {
+            self.web_key_env
+                .as_deref()
+                .and_then(|e| std::env::var(e).ok())
+        });
+        self.web = Some(crate::web::WebService::new(c));
+    }
+
     pub fn cycle_reasoning(&mut self) {
         self.reasoning = self.reasoning.next();
         self.ui.reasoning = Some(self.reasoning.name().into());
@@ -2324,6 +2366,22 @@ impl App {
                                 self.ui.acceptance.push(v);
                             }
                         }
+                        TextTarget::WebKey => {
+                            self.web_key = if v.is_empty() { None } else { Some(v) };
+                            if self.keyring_ok {
+                                if let Ok(e) = keyring::Entry::new("sui", "web") {
+                                    match &self.web_key {
+                                        Some(k) => {
+                                            let _ = e.set_password(k);
+                                        }
+                                        None => {
+                                            let _ = e.delete_credential();
+                                        }
+                                    }
+                                }
+                            }
+                            self.rebuild_web();
+                        }
                     }
                     self.effects.push(Effect::SaveUi);
                     None
@@ -2634,6 +2692,9 @@ impl App {
         v.push(SettingsRow::Reasoning);
         v.push(SettingsRow::Mouse);
         v.push(SettingsRow::Auto);
+        v.push(SettingsRow::WebAccess);
+        v.push(SettingsRow::WebKey);
+        v.push(SettingsRow::WebTest);
         v.push(SettingsRow::Workspace);
         v.push(SettingsRow::Acceptance);
         v
@@ -2707,6 +2768,26 @@ impl App {
                 let on = !self.auto.load(std::sync::atomic::Ordering::Relaxed);
                 self.auto.store(on, std::sync::atomic::Ordering::Relaxed);
             }
+            Some(SettingsRow::WebAccess) => {
+                self.web_access = match self.web_access {
+                    crate::web::WebAccess::Off => crate::web::WebAccess::Ask,
+                    crate::web::WebAccess::Ask => crate::web::WebAccess::Auto,
+                    crate::web::WebAccess::Auto => crate::web::WebAccess::Off,
+                };
+                self.ui.web_access = Some(self.web_access.name().into());
+                self.rebuild_web();
+                self.effects.push(Effect::SaveUi);
+            }
+            Some(SettingsRow::WebKey) => {
+                self.modal = Some(Modal::Text {
+                    title: "exa api key (optional — masked)".into(),
+                    buf: Buf::new(),
+                    target: TextTarget::WebKey,
+                });
+            }
+            Some(SettingsRow::WebTest) => {
+                self.effects.push(Effect::TestWeb);
+            }
             Some(SettingsRow::Workspace) => {
                 self.modal = Some(Modal::Text {
                     title: "workspace path".into(),
@@ -2737,6 +2818,9 @@ pub enum SettingsRow {
     Reasoning,
     Mouse,
     Auto,
+    WebAccess,
+    WebKey,
+    WebTest,
     Workspace,
     Acceptance,
 }

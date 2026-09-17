@@ -147,6 +147,24 @@ history · `v` opens the step details view · `?` help.
 Mutating tool calls ask first: `y` approves once, `a` approves for the
 session (`AUTO` badge in the header), `n`/`Esc` denies.
 
+## Web research
+
+Native agents get two first-class tools — `web_search` and `web_fetch` —
+backed by [Exa's hosted MCP service](https://exa.ai/mcp). Off by default;
+enable in **Settings → web research** (`off`/`ask`/`auto`) or
+`[web] access = "ask"` in global config. Anonymous access works but is
+rate-limited; an optional Exa API key (Settings → exa api key, or
+`SUI_EXA_API_KEY`) raises usage.
+
+Search results come back as source IDs (`[S1]`, title, URL, snippet) —
+snippets are labeled snippets, not fetched pages. `web_fetch(url)` reads
+one source as bounded Markdown; cached hits are labeled with their age.
+The policy is independent of tool auto-approve: **YOLO never turns web
+access on**, and queries/requested URLs leave the machine. Unsafe
+targets — private/link-local/metadata IPs, credential-bearing or
+secret-shaped URLs, non-http(s) schemes — are refused before anything is
+sent. Per-run request caps apply across all workers in a mission.
+
 ## Missions
 
 `sui --mission` or `sui-mission` headless:

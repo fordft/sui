@@ -10,6 +10,8 @@ pub struct ToolContext {
     pub workspace: PathBuf,
     pub bash_timeout: Duration,
     pub bash_timeout_max: Duration,
+    /// Per-run web research service (None = tools report "not configured").
+    pub web: Option<std::sync::Arc<crate::web::WebService>>,
 }
 
 /// Frozen tool schemas. Changing names/descriptions/order invalidates
@@ -60,6 +62,35 @@ pub fn schemas() -> Vec<Value> {
                         "new_str": { "type": "string", "description": "Replacement text" }
                     },
                     "required": ["path", "old_str", "new_str"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web for current documentation and sources. Returns source IDs, titles, URLs, and snippets — snippets are not fetched content. Use web_fetch to read a source. Results leave this machine.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query":       { "type": "string", "description": "Search query — prefer the exact version/topic, e.g. 'ratatui 0.29 paragraph scroll'" },
+                        "max_results": { "type": "integer", "description": "Results to return (default 5, max 10)" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch a webpage's content as markdown (public http(s) URLs only). Returns the page text plus retrieval timestamp; may be truncated.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "Public http(s) URL to read" }
+                    },
+                    "required": ["url"]
                 }
             }
         }),
@@ -145,6 +176,16 @@ pub async fn execute(
             Ok(ExecOut::plain(text, kind))
         }
         "bash" => bash::run(ctx, args, cancel, obs).await,
+        "web_search" | "web_fetch" => {
+            let _ = (cancel, obs);
+            match &ctx.web {
+                Some(svc) => Ok(svc.exec(name, args).await),
+                None => Ok(ExecOut::plain(
+                    "status: error\nerror: web research is not configured".into(),
+                    ExecKind::Error,
+                )),
+            }
+        }
         other => {
             let _ = (cancel, obs);
             Ok(ExecOut::plain(

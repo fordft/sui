@@ -34,7 +34,14 @@ pub struct Identity {
     pub cache_key_fingerprint: Option<String>,
 }
 
-const KNOWN_TOOLS: &[&str] = &["read_file", "write_file", "edit_file", "bash"];
+const KNOWN_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "bash",
+    "web_search",
+    "web_fetch",
+];
 
 /// Result of an intercepted tool call (e.g. orchestrator plan submission).
 /// Intercepted calls never touch the filesystem.
@@ -488,6 +495,8 @@ impl Agent {
                     };
                     finish_after = fin;
                     Disp::new(r, crate::events::ToolStatus::Intercepted)
+                } else if let Some(d) = self.web_gate(name, &summary).await {
+                    d
                 } else if needs_approval(name)
                     && !self
                         .gate
@@ -732,6 +741,49 @@ impl Agent {
             "error_class": error,
         })
     }
+
+    /// Web-research policy gate — Off/Ask/Auto, independent of tool
+    /// auto-approve. Some(Disp) = terminal result; None = proceed to exec.
+    /// Ask routes through the same permission modal as local tools; a
+    /// session grant satisfies it like any other approval. YOLO never
+    /// turns an Off policy on.
+    async fn web_gate(&mut self, name: &str, summary: &str) -> Option<Disp> {
+        if !is_web(name) {
+            return None;
+        }
+        let Some(svc) = &self.tools.web else {
+            return Some(Disp::new(
+                "status: error\nerror: web research is not configured".into(),
+                crate::events::ToolStatus::Failed,
+            ));
+        };
+        svc.begin_run(self.run_id);
+        match svc.access() {
+            crate::web::WebAccess::Off => Some(Disp::new(
+                "status: denied\nerror: web research is Off (Settings → Web research)".into(),
+                crate::events::ToolStatus::Denied,
+            )),
+            crate::web::WebAccess::Ask => {
+                let c = self
+                    .gate
+                    .decide(
+                        &format!("web — leaves this machine: {summary}"),
+                        &self.ident.agent_id,
+                        self.run_id,
+                    )
+                    .await;
+                if c == crate::events::GateChoice::Deny {
+                    Some(Disp::new(
+                        "status: denied\nerror: user rejected the web request".to_string(),
+                        crate::events::ToolStatus::Denied,
+                    ))
+                } else {
+                    None
+                }
+            }
+            crate::web::WebAccess::Auto => None,
+        }
+    }
 }
 
 /// Cancellation wait: Ctrl-C (real signal) OR the UI/stop notify.
@@ -753,6 +805,10 @@ fn needs_approval(name: &str) -> bool {
     matches!(name, "write_file" | "edit_file" | "bash")
 }
 
+fn is_web(name: &str) -> bool {
+    matches!(name, "web_search" | "web_fetch")
+}
+
 fn summarize(name: &str, args: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
     match name {
@@ -760,6 +816,8 @@ fn summarize(name: &str, args: &str) -> String {
         "read_file" => format!("read {}", v["path"].as_str().unwrap_or("")),
         "write_file" => format!("write {}", v["path"].as_str().unwrap_or("")),
         "edit_file" => format!("edit {}", v["path"].as_str().unwrap_or("")),
+        "web_search" => format!("web search: {}", v["query"].as_str().unwrap_or("")),
+        "web_fetch" => format!("web fetch: {}", v["url"].as_str().unwrap_or("")),
         _ => format!("{name} {args}"),
     }
 }

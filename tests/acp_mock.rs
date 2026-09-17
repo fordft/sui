@@ -585,6 +585,7 @@ async fn mission_native_plan_acp_worker_native_audit() {
         events: None,
         cancel: None,
         session_approve: None,
+        web: None,
         run: 1,
     };
     let r = mission::run(cfg).await.unwrap();
@@ -657,6 +658,7 @@ async fn mission_acp_worker_ownership_violation_fails() {
         events: None,
         cancel: None,
         session_approve: None,
+        web: None,
         run: 1,
     };
     let r = mission::run(cfg).await.unwrap();

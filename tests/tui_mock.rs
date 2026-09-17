@@ -256,6 +256,8 @@ fn app_with_mock(repo: &PathBuf, port: u16) -> App {
         reasoning: None,
         mouse: None,
         acceptance: vec![],
+        web_access: None,
+        web_key_env: None,
     };
     App::with_state(repo.clone(), profiles, ui)
 }
@@ -312,6 +314,7 @@ async fn tui_solo_write_with_permission_modal() {
         app.cancel.clone(),
         app.stop_flag.clone(),
         app.auto.clone(),
+        None,
     );
     solo.send(run, task);
 
@@ -376,6 +379,7 @@ async fn tui_solo_permission_denied() {
         app.cancel.clone(),
         app.stop_flag.clone(),
         app.auto.clone(),
+        None,
     );
     solo.send(run, task);
 
@@ -420,6 +424,7 @@ async fn tui_stop_cancels_running_tool() {
         app.cancel.clone(),
         app.stop_flag.clone(),
         app.auto.clone(),
+        None,
     );
     solo.send(run, task);
 
@@ -563,6 +568,7 @@ async fn tui_mission_events_flow() {
         events: Some(ev_tx),
         cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
         session_approve: Some(app.auto.clone()),
+        web: None,
         run,
     };
     tokio::spawn(async move {
@@ -933,6 +939,7 @@ async fn tui_session_policy_live_revocation() {
         app.cancel.clone(),
         app.stop_flag.clone(),
         app.auto.clone(),
+        None,
     );
     solo.send(run, task);
 
@@ -2024,6 +2031,7 @@ async fn transcript_display_never_changes_requests() {
             app.cancel.clone(),
             app.stop_flag.clone(),
             app.auto.clone(),
+            None,
         );
         solo.send(run, "WRITEME".into());
         // pump until the permission modal; mid-run display churn on the

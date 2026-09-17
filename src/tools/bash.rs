@@ -363,6 +363,7 @@ mod tests {
             workspace: std::env::temp_dir(),
             bash_timeout: Duration::from_secs(30),
             bash_timeout_max: Duration::from_secs(60),
+            web: None,
         }
     }
 

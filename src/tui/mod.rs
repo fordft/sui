@@ -42,6 +42,7 @@ enum Ctl {
     ProbeDone(String, Result<provider::Probe, String>),
     ProfileSaved,
     Diff(String),
+    WebTest(Result<String, String>),
 }
 
 /// Mouse capture: clicks+drags (1000/1002) + SGR encoding (1006).
@@ -90,6 +91,7 @@ impl Solo {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_solo(
     prof: Profile,
     workspace: PathBuf,
@@ -98,6 +100,7 @@ pub fn spawn_solo(
     cancel: Arc<tokio::sync::Notify>,
     flag: Arc<std::sync::atomic::AtomicBool>,
     session: Arc<std::sync::atomic::AtomicBool>,
+    web: Option<Arc<crate::web::WebService>>,
 ) -> Solo {
     let (tx, mut rx) = unbounded_channel::<(u64, String)>();
     let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
@@ -114,6 +117,7 @@ pub fn spawn_solo(
                 workspace,
                 bash_timeout: Duration::from_secs(120),
                 bash_timeout_max: Duration::from_secs(600),
+                web,
             },
             Gate::new(false), // approvals via modal; session flag is live
             match Journal::open_named(&jdir, "solo") {
@@ -331,6 +335,12 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                             app.profiles = config::profiles(None).unwrap_or_default();
                         }
                         Ctl::Diff(s) => app.diff_text = s,
+                        Ctl::WebTest(r) => {
+                            app.status = match r {
+                                Ok(s) => s,
+                                Err(e) => format!("web test: {e}"),
+                            };
+                        }
                     }
                     dirty = true;
                 }
@@ -391,6 +401,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                                         app.cancel.clone(),
                                         app.stop_flag.clone(),
                                         app.auto.clone(),
+                                        app.web.clone(),
                                     ));
                                 }
                                 solo.as_ref().unwrap().send(run, task);
@@ -441,6 +452,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                                     events: Some(ev_tx.clone()),
                                     cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
                                     session_approve: Some(app.auto.clone()),
+                                    web: app.web.clone(),
                                     run,
                                 };
                                 tokio::spawn(async move {
@@ -538,6 +550,19 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                             }
                         }
                         None => app.status = "export: no run dir".into(),
+                    }
+                }
+                Effect::TestWeb => {
+                    let tx = ctl_tx.clone();
+                    match app.web.clone() {
+                        Some(ws) => {
+                            tokio::spawn(async move {
+                                let r = ws.test().await.map_err(|e| format!("{e:#}"));
+                                let _ = tx.send(Ctl::WebTest(r));
+                            });
+                            app.status = "web test…".into();
+                        }
+                        None => app.status = "web test: service unavailable".into(),
                     }
                 }
                 Effect::SaveUi => {

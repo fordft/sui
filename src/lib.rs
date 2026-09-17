@@ -13,3 +13,4 @@ pub mod provider;
 pub mod tools;
 pub mod tui;
 pub mod types;
+pub mod web;

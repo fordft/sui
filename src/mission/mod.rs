@@ -72,6 +72,9 @@ pub struct MissionCfg {
     pub cancel: Option<(Arc<tokio::sync::Notify>, Arc<std::sync::atomic::AtomicBool>)>,
     /// Shared session-approval flag from the UI (see Gate::set_ui).
     pub session_approve: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Per-mission web-research service — shared across control, every
+    /// worker, and the auditor so run limits are global, not per-agent.
+    pub web: Option<Arc<crate::web::WebService>>,
     /// Activity-run id stamped on UI events — one mission = one run
     /// group in the transcript. Headless callers pass 1.
     pub run: u64,
@@ -136,6 +139,7 @@ fn mk_agent(
             workspace: workspace.to_path_buf(),
             bash_timeout: Duration::from_secs(120),
             bash_timeout_max: Duration::from_secs(600),
+            web: cfg.web.clone(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply
         journal,

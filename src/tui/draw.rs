@@ -429,6 +429,30 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                     dim()
                 },
             ),
+            SettingsRow::WebAccess => (
+                format!(
+                    "  web research: {} (queries and URLs leave this machine — Exa)",
+                    app.web_access.name()
+                ),
+                match app.web_access {
+                    crate::web::WebAccess::Off => dim(),
+                    _ => Style::default(),
+                },
+            ),
+            SettingsRow::WebKey => (
+                format!(
+                    "    exa api key: {} (optional — basic access is rate-limited)",
+                    if app.web_key.is_some() {
+                        "set".to_string()
+                    } else if app.web_key_env.is_some() {
+                        format!("env {}", app.web_key_env.as_deref().unwrap_or(""))
+                    } else {
+                        "none".into()
+                    }
+                ),
+                Style::default(),
+            ),
+            SettingsRow::WebTest => ("    test search".into(), Style::default()),
             SettingsRow::Auto => {
                 let on = app.auto.load(std::sync::atomic::Ordering::Relaxed);
                 (
@@ -825,11 +849,18 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 r,
             );
         }
-        Modal::Text { title, buf, .. } => {
+        Modal::Text {
+            title, buf, target, ..
+        } => {
             let r = centered(60, 5, area);
             f.render_widget(Clear, r);
+            let shown = if *target == TextTarget::WebKey {
+                "•".repeat(buf.text().chars().count())
+            } else {
+                buf.text()
+            };
             f.render_widget(
-                Paragraph::new(buf.text())
+                Paragraph::new(shown)
                     .block(Block::default().borders(Borders::ALL).title(title.clone())),
                 r,
             );

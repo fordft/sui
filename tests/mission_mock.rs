@@ -265,6 +265,7 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
         events: None,
         cancel: None,
         session_approve: None,
+        web: None,
         run: 1,
     }
 }

@@ -59,7 +59,7 @@ fn rfc3339_now() -> String {
     )
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+pub(crate) fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     // Howard Hinnant's civil-from-days algorithm.
     days += 719_468;
     let era = days / 146_097;

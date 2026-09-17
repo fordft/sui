@@ -18,7 +18,8 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 rand = "0.10.2"
 ratatui = "0.29"
 regex = "1.13.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "form", "rustls"] }
+rmcp = { version = "3.3.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 rustix = { version = "1", features = ["process"] }
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }

@@ -157,6 +157,7 @@ async fn solo(
             workspace: wt.clone(),
             bash_timeout: Duration::from_secs(120),
             bash_timeout_max: Duration::from_secs(600),
+            web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
         },
         Gate::new(true),
         Journal::open_named(run_dir, journal_name)?,
@@ -383,6 +384,9 @@ async fn main() -> Result<()> {
         events: None,
         cancel: None,
         session_approve: None,
+        web: Some(sui::web::WebService::new(sui::web::load_cfg(
+            cli.config.as_deref(),
+        ))),
         run: 1,
     };
 

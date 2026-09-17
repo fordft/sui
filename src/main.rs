@@ -3,7 +3,7 @@ use clap::Parser;
 use rustyline::DefaultEditor;
 use std::io::IsTerminal;
 use std::time::Duration;
-use sui::{agent, config, context, journal, permission, provider, tools};
+use sui::{agent, config, context, journal, permission, provider, tools, web};
 
 #[derive(clap::Subcommand)]
 enum Sub {
@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
         workspace: cfg.workspace.clone(),
         bash_timeout: Duration::from_millis(cfg.bash_timeout_ms),
         bash_timeout_max: Duration::from_millis(cfg.bash_timeout_max_ms),
+        web: Some(web::WebService::new(web::load_cfg(None))),
     };
     let mut agent = agent::Agent::new(
         provider,

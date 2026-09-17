@@ -93,3 +93,19 @@ bash_timeout_max_ms = 600000
 # Select per mission role:
 #   CLI: sui-mission --control-profile strong --worker-agent devin
 #   TUI: Settings → role → acp:devin
+
+# ── Web research (GLOBAL config only — ~/.config/sui/config.toml) ──
+# First-class web_search / web_fetch for native agents, backed by Exa's
+# hosted MCP service. Anonymous access works but is rate-limited; an
+# optional API key raises usage. Queries and requested URLs leave this
+# machine — the access policy below is INDEPENDENT of tool auto-approve
+# (YOLO never turns web access on). [web] in a project sui.toml is
+# ignored: project files may not raise network egress.
+#
+# [web]
+# access = "ask"           # "off" (default) | "ask" | "auto"
+# api_key = "exa-…"        # optional; prefer key_env or the Settings key entry
+# key_env = "EXA_API_KEY"  # env var holding the key (headless path)
+# endpoint = "https://mcp.exa.ai/mcp"
+#
+# Headless overrides: SUI_WEB_ACCESS=ask|auto, SUI_EXA_API_KEY=…

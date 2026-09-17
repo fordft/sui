@@ -483,6 +483,15 @@ pub struct UiSettings {
     /// None = on. When off the terminal keeps native text selection.
     pub mouse: Option<bool>,
     pub acceptance: Vec<String>,
+    /// Web research access: "off" | "ask" | "auto" (None = "off").
+    pub web_access: Option<String>,
+    /// Env var holding the optional web-service API key (headless path).
+    pub web_key_env: Option<String>,
+}
+
+/// Global config path (same location `load_ui`/`save_ui` use).
+pub(crate) fn global_config_path() -> Option<PathBuf> {
+    global_path().ok()
 }
 
 fn global_path() -> Result<PathBuf> {

@@ -75,6 +75,7 @@ impl Ctx {
                 workspace: self.ws.clone(),
                 bash_timeout: Duration::from_secs(120),
                 bash_timeout_max: Duration::from_secs(600),
+                web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
             },
             Gate::new(true), // fixture workspace is disposable
             Journal::open_named(&self.run_dir, scenario)?,
