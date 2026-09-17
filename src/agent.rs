@@ -98,6 +98,8 @@ pub struct Agent {
     journal: Journal,
     history: Vec<Message>,
     system: String,
+    /// AGENTS.md content for this workspace, if present — own segment.
+    guidance: Option<String>,
     limits: Limits,
     ident: Identity,
     tool_schemas: Vec<Value>,
@@ -124,7 +126,9 @@ impl Agent {
         ident: Identity,
     ) -> Self {
         let tool_schemas = tools::schemas();
-        let hashes = context::layer_hashes(&tool_schemas, context::SYSTEM);
+        let system = context::system();
+        let hashes = context::layer_hashes(&tool_schemas, &system);
+        let guidance = crate::charter::project_guidance(&tools.workspace);
         let known = KNOWN_TOOLS.iter().map(|s| s.to_string()).collect();
         Self {
             provider,
@@ -132,7 +136,8 @@ impl Agent {
             gate,
             journal,
             history: Vec::new(),
-            system: context::SYSTEM.to_string(),
+            system,
+            guidance,
             limits,
             ident,
             tool_schemas,
@@ -243,7 +248,7 @@ impl Agent {
     pub async fn drive(&mut self) -> Result<()> {
         for _ in 0..self.limits.max_turns {
             let t_asm = Instant::now();
-            let req = context::compile(&self.history, &self.system);
+            let req = context::compile(&self.history, &self.system, self.guidance.as_deref());
             let assembly_ms = t_asm.elapsed().as_millis();
             let est_tokens = context::estimate_tokens(&req);
             let request_fp = context::request_fingerprint(&req);

@@ -1,5 +1,5 @@
 use super::plan::{MissionPlan, TaskContract};
-use crate::context::SYSTEM;
+use crate::context::system as base_system;
 
 /// Shared control-plane contract: identical for orchestrator and auditor
 /// so the strong-model domain keeps one stable prefix. Role-specific
@@ -10,7 +10,11 @@ submit_result(payload: object). \
 When your deliverable is complete, call submit_result exactly once with the \
 required JSON payload; the harness validates it and ends your turn. \
 If submit_result returns an error, fix the payload and resubmit — never emit \
-the deliverable as prose. Keep all responses terse; spend tokens on judgment.";
+the deliverable as prose. Keep all responses terse; spend tokens on judgment. \
+Quality contract: decompose for verifiable outcomes, not task count — every \
+contract must carry acceptance evidence the runtime can check. As auditor, \
+review evidence and reproduction, not summaries; FAIL only on real criteria \
+violations and name the missing evidence when uncertain.";
 
 /// The mission worker shares the fast-path contract plus ownership rules —
 /// identical text for every worker so the cheap-model prefix stays shared.
@@ -18,10 +22,11 @@ the deliverable as prose. Keep all responses terse; spend tokens on judgment.";
 /// first user message (volatile tail).
 pub fn worker_system() -> String {
     format!(
-        "{SYSTEM}\n\nMission worker rules: you own ONLY the paths listed in your task. \
+        "{}\n\nMission worker rules: you own ONLY the paths listed in your task. \
          Do not read sibling task directories or edit outside owned_paths — \
          violations are rejected by the runtime. Satisfy the acceptance \
-         commands before finishing. Keep diffs minimal."
+         commands before finishing. Keep diffs minimal.",
+        base_system()
     )
 }
 

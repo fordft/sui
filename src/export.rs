@@ -610,6 +610,13 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
             "requested_model": a.requested_model,
             "returned_models": a.returned_models,
             "requests": a.requests,
+            // self-declared completion state — evidence of the claim,
+            // never proof; absent when the agent didn't declare one
+            "declared": a.timeline.iter().rev()
+                .find(|e| e["kind"] == "assistant")
+                .and_then(|e| e["data"]["content"].as_str())
+                .and_then(crate::charter::declared_state)
+                .map(|d| d.name()),
         })).collect::<Vec<_>>(),
         "plan": plan,
         "mission_states": mission_states.iter().map(|(t, s)| json!({"ts_unix": t, "state": s})).collect::<Vec<_>>(),
@@ -849,6 +856,12 @@ fn render_md(r: &Value) -> String {
                     .unwrap_or_default(),
                 a["requests"].as_u64().unwrap_or(0),
             ));
+            if let Some(d) = a["declared"].as_str() {
+                m.push_str(&format!(
+                    "  - declared: `{d}` (self-reported, not verified)
+"
+                ));
+            }
         }
     }
     if let Some(plan) = r["plan"].as_object() {

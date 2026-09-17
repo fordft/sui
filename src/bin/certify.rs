@@ -293,7 +293,7 @@ async fn run_profile(prof: &Profile, max_req: u64, keep: bool) -> Result<()> {
     // ── S5 prefix_mutation: same flow, deliberately altered static layer ──
     if ctx.budget_ok() {
         let mut s5 = ctx.agent("s5_prefix_mutation")?;
-        s5.set_system(format!("{}\n\ncert-mutation-marker: x", context::SYSTEM));
+        s5.set_system(format!("{}\n\ncert-mutation-marker: x", context::system()));
         ctx.turn(&mut s5, T_READ, "s5.t1").await;
     }
 

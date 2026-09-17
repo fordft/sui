@@ -3,30 +3,38 @@ use sha2::{Digest, Sha256};
 
 use crate::types::Message;
 
-/// Static contract — the lowest-mutation segment. No timestamps, no repo
-/// state, no session IDs: anything dynamic here would poison every cache
-/// prefix on every turn.
-pub const SYSTEM: &str = "\
-You are sui, a coding agent operating inside a workspace via tools.
-
-Tool protocol:
-- read_file(path, offset, limit): line-numbered read, <=100 lines by default.
-- write_file(path, content): create or fully replace a file.
+/// The full static layer: charter + mechanics + completion contract.
+/// No timestamps, repo state, or session IDs — anything dynamic here
+/// would poison every cache prefix on every turn.
+pub fn system() -> String {
+    format!(
+        "You are sui's engineering agent inside a workspace, reached through tools.\n\n\
+{}\n\n\
+Tool protocol:\n\
+- read_file(path, offset, limit): line-numbered read, <=100 lines by default.\n\
+- write_file(path, content): create or fully replace a file.\n\
 - edit_file(path, old_str, new_str): replace an exact UNIQUE substring. \
 It fails if the match is absent or ambiguous — include enough surrounding \
 context to make old_str match exactly once. Never guess indentation; \
-read_file first.
+read_file first.\n\
 - bash(command, timeout_ms): run shell commands in the workspace. \
-Prefer rg for search, git for VCS. Output is bounded.
-
-Working rules:
-- All paths are relative to the workspace root; you cannot leave it.
-- Mutating tools and bash may require user approval — if denied, stop and ask.
+Prefer rg for search, git for VCS. Output is bounded.\n\
+- web_search(query, max_results): current documentation and sources; \
+returns source IDs, titles, URLs, snippets — snippets are not fetched \
+content. May be off or gated; results leave this machine.\n\
+- web_fetch(url): read one source as bounded text.\n\n\
+Working rules:\n\
+- All paths are relative to the workspace root; you cannot leave it.\n\
 - Keep tool calls minimal: read what you need, edit precisely, verify with \
-builds/tests when available.
-- When a command produces no output, that is a result too.
+builds/tests when available.\n\
+- When a command produces no output, that is a result too.\n\
 - Do not describe what you are about to do at length; act, then report \
-concisely what changed and how it was verified.";
+concisely.\n\n\
+{}",
+        crate::charter::CHARTER,
+        crate::charter::COMPLETION,
+    )
+}
 
 /// v1 seam: frozen repository-epoch segment (tree-sitter map, build/test
 /// commands, conventions). Generated once per epoch, then immutable.
@@ -36,16 +44,23 @@ pub fn epoch_segment() -> Option<String> {
 }
 
 /// Assemble model-visible context in stable-to-volatile order.
-/// [static system] + [epoch?] + [append-only history].
-/// `system` is normally SYSTEM; certification may inject a variant to
-/// deliberately invalidate the static layer.
-pub fn compile(history: &[Message], system: &str) -> Vec<Message> {
-    let mut out = Vec::with_capacity(history.len() + 2);
+/// [static system] + [epoch?] + [project guidance?] + [append-only
+/// history]. `system` is normally `system()`; certification may inject
+/// a variant to deliberately invalidate the static layer. Guidance is
+/// per-workspace but stable within it — its own segment keeps the
+/// shared prefix identical across repos.
+pub fn compile(history: &[Message], system: &str, guidance: Option<&str>) -> Vec<Message> {
+    let mut out = Vec::with_capacity(history.len() + 3);
     out.push(Message::System {
         content: system.to_string(),
     });
     if let Some(seg) = epoch_segment() {
         out.push(Message::System { content: seg });
+    }
+    if let Some(g) = guidance {
+        out.push(Message::System {
+            content: g.to_string(),
+        });
     }
     out.extend(history.iter().cloned());
     out
