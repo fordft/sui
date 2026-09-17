@@ -7,12 +7,8 @@ use sui::{agent, config, context, journal, permission, provider, tools};
 
 #[derive(clap::Subcommand)]
 enum Sub {
-    /// Terminal UI: setup, provider/model roles, chat, mission view
-    Tui {
-        /// Start in mission mode (orchestrator → workers → auditor)
-        #[arg(long)]
-        mission: bool,
-    },
+    /// Terminal UI (also the default when run bare on a terminal)
+    Tui,
     /// MCP artifact-submission bridge served over stdio — spawned by ACP
     /// agents via session/new mcp_servers; not for interactive use
     AcpBridge {
@@ -74,18 +70,24 @@ struct Cli {
     /// Workspace root (default: cwd)
     #[arg(long)]
     workspace: Option<std::path::PathBuf>,
-    /// Auto-approve all tool calls
-    #[arg(long, short = 'y')]
+    /// Auto-approve all tool calls (same as --yolo)
+    #[arg(long, short = 'y', global = true)]
     yes: bool,
-    /// One-shot prompt; omit for interactive REPL
+    /// YOLO mode — auto-approve everything, no permission prompts
+    #[arg(long, global = true)]
+    yolo: bool,
+    /// Start the TUI in mission mode (orchestrator → workers → auditor)
+    #[arg(long, global = true)]
+    mission: bool,
+    /// One-shot prompt; omit to open the TUI (or REPL when not a terminal)
     prompt: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Sub::Tui { mission }) = &cli.sub {
-        return sui::tui::run(*mission).await;
+    if let Some(Sub::Tui) = &cli.sub {
+        return sui::tui::run(cli.mission, cli.yes || cli.yolo).await;
     }
     if let Some(Sub::AcpBridge { dir, expect }) = &cli.sub {
         return sui::acp::bridge::serve(dir, expect);
@@ -129,12 +131,17 @@ async fn main() -> Result<()> {
         println!("\nReview before sharing: the report may contain project code and commands.");
         return Ok(());
     }
+    // Bare `sui` on a terminal opens the TUI — the headless path is for
+    // one-shot prompts and non-interactive (piped/scripted) use.
+    if cli.prompt.is_none() && std::io::stdin().is_terminal() {
+        return sui::tui::run(cli.mission, cli.yes || cli.yolo).await;
+    }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
     let cfg = config::load(config::Overrides {
         base_url: cli.base_url,
         api_key: cli.api_key,
         model: cli.model,
-        auto_approve: cli.yes,
+        auto_approve: cli.yes || cli.yolo,
         workspace: cli.workspace,
         config_path: cli.config,
         non_interactive,

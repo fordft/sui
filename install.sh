@@ -77,7 +77,7 @@ SUI_DOWNLOAD_URL="file://$tmp" SUI_INSTALL_DIR="$APP_DIR" sh "$tmp/sui-installer
     || die "install failed (existing install untouched)"
 
 say "installed: $APP_DIR/sui  ($APP_DIR/sui-mission, $APP_DIR/sui-certify)"
-say "launch:    $APP_DIR/sui tui"
+say "launch:    $APP_DIR/sui"
 case ":${PATH}:" in
     *":$APP_DIR:"*) ;;
     *) say "PATH:      export PATH=\"$APP_DIR:\$PATH\"" ;;

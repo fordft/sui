@@ -15,7 +15,7 @@ whichever comes first on PATH wins.
 
 ```bash
 brew install fordft/tap/sui-ai
-sui tui
+sui
 ```
 
 The `sui-ai` formula installs prebuilt binaries (`sui`, `sui-mission`,
@@ -42,7 +42,7 @@ Installs to `~/.sui/bin` (user-owned, no sudo). If `~/.sui/bin` isn't on your
 PATH yet, launch with the absolute path:
 
 ```bash
-~/.sui/bin/sui tui
+~/.sui/bin/sui
 ```
 
 **Prefer to inspect first?**
@@ -70,7 +70,7 @@ SUI_TAG=v0.3.0 sh -c "$(curl -LsSf \
 
 ```bash
 sui --version
-sui tui
+sui
 ```
 
 First run opens the setup screen. Add a provider — **DeepSeek**,
@@ -84,12 +84,13 @@ restarts. No API key is needed to install.
 Mutating tool calls ask first: `y`/`Y` approves once, `a`/`A` approves for the
 session (an `AUTO` badge shows in the header), `n`/`N`/`Esc` denies — each on
 a single keystroke. A persistent **auto-approve (YOLO)** toggle lives in
-Settings; the CLI equivalents are `sui -y` and `auto_approve = true` in
-config. `Ctrl+S` stops a running task, `Ctrl+Q` quits — both work while a
+Settings; the CLI equivalents are `sui --yolo` (or `-y`) and
+`auto_approve = true` in config. `Ctrl+S` stops a running task, `Ctrl+Q` quits — both work while a
 permission prompt is open.
 
-Non-TUI paths still work: `sui` (REPL), `sui "task"` (one-shot),
-`sui-mission`, `sui-certify`.
+Bare `sui` opens the TUI; non-TUI paths: `sui "task"` (one-shot),
+pipes/scripts (REPL), `sui-mission`, `sui-certify`. `sui --mission` opens
+the TUI in mission mode.
 
 ### Export a run report
 

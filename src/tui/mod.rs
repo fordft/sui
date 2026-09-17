@@ -224,7 +224,7 @@ pub fn resolve_to_backend(app: &App, name: &str) -> Option<crate::backend::Backe
     resolve_to_profile(app, name).map(crate::backend::Backend::Native)
 }
 
-pub async fn run(force_mission: bool) -> Result<()> {
+pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("sui tui needs a terminal");
     }
@@ -258,6 +258,9 @@ pub async fn run(force_mission: bool) -> Result<()> {
     if force_mission {
         app.mode = app::Mode::Mission;
         app.ui.mode = Some("mission".into());
+    }
+    if yolo {
+        app.auto.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     let (ev_tx, mut ev_rx) = unbounded_channel::<UiEvent>();
