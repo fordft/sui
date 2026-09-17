@@ -165,6 +165,21 @@ targets — private/link-local/metadata IPs, credential-bearing or
 secret-shaped URLs, non-http(s) schemes — are refused before anything is
 sent. Per-run request caps apply across all workers in a mission.
 
+## Engineering lenses
+
+Native agents carry a small always-on **scan** (outcome · correctness ·
+interaction · failure/recovery · security · performance · compatibility ·
+maintainability · verification — including concerns the user didn't
+name) plus a compact index of engineering guides. At task start, Sui
+selects up to three relevant lenses from task cues + project facts
+(detected manifests/deps) and injects them into the run — labeled
+*runtime guidance, not user requirements*. The `skill` tool loads any
+other lens on demand. Guides inform judgment; they never add
+requirements, permissions, or scope. Bundled lenses: product-exploration,
+debugging (+ async/subprocess references), code-review (+ rust/python/
+typescript references), tui-quality, first-run-experience,
+release-verification.
+
 ## Missions
 
 `sui --mission` or `sui-mission` headless:

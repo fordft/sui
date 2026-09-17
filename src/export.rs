@@ -1167,7 +1167,11 @@ fn render_gate(m: &mut String, g: &Value) {
 
 fn cap(s: &str, n: usize) -> String {
     if s.len() > n {
-        format!("{}…<truncated by export>", &s[..n])
+        let mut i = n;
+        while !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        format!("{}…<truncated by export>", &s[..i])
     } else {
         s.to_string()
     }

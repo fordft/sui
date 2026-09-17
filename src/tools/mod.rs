@@ -83,6 +83,21 @@ pub fn schemas() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "skill",
+                "description": "Load an engineering guide by name from the lens list in the system prompt. Guides inform judgment; they add no requirements.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Lens name from the system prompt index" }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "web_fetch",
                 "description": "Fetch a webpage's content as markdown (public http(s) URLs only). Returns the page text plus retrieval timestamp; may be truncated.",
                 "parameters": {
@@ -176,6 +191,20 @@ pub async fn execute(
             Ok(ExecOut::plain(text, kind))
         }
         "bash" => bash::run(ctx, args, cancel, obs).await,
+        "skill" => {
+            let _ = (cancel, obs);
+            let n = args["name"].as_str().unwrap_or("").trim();
+            match crate::skills::get(n) {
+                Some(s) => Ok(ExecOut::plain(crate::skills::render(s), ExecKind::Success)),
+                None => Ok(ExecOut::plain(
+                    format!(
+                        "status: error\nerror: unknown lens '{n}' — available: {}",
+                        crate::skills::names().join(", ")
+                    ),
+                    ExecKind::Error,
+                )),
+            }
+        }
         "web_search" | "web_fetch" => {
             let _ = (cancel, obs);
             match &ctx.web {
@@ -193,5 +222,41 @@ pub async fn execute(
                 ExecKind::Error,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn skill_tool_loads_and_rejects_unknown() {
+        let ctx = super::ToolContext {
+            workspace: std::env::temp_dir(),
+            bash_timeout: std::time::Duration::from_secs(1),
+            bash_timeout_max: std::time::Duration::from_secs(2),
+            web: None,
+        };
+        let ok = super::execute(
+            &ctx,
+            "skill",
+            &serde_json::json!({"name": "debugging"}),
+            std::future::pending(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(ok.kind, super::ExecKind::Success));
+        assert!(ok.text.contains("Reproduce before diagnosing"));
+
+        let bad = super::execute(
+            &ctx,
+            "skill",
+            &serde_json::json!({"name": "alchemy"}),
+            std::future::pending(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(bad.kind, super::ExecKind::Error));
+        assert!(bad.text.contains("available"));
     }
 }

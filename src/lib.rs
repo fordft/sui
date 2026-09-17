@@ -11,6 +11,7 @@ pub mod journal;
 pub mod mission;
 pub mod permission;
 pub mod provider;
+pub mod skills;
 pub mod tools;
 pub mod tui;
 pub mod types;

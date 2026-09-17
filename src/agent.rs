@@ -41,6 +41,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "bash",
     "web_search",
     "web_fetch",
+    "skill",
 ];
 
 /// Result of an intercepted tool call (e.g. orchestrator plan submission).
@@ -100,6 +101,8 @@ pub struct Agent {
     system: String,
     /// AGENTS.md content for this workspace, if present — own segment.
     guidance: Option<String>,
+    /// Whether task-start lens guidance was already injected this run.
+    guided: bool,
     limits: Limits,
     ident: Identity,
     tool_schemas: Vec<Value>,
@@ -138,6 +141,7 @@ impl Agent {
             history: Vec::new(),
             system,
             guidance,
+            guided: false,
             limits,
             ident,
             tool_schemas,
@@ -230,10 +234,33 @@ impl Agent {
     }
 
     pub fn push_user(&mut self, user_input: &str) {
+        // First task of a run: select lenses from task cues + project
+        // facts and append the labeled guidance block — the original
+        // request stays verbatim above it.
+        let msg = if !self.guided {
+            self.guided = true;
+            let facts = crate::skills::facts(&self.tools.workspace);
+            let role = crate::skills::role_key(&self.ident.role);
+            let sel = crate::skills::select(user_input, &facts, role);
+            self.journal.log(
+                "guidance",
+                json!({
+                    "facts": facts,
+                    "skills": sel.iter().map(|s| s.name).collect::<Vec<_>>(),
+                }),
+            );
+            format!(
+                "{}{}",
+                user_input,
+                crate::skills::guidance_block(user_input, &facts, &sel)
+            )
+        } else {
+            user_input.to_string()
+        };
         self.history.push(Message::User {
-            content: user_input.to_string(),
+            content: msg.clone(),
         });
-        self.journal.log("user", json!({ "content": user_input }));
+        self.journal.log("user", json!({ "content": msg }));
     }
 
     /// Direct journal write for run-boundary evidence the agent loop does
@@ -823,6 +850,7 @@ fn summarize(name: &str, args: &str) -> String {
         "edit_file" => format!("edit {}", v["path"].as_str().unwrap_or("")),
         "web_search" => format!("web search: {}", v["query"].as_str().unwrap_or("")),
         "web_fetch" => format!("web fetch: {}", v["url"].as_str().unwrap_or("")),
+        "skill" => format!("lens: {}", v["name"].as_str().unwrap_or("")),
         _ => format!("{name} {args}"),
     }
 }

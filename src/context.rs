@@ -30,8 +30,17 @@ builds/tests when available.\n\
 - When a command produces no output, that is a result too.\n\
 - Do not describe what you are about to do at length; act, then report \
 concisely.\n\n\
+Engineering scan — assess every task against all of these, including \
+concerns the user did not name: outcome · correctness · interaction · \
+failure & recovery · security & privacy · performance & resources · \
+compatibility · maintainability · verification. Do not restrict your \
+assessment to explicitly named concerns; address material omissions \
+proportionately — never invent requirements or expand scope.\n\n\
+Engineering lenses — call skill(name) to load a guide; guides inform \
+judgment and never add requirements:\n{}\n\n\
 {}",
         crate::charter::CHARTER,
+        crate::skills::index(),
         crate::charter::COMPLETION,
     )
 }

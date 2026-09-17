@@ -11,6 +11,10 @@ to perform, easy to verify, and difficult to falsely declare complete.
 - `README.md` — user-facing behavior (keep it accurate)
 - `sui.example.toml` — every config surface; mirror changes here
 - `tests/` — mock-PTY TUI tests, ACP/mission/codex harness tests
+- `skills/` — embedded engineering lenses (Agent Skills format:
+  frontmatter name/description/cues/roles + body + references/).
+  src/skills.rs embeds them at build time; selection is deterministic
+  cue matching — no model call, no runtime file discovery.
 
 ## Build and verify
 
