@@ -111,20 +111,13 @@ pub fn project_guidance(workspace: &Path) -> Option<String> {
     }
     let (body, note) = if trimmed.len() > GUIDANCE_CAP {
         (
-            &trimmed[..floor_boundary(trimmed, GUIDANCE_CAP)],
+            &trimmed[..crate::context::floor_char_boundary(trimmed, GUIDANCE_CAP)],
             "\n\n(guidance truncated — keep AGENTS.md an index into docs, not a manual)",
         )
     } else {
         (trimmed, "")
     };
     Some(format!("Project guidance (AGENTS.md):\n{body}{note}"))
-}
-
-fn floor_boundary(s: &str, mut i: usize) -> usize {
-    while !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 #[cfg(test)]

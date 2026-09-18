@@ -450,7 +450,8 @@ fn control_agent(
 /// never a history dump.
 fn capsule(kind: &str, evidence: &str) -> String {
     let ev = if evidence.len() > 4000 {
-        format!("{}…<truncated>", &evidence[..4000])
+        let i = crate::context::floor_char_boundary(evidence, 4000);
+        format!("{}…<truncated>", &evidence[..i])
     } else {
         evidence.to_string()
     };
@@ -476,7 +477,8 @@ pub struct TaskOut {
 fn gate_rec(kind: &str, cmd: &str, cwd: &Path, out: &crate::tools::bash::ProcOut) -> Value {
     let tail = |s: &str| -> String {
         if s.len() > 4000 {
-            format!("{}…<truncated>", &s[..4000])
+            let i = crate::context::floor_char_boundary(s, 4000);
+            format!("{}…<truncated>", &s[..i])
         } else {
             s.to_string()
         }
@@ -1221,7 +1223,8 @@ async fn body(
         state!(S::Auditing);
         let diff = worktree::diff(&integ_wt, &base).unwrap_or_default();
         let diff = if diff.len() > 30_000 {
-            format!("{}…<truncated>", &diff[..30_000])
+            let i = crate::context::floor_char_boundary(&diff, 30_000);
+            format!("{}…<truncated>", &diff[..i])
         } else {
             diff
         };
@@ -1337,4 +1340,30 @@ async fn body(
         }),
     );
     Ok(Flow::Accepted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capsule_truncates_on_char_boundary() {
+        // '…' is 3 bytes; a cut inside it previously panicked.
+        let mut evidence = "x".repeat(3999);
+        evidence.push('…');
+        evidence.push_str(&"y".repeat(100));
+        let c = capsule("test-fail", &evidence);
+        assert!(c.contains("<truncated>"));
+        assert!(c.len() <= 4200);
+    }
+
+    #[test]
+    fn floor_char_boundary_never_splits_a_char() {
+        let s = "ab…cdé🙂z";
+        for i in 0..=s.len() {
+            let j = crate::context::floor_char_boundary(s, i);
+            assert!(s.is_char_boundary(j));
+            let _ = &s[..j];
+        }
+    }
 }

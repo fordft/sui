@@ -389,6 +389,7 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}...", &s[..n])
+        let i = crate::context::floor_char_boundary(s, n);
+        format!("{}...", &s[..i])
     }
 }

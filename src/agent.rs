@@ -80,15 +80,6 @@ impl Disp {
     }
 }
 
-/// Largest index ≤ i on a char boundary (stable replacement for the
-/// nightly `floor_char_boundary`).
-fn floor_char(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 /// One deterministic worker trajectory: append-only history, serialized
 /// tool execution, no planner. This same loop is the fast path and the
 /// mission-mode worker.
@@ -651,7 +642,8 @@ impl Agent {
                     status: disp.status,
                     exit: disp.exit,
                     result: if disp.text.len() > 8000 {
-                        format!("{}…", &disp.text[..floor_char(&disp.text, 8000)])
+                        let i = crate::context::floor_char_boundary(&disp.text, 8000);
+                        format!("{}…", &disp.text[..i])
                     } else {
                         disp.text.clone()
                     },

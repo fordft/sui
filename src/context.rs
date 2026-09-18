@@ -116,3 +116,13 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .sum::<usize>()
         / 4
 }
+
+/// Largest index ≤ `i` that falls on a UTF-8 char boundary of `s`.
+/// Use before every `&s[..n]` slice — command output, diffs, and web
+/// content carry arbitrary multibyte text.
+pub(crate) fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}

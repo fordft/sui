@@ -782,7 +782,10 @@ fn git_diff(ws: &Path, base: &str, head: &str, ctx: &mut Ctx) -> Value {
             let s = String::from_utf8_lossy(&o.stdout).to_string();
             if s.len() > 200_000 {
                 (
-                    format!("{}…<export truncated at 200KB>", &s[..200_000]),
+                    format!(
+                        "{}…<export truncated at 200KB>",
+                        &s[..crate::context::floor_char_boundary(&s, 200_000)]
+                    ),
                     true,
                 )
             } else {
@@ -1167,10 +1170,7 @@ fn render_gate(m: &mut String, g: &Value) {
 
 fn cap(s: &str, n: usize) -> String {
     if s.len() > n {
-        let mut i = n;
-        while !s.is_char_boundary(i) {
-            i -= 1;
-        }
+        let i = crate::context::floor_char_boundary(s, n);
         format!("{}…<truncated by export>", &s[..i])
     } else {
         s.to_string()

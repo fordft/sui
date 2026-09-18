@@ -751,7 +751,7 @@ async fn run_conn(a: ConnArgs) {
         } else {
             format!(
                 "{e:#}\nstderr: {}",
-                &tail[tail.len().saturating_sub(2000)..]
+                &tail[crate::context::floor_char_boundary(tail, tail.len().saturating_sub(2000))..]
             )
         };
         state.lock().unwrap().err = Some(msg.clone());
