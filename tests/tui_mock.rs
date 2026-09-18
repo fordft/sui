@@ -17,6 +17,7 @@ use sui::events::{GateChoice, UiEvent};
 use sui::mission::{self, MissionCfg};
 use sui::tui::app::{
     Act, App, AuthMode, Effect, Field, Modal, Mode, ProvForm, ProvType, Role, SettingsRow, Tab,
+    TextTarget,
 };
 use sui::tui::text::Buf;
 
@@ -2426,4 +2427,27 @@ fn mouse_click_input_focuses_not_nav() {
     let g = app.chat_geom.get();
     click(&mut app, g.x + 3, g.y + g.h - 1);
     assert!(app.nav, "transcript-area click enters nav");
+}
+
+/// Saving the web key must report what the keyring actually did — a
+/// dropped write error reads as "saved" and the key vanishes next
+/// launch with no explanation.
+#[test]
+fn web_key_save_reports_keyring_outcome() {
+    let repo = fixture_repo();
+    let mut app = App::with_state(repo.clone(), BTreeMap::new(), UiSettings::default());
+    // deterministic: no usable keyring → the session-only truth must be stated
+    app.keyring_ok = false;
+    app.modal = Some(Modal::Text {
+        title: "exa api key".into(),
+        buf: Buf::from("sekret"),
+        target: TextTarget::WebKey,
+    });
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.web_key.as_deref(), Some("sekret"));
+    assert!(
+        app.status.contains("session-only"),
+        "no-keyring save must say the key won't persist: {:?}",
+        app.status
+    );
 }

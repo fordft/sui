@@ -2354,18 +2354,27 @@ impl App {
                         }
                         TextTarget::WebKey => {
                             self.web_key = if v.is_empty() { None } else { Some(v) };
-                            if self.keyring_ok {
-                                if let Ok(e) = keyring::Entry::new("sui", "web") {
-                                    match &self.web_key {
-                                        Some(k) => {
-                                            let _ = e.set_password(k);
-                                        }
-                                        None => {
-                                            let _ = e.delete_credential();
-                                        }
+                            self.status = if !self.keyring_ok {
+                                "no OS keyring — key is session-only".to_string()
+                            } else {
+                                match keyring::Entry::new("sui", "web") {
+                                    Ok(e) => match &self.web_key {
+                                        Some(k) => match e.set_password(k) {
+                                            Ok(()) => "web key → OS keyring".to_string(),
+                                            Err(_) => "keyring write failed — key is session-only"
+                                                .to_string(),
+                                        },
+                                        None => match e.delete_credential() {
+                                            Ok(()) => "web key cleared".to_string(),
+                                            Err(_) => "keyring delete failed — old key may persist"
+                                                .to_string(),
+                                        },
+                                    },
+                                    Err(_) => {
+                                        "keyring unavailable — key is session-only".to_string()
                                     }
                                 }
-                            }
+                            };
                             self.rebuild_web();
                         }
                     }
