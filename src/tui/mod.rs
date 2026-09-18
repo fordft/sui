@@ -594,7 +594,14 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                     });
                 }
                 Effect::KeyringStore { profile, key } => {
-                    let _ = keyring::Entry::new("sui", &profile).and_then(|e| e.set_password(&key));
+                    // same feedback contract as SaveProfile — a silently
+                    // dropped failure reads as "key disappeared" next launch
+                    app.status = match keyring::Entry::new("sui", &profile)
+                        .and_then(|e| e.set_password(&key))
+                    {
+                        Ok(()) => format!("{profile}: key → OS keyring"),
+                        Err(_) => format!("{profile}: keyring write failed — key is session-only"),
+                    };
                 }
                 Effect::Clip(text) => {
                     // OSC52 → the local terminal's clipboard, works over
