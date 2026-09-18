@@ -186,8 +186,10 @@ async fn solo(
          Make the changes, verify they work, and reply with a one-line summary."
     ))
     .await?;
-    let changed = worktree::changed_files(&wt, &base).unwrap_or_default();
-    let sha = worktree::commit_all(&wt, journal_name).ok();
+    // git failures propagate — a failed diff/commit is an infrastructure
+    // error, not "the model changed nothing" (same contract as run_turn)
+    let changed = worktree::changed_files(&wt, &base).context("inspect worktree changes")?;
+    let sha = worktree::commit_all(&wt, journal_name).context("commit candidate changes")?;
     let mut usage = mission::UsageAgg::default();
     for line in std::fs::read_to_string(run_dir.join(format!("{journal_name}.jsonl")))
         .unwrap_or_default()
@@ -209,7 +211,7 @@ async fn solo(
         } else {
             format!("changed {} files", changed.len())
         },
-        candidate_sha: sha,
+        candidate_sha: Some(sha),
         external: vec![],
         ext_pass: None,
         control: mission::UsageAgg::default(),
