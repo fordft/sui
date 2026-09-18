@@ -1191,7 +1191,6 @@ async fn body(
                     });
                 }
                 match repair_task(cfg, rt, &contract, &out, &task_base).await {
-                    Ok(o2) if o2.ok => out = o2,
                     Ok(o2) => out = o2,
                     Err(e) => out.capsule = format!("{}\nrepair error: {e:#}", out.capsule),
                 }
