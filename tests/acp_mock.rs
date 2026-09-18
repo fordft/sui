@@ -726,3 +726,28 @@ async fn devin_acp_smoke() {
     s.shutdown().await;
     assert!(!s.err().is_some() || s.session_id().is_some());
 }
+
+#[tokio::test]
+async fn acp_model_refusal_is_journaled() {
+    let _g = lock().lock().unwrap();
+    // set_config_option rejected → journal must record applied:false,
+    // not silently show the requested model as fact.
+    let (s, c) = spawn(
+        "reject_model",
+        &[],
+        Gate::new(true),
+        None,
+        None,
+        Some("bogus".into()),
+    )
+    .await;
+    s.shutdown().await;
+    let evs = journal_lines(&c);
+    let m = evs
+        .iter()
+        .find(|e| e["type"] == "acp_model")
+        .expect("acp_model event journaled");
+    assert_eq!(m["data"]["applied"], false);
+    assert_eq!(m["data"]["requested"], "bogus");
+    assert!(m["data"]["error"].as_str().is_some());
+}

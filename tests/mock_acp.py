@@ -232,7 +232,10 @@ def main():
         elif method == "session/prompt":
             do_prompt(mid, params)
         elif method == "session/set_config_option":
-            respond(mid, {"configOptions": []})
+            if SCEN == "reject_model":
+                respond_err(mid, -32602, "unknown model value")
+            else:
+                respond(mid, {"configOptions": []})
         elif method == "session/cancel":
             if _pending_prompt is not None:
                 respond(_pending_prompt, {"stopReason": "cancelled"})

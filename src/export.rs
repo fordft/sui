@@ -394,6 +394,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 }
                 "task" => agent.timeline.push(tl(ts, "task", d.clone())),
                 "task_done" => agent.timeline.push(tl(ts, "task_done", d.clone())),
+                "acp_model" => agent.timeline.push(tl(ts, "acp_model", d.clone())),
                 "user" => agent.timeline.push(tl(ts, "user", d.clone())),
                 "assistant" => {
                     let mut d = d.clone();
@@ -1105,6 +1106,17 @@ fn render_event(m: &mut String, e: &Value) {
                 }
             }
             m.push('\n');
+        }
+        "acp_model" => {
+            m.push_str(&format!(
+                "<sub>acp model requested={} applied={}{}</sub>\n\n",
+                md_str(&d["requested"]),
+                d["applied"].as_bool().unwrap_or(false),
+                d["error"]
+                    .as_str()
+                    .map(|e| format!(" error={e}"))
+                    .unwrap_or_default(),
+            ));
         }
         "request" => {
             m.push_str(&format!(

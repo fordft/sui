@@ -219,7 +219,7 @@ impl AcpSession {
                 // env names only — values never leave the child
                 "env_names": env_names,
                 "env_refused": refused,
-                "model": spec.model,
+                "model_requested": spec.model,
             }),
         );
 
@@ -633,7 +633,7 @@ async fn run_conn(a: ConnArgs) {
                         o.category.as_ref(),
                         Some(agent_client_protocol::schema::v1::SessionConfigOptionCategory::Model)
                     )) {
-                        let _ = conn
+                        let r = conn
                             .send_request(SetSessionConfigOptionRequest::new(
                                 session_id.clone(),
                                 o.id.clone(),
@@ -641,6 +641,23 @@ async fn run_conn(a: ConnArgs) {
                             ))
                             .block_task()
                             .await;
+                        // Honest attribution: the journal records whether
+                        // the requested model applied — a refusal runs on
+                        // the agent's default, and consumers must see it.
+                        journal.lock().unwrap().log(
+                            "acp_model",
+                            json!({
+                                "requested": m,
+                                "applied": r.is_ok(),
+                                "error": r.as_ref().err().map(|e| format!("{e}")),
+                            }),
+                        );
+                        if let Err(e) = r {
+                            norm.lock().unwrap().phase(format!(
+                                "acp:{} model {m} refused ({e}) — agent default",
+                                spec.name
+                            ));
+                        }
                     }
                 }
 
