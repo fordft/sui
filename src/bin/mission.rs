@@ -199,15 +199,7 @@ async fn solo(
         if e["type"] != "request" {
             continue;
         }
-        usage.requests += 1;
-        let u = &e["data"]["usage"];
-        if u["complete"] == true {
-            usage.telemetry_known += 1;
-        }
-        usage.input += u["input_tokens"].as_u64().unwrap_or(0);
-        usage.cache_read += u["cache_read_tokens"].as_u64().unwrap_or(0);
-        usage.cache_write += u["cache_write_tokens"].as_u64().unwrap_or(0);
-        usage.output += u["output_tokens"].as_u64().unwrap_or(0);
+        usage.add_journal(&e["data"]["usage"]);
     }
     Ok(TrialRow {
         strategy: journal_name.to_string(),

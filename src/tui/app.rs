@@ -1360,15 +1360,7 @@ impl App {
                     .entry(agent)
                     .or_insert_with(|| (model.clone(), UsageAgg::default()));
                 ent.0 = model;
-                let u = &mut ent.1;
-                u.requests += 1;
-                if complete {
-                    u.telemetry_known += 1;
-                }
-                u.input += input.unwrap_or(0);
-                u.cache_read += cached.unwrap_or(0);
-                u.cache_write += written.unwrap_or(0);
-                u.output += output.unwrap_or(0);
+                ent.1.add(complete, input, cached, written, output);
             }
             UiEvent::Permission {
                 id,

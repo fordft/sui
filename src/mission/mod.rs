@@ -90,6 +90,40 @@ pub struct UsageAgg {
     pub telemetry_known: u64,
 }
 
+impl UsageAgg {
+    /// Fold one request's usage. Missing counts fold to 0 — the
+    /// unknown-vs-zero rule lives here once; `telemetry_known` is what
+    /// gates "0" from being read as "the provider reported zero".
+    pub fn add(
+        &mut self,
+        complete: bool,
+        input: Option<u64>,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+        output: Option<u64>,
+    ) {
+        self.requests += 1;
+        if complete {
+            self.telemetry_known += 1;
+        }
+        self.input += input.unwrap_or(0);
+        self.cache_read += cache_read.unwrap_or(0);
+        self.cache_write += cache_write.unwrap_or(0);
+        self.output += output.unwrap_or(0);
+    }
+
+    /// Fold a journal `request` event's `data.usage` object.
+    pub fn add_journal(&mut self, u: &serde_json::Value) {
+        self.add(
+            u["complete"] == true,
+            u["input_tokens"].as_u64(),
+            u["cache_read_tokens"].as_u64(),
+            u["cache_write_tokens"].as_u64(),
+            u["output_tokens"].as_u64(),
+        );
+    }
+}
+
 pub struct MissionReport {
     pub outcome: String,
     pub plan: Option<MissionPlan>,
@@ -913,20 +947,12 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
                 continue;
             }
             let role = e["data"]["role"].as_str().unwrap_or("");
-            let u = &e["data"]["usage"];
             let agg = if role == "worker" {
                 &mut report.worker_usage
             } else {
                 &mut report.control_usage
             };
-            agg.requests += 1;
-            if u["complete"] == true {
-                agg.telemetry_known += 1;
-            }
-            agg.input += u["input_tokens"].as_u64().unwrap_or(0);
-            agg.cache_read += u["cache_read_tokens"].as_u64().unwrap_or(0);
-            agg.cache_write += u["cache_write_tokens"].as_u64().unwrap_or(0);
-            agg.output += u["output_tokens"].as_u64().unwrap_or(0);
+            agg.add_journal(&e["data"]["usage"]);
         }
     }
     report.elapsed_ms = t0.elapsed().as_millis();
@@ -1379,6 +1405,21 @@ mod tests {
         let c = capsule("test-fail", &evidence);
         assert!(c.contains("<truncated>"));
         assert!(c.len() <= 4200);
+    }
+
+    #[test]
+    fn usage_agg_enforces_unknown_vs_zero_once() {
+        let mut a = UsageAgg::default();
+        a.add_journal(&json!({
+            "complete": true, "input_tokens": 10,
+            "cache_read_tokens": 5, "output_tokens": 3
+        }));
+        a.add_journal(&json!({"complete": false})); // unknown → 0, not "known zero"
+        assert_eq!(a.requests, 2);
+        assert_eq!(a.telemetry_known, 1);
+        assert_eq!(a.input, 10);
+        assert_eq!(a.cache_read, 5);
+        assert_eq!(a.output, 3);
     }
 
     #[test]
