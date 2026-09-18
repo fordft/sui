@@ -511,13 +511,29 @@ pub fn load_ui() -> UiSettings {
         .unwrap_or_default()
 }
 
+/// Read+parse the config for rewriting. A missing file is a legitimate
+/// first write → empty table. A file that exists but does NOT parse is
+/// an error — overwriting would silently delete every other section,
+/// including persisted API keys.
+fn load_doc_for_write(p: &Path) -> Result<toml::Value> {
+    match std::fs::read_to_string(p) {
+        Ok(s) => s.parse::<toml::Value>().with_context(|| {
+            format!(
+                "config at {} does not parse — refusing to overwrite; fix or remove it manually",
+                p.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml::Value::Table(toml::value::Table::new()))
+        }
+        Err(e) => Err(e).with_context(|| format!("read {}", p.display())),
+    }
+}
+
 /// Write the [ui] section, preserving every other table in the file.
 pub fn save_ui(ui: &UiSettings) -> Result<()> {
     let p = global_path()?;
-    let mut doc: toml::Value = std::fs::read_to_string(&p)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    let mut doc = load_doc_for_write(&p)?;
     doc.as_table_mut()
         .context("config root not a table")?
         .insert(
@@ -554,10 +570,7 @@ pub fn save_profile_at(
     key_env: Option<&str>,
     api_key: Option<&str>,
 ) -> Result<()> {
-    let mut doc: toml::Value = std::fs::read_to_string(p)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    let mut doc = load_doc_for_write(p)?;
     let root = doc.as_table_mut().context("config root not a table")?;
     let profs = root
         .entry("profiles")
@@ -589,7 +602,7 @@ pub fn save_profile_at(
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(&p, toml::to_string_pretty(&doc)?)?;
+    std::fs::write(p, toml::to_string_pretty(&doc)?)?;
     Ok(())
 }
 
@@ -598,4 +611,36 @@ fn unix_ts() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_refuses_to_overwrite_unparseable_config() {
+        // Regression: a hand-edit typo used to be silently overwritten,
+        // deleting every other section including inline API keys.
+        let dir = std::env::temp_dir().join(format!("sui-cfgtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        let garbage = "[profiles.x\napi_key = \"sk-keepme\"";
+        std::fs::write(&p, garbage).unwrap();
+
+        let r = save_profile_at(&p, "y", "http://x", "m", None, None);
+        assert!(r.is_err());
+        assert!(format!("{:#}", r.unwrap_err()).contains("refusing to overwrite"));
+        // file untouched — the typo'd content survives for manual repair
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), garbage);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_writes_when_file_missing() {
+        let dir = std::env::temp_dir().join(format!("sui-cfgtest2-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        save_profile_at(&p, "y", "http://x", "m", None, None).unwrap();
+        assert!(std::fs::read_to_string(&p).unwrap().contains("profiles"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
