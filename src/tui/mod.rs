@@ -105,6 +105,7 @@ pub fn spawn_solo(
     let (tx, mut rx) = unbounded_channel::<(u64, String)>();
     let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
     let workspace_for_log = workspace.display().to_string();
+    let al = crate::config::agent_limits(&workspace);
     tokio::spawn(async move {
         let mut agent = Agent::new(
             Provider::new(
@@ -115,8 +116,8 @@ pub fn spawn_solo(
             ),
             ToolContext {
                 workspace,
-                bash_timeout: Duration::from_secs(120),
-                bash_timeout_max: Duration::from_secs(600),
+                bash_timeout: Duration::from_millis(al.bash_timeout_ms),
+                bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
                 web,
             },
             Gate::new(false), // approvals via modal; session flag is live
@@ -132,10 +133,10 @@ pub fn spawn_solo(
                 }
             },
             Limits {
-                max_turns: 60,
-                context_budget: 120_000,
-                context_reserve: 8_192,
-                request_timeout: Duration::from_secs(300),
+                max_turns: al.max_turns,
+                context_budget: al.context_token_budget,
+                context_reserve: al.context_reserve_tokens,
+                request_timeout: Duration::from_millis(al.request_timeout_ms),
             },
             Identity {
                 session_id: format!("tui-{}", std::process::id()),
@@ -433,6 +434,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                             .and_then(|n| resolve_to_backend(&app, &n));
                         match (control, worker) {
                             (Some(control), Some(worker)) => {
+                                let al = config::agent_limits(&workspace);
                                 let cfg = mission::MissionCfg {
                                     repo: workspace.clone(),
                                     run_dir: jdir.clone(),
@@ -443,12 +445,12 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                                     max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
                                     session: format!("tui-{}", std::process::id()),
                                     keep_worktrees: false, // accepted branch survives cleanup
-                                    request_timeout: Duration::from_secs(300),
+                                    request_timeout: Duration::from_millis(al.request_timeout_ms),
                                     task_timeout: Duration::from_secs(900),
-                                    context_budget: 120_000,
-                                    context_reserve: 8_192,
-                                    control_max_turns: 40,
-                                    worker_max_turns: 50,
+                                    context_budget: al.context_token_budget,
+                                    context_reserve: al.context_reserve_tokens,
+                                    control_max_turns: al.max_turns,
+                                    worker_max_turns: al.max_turns,
                                     events: Some(ev_tx.clone()),
                                     cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
                                     session_approve: Some(app.auto.clone()),

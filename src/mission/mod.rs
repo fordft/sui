@@ -162,6 +162,9 @@ fn mk_agent(
     budget: usize,
     reserve: usize,
 ) -> Result<Agent> {
+    // [agent] bash timeouts resolve against the source repo, not the
+    // worktree — sui.toml precedence still applies via cfg.repo.
+    let bash_ms = crate::config::agent_limits(&cfg.repo);
     let mut a = Agent::new(
         Provider::new(
             &prof.base_url,
@@ -171,8 +174,8 @@ fn mk_agent(
         ),
         ToolContext {
             workspace: workspace.to_path_buf(),
-            bash_timeout: Duration::from_secs(120),
-            bash_timeout_max: Duration::from_secs(600),
+            bash_timeout: Duration::from_millis(bash_ms.bash_timeout_ms),
+            bash_timeout_max: Duration::from_millis(bash_ms.bash_timeout_max_ms),
             web: cfg.web.clone(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply

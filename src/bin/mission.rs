@@ -146,6 +146,7 @@ async fn solo(
     let wt = worktree::worktrees_dir(run_dir).join(journal_name);
     let branch = format!("sui-{journal_name}-{session}");
     worktree::add(env, &wt, &branch, &base)?;
+    let al = sui::config::agent_limits(env);
     let mut a = Agent::new(
         Provider::new(
             &prof.base_url,
@@ -155,17 +156,17 @@ async fn solo(
         ),
         ToolContext {
             workspace: wt.clone(),
-            bash_timeout: Duration::from_secs(120),
-            bash_timeout_max: Duration::from_secs(600),
+            bash_timeout: Duration::from_millis(al.bash_timeout_ms),
+            bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
             web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
         },
         Gate::new(true),
         Journal::open_named(run_dir, journal_name)?,
         Limits {
-            max_turns: 60,
-            context_budget: 120_000,
-            context_reserve: 8_192,
-            request_timeout: Duration::from_secs(300),
+            max_turns: al.max_turns,
+            context_budget: al.context_token_budget,
+            context_reserve: al.context_reserve_tokens,
+            request_timeout: Duration::from_millis(al.request_timeout_ms),
         },
         Identity {
             session_id: session.to_string(),
@@ -357,29 +358,32 @@ async fn main() -> Result<()> {
         eprintln!("  warning: --compare without --acceptance has no independent yardstick");
     }
 
-    let mission_cfg = |env: &Path, rd: &Path, sess: &str| mission::MissionCfg {
-        repo: env.to_path_buf(),
-        run_dir: rd.to_path_buf(),
-        control: control.clone(),
-        worker: worker.clone(),
-        auditor: auditor.clone(),
-        objective: cli.task.clone(),
-        max_workers,
-        session: sess.to_string(),
-        keep_worktrees: true, // compare envs are disposable; keep candidates
-        request_timeout: Duration::from_secs(300),
-        task_timeout: Duration::from_secs(900),
-        context_budget: 120_000,
-        context_reserve: 8_192,
-        control_max_turns: 40,
-        worker_max_turns: 50,
-        events: None,
-        cancel: None,
-        session_approve: None,
-        web: Some(sui::web::WebService::new(sui::web::load_cfg(
-            cli.config.as_deref(),
-        ))),
-        run: 1,
+    let mission_cfg = |env: &Path, rd: &Path, sess: &str| {
+        let al = sui::config::agent_limits(env);
+        mission::MissionCfg {
+            repo: env.to_path_buf(),
+            run_dir: rd.to_path_buf(),
+            control: control.clone(),
+            worker: worker.clone(),
+            auditor: auditor.clone(),
+            objective: cli.task.clone(),
+            max_workers,
+            session: sess.to_string(),
+            keep_worktrees: true, // compare envs are disposable; keep candidates
+            request_timeout: Duration::from_millis(al.request_timeout_ms),
+            task_timeout: Duration::from_secs(900),
+            context_budget: al.context_token_budget,
+            context_reserve: al.context_reserve_tokens,
+            control_max_turns: al.max_turns,
+            worker_max_turns: al.max_turns,
+            events: None,
+            cancel: None,
+            session_approve: None,
+            web: Some(sui::web::WebService::new(sui::web::load_cfg(
+                cli.config.as_deref(),
+            ))),
+            run: 1,
+        }
     };
 
     let mut rows: Vec<TrialRow> = vec![];

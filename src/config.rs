@@ -121,6 +121,73 @@ struct AgentCfg {
     context_reserve_tokens: Option<usize>,
 }
 
+/// Resolved `[agent]` limits — the values every launcher sources
+/// instead of re-typing literals.
+#[derive(Debug, Clone)]
+pub struct AgentLimits {
+    pub max_turns: usize,
+    pub bash_timeout_ms: u64,
+    pub bash_timeout_max_ms: u64,
+    pub request_timeout_ms: u64,
+    pub context_token_budget: usize,
+    pub context_reserve_tokens: usize,
+}
+
+/// flagged --config > project sui.toml > global config > defaults —
+/// the single resolution `load` and `agent_limits` both use.
+fn resolve_limits(fa: &AgentCfg, pa: &AgentCfg, ga: &AgentCfg) -> AgentLimits {
+    AgentLimits {
+        max_turns: fa.max_turns.or(pa.max_turns).or(ga.max_turns).unwrap_or(60),
+        bash_timeout_ms: fa
+            .bash_timeout_ms
+            .or(pa.bash_timeout_ms)
+            .or(ga.bash_timeout_ms)
+            .unwrap_or(120_000),
+        bash_timeout_max_ms: fa
+            .bash_timeout_max_ms
+            .or(pa.bash_timeout_max_ms)
+            .or(ga.bash_timeout_max_ms)
+            .unwrap_or(600_000),
+        request_timeout_ms: fa
+            .request_timeout_ms
+            .or(pa.request_timeout_ms)
+            .or(ga.request_timeout_ms)
+            .unwrap_or(300_000),
+        context_token_budget: fa
+            .context_token_budget
+            .or(pa.context_token_budget)
+            .or(ga.context_token_budget)
+            .unwrap_or(120_000),
+        context_reserve_tokens: fa
+            .context_reserve_tokens
+            .or(pa.context_reserve_tokens)
+            .or(ga.context_reserve_tokens)
+            .unwrap_or(8_192),
+    }
+}
+
+/// `[agent]` limits for a workspace — project sui.toml over global
+/// config, the same precedence `load` uses minus a --config flag file
+/// (launchers that don't take one). Read/parse failures default, the
+/// same way load_ui does.
+pub fn agent_limits(workspace: &Path) -> AgentLimits {
+    let ga = global_cfg_path()
+        .filter(|p| p.exists())
+        .and_then(|p| read_toml(&p).ok())
+        .and_then(|f| f.agent)
+        .unwrap_or_default();
+    let project_path = workspace.join("sui.toml");
+    let pa = if project_path.exists() {
+        read_toml(&project_path)
+            .ok()
+            .and_then(|f| f.agent)
+            .unwrap_or_default()
+    } else {
+        AgentCfg::default()
+    };
+    resolve_limits(&AgentCfg::default(), &pa, &ga)
+}
+
 pub struct Overrides {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -407,32 +474,7 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .or(pp.prompt_cache_key)
         .or(gp.prompt_cache_key);
 
-    let max_turns = fa.max_turns.or(pa.max_turns).or(ga.max_turns).unwrap_or(60);
-    let bash_timeout_ms = fa
-        .bash_timeout_ms
-        .or(pa.bash_timeout_ms)
-        .or(ga.bash_timeout_ms)
-        .unwrap_or(120_000);
-    let bash_timeout_max_ms = fa
-        .bash_timeout_max_ms
-        .or(pa.bash_timeout_max_ms)
-        .or(ga.bash_timeout_max_ms)
-        .unwrap_or(600_000);
-    let request_timeout_ms = fa
-        .request_timeout_ms
-        .or(pa.request_timeout_ms)
-        .or(ga.request_timeout_ms)
-        .unwrap_or(300_000);
-    let context_token_budget = fa
-        .context_token_budget
-        .or(pa.context_token_budget)
-        .or(ga.context_token_budget)
-        .unwrap_or(120_000);
-    let context_reserve_tokens = fa
-        .context_reserve_tokens
-        .or(pa.context_reserve_tokens)
-        .or(ga.context_reserve_tokens)
-        .unwrap_or(8_192);
+    let al = resolve_limits(&fa, &pa, &ga);
 
     let session_id = format!("{}-{}", unix_ts(), std::process::id());
     let run_dir = std::env::home_dir()
@@ -455,12 +497,12 @@ pub fn load(ov: Overrides) -> Result<Config> {
                 .or(pa.auto_approve)
                 .or(ga.auto_approve)
                 .unwrap_or(false),
-        max_turns,
-        bash_timeout_ms,
-        bash_timeout_max_ms,
-        request_timeout_ms,
-        context_token_budget,
-        context_reserve_tokens,
+        max_turns: al.max_turns,
+        bash_timeout_ms: al.bash_timeout_ms,
+        bash_timeout_max_ms: al.bash_timeout_max_ms,
+        request_timeout_ms: al.request_timeout_ms,
+        context_token_budget: al.context_token_budget,
+        context_reserve_tokens: al.context_reserve_tokens,
     })
 }
 
@@ -641,6 +683,27 @@ mod tests {
         let p = dir.join("config.toml");
         save_profile_at(&p, "y", "http://x", "m", None, None).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("profiles"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod agent_limit_tests {
+    use super::*;
+
+    #[test]
+    fn agent_limits_reads_project_sui_toml() {
+        let dir = std::env::temp_dir().join(format!("sui-al-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sui.toml"),
+            "[agent]\nmax_turns = 7\ncontext_token_budget = 999\n",
+        )
+        .unwrap();
+        let al = agent_limits(&dir);
+        // project sui.toml beats global/defaults for set keys
+        assert_eq!(al.max_turns, 7);
+        assert_eq!(al.context_token_budget, 999);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
