@@ -635,3 +635,26 @@ async fn mission_export_report() {
     // secrets never appear
     assert!(!md.contains("api_key"));
 }
+
+#[tokio::test]
+async fn mission_setup_failure_still_sends_run_done() {
+    // Regression: mission::run errors used to be dropped by the TUI's
+    // `let _ = run(cfg)` spawn — the UI hung in 'running'. RunDone must
+    // arrive on every exit path.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let blocker = std::env::temp_dir().join(format!("sui-mblock-{}", std::process::id()));
+    std::fs::write(&blocker, b"x").unwrap();
+    let mut c = cfg(1, &blocker);
+    c.run_dir = blocker.join("sub"); // create_dir_all fails: parent is a file
+    c.events = Some(tx);
+    let res = mission::run(c).await;
+    assert!(res.is_err());
+    let mut saw_done = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, sui::events::UiEvent::RunDone { .. }) {
+            saw_done = true;
+        }
+    }
+    assert!(saw_done, "RunDone missing on setup failure");
+    let _ = std::fs::remove_file(&blocker);
+}

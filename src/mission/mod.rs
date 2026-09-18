@@ -798,6 +798,28 @@ async fn audit_once(
 }
 
 pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
+    // Invariant: RunDone reaches event consumers on EVERY exit path —
+    // setup errors, body errors, cancellation, success. The TUI's
+    // running flag and any future consumer hang without it.
+    let res = run_inner(&cfg).await;
+    if let Err(e) = &res {
+        if let Some(tx) = &cfg.events {
+            let _ = tx.send(crate::events::UiEvent::Error {
+                run: cfg.run,
+                agent: "mission".into(),
+                msg: format!("{e:#}"),
+            });
+            let _ = tx.send(crate::events::UiEvent::RunDone {
+                run: cfg.run,
+                outcome: format!("error: {e:#}"),
+                accepted_sha: None,
+            });
+        }
+    }
+    res
+}
+
+async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
     let t0 = Instant::now();
     let mut journal = Journal::open_named(&cfg.run_dir, "mission")?;
     std::fs::create_dir_all(worktree::worktrees_dir(&cfg.run_dir))?;
@@ -834,24 +856,26 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     // scoped so the body's borrows release before report finalization
     let mut cancelled = false;
     let flow = {
-        let body = body(&cfg, &rt, &mut report, &mut journal);
+        let body = body(cfg, &rt, &mut report, &mut journal);
         tokio::pin!(body);
         let n = cfg.cancel.as_ref().map(|(n, _)| n.clone());
         tokio::select! {
-            r = &mut body => r?,
+            r = &mut body => r,
             _ = tokio::signal::ctrl_c() => {
                 cancelled = true;
-                Flow::Failed("cancelled".into())
+                Ok(Flow::Failed("cancelled".into()))
             }
             _ = async move { if let Some(n) = n { n.notified().await } else { std::future::pending().await } } => {
                 if let Some((_, f)) = &cfg.cancel { f.store(true, Ordering::Relaxed); }
                 cancelled = true;
-                Flow::Failed("cancelled".into())
+                Ok(Flow::Failed("cancelled".into()))
             }
         }
     };
-    // bounded teardown: protocol cancel → close → process-tree kill
+    // bounded teardown: protocol cancel → close → process-tree kill —
+    // runs before a body error propagates so agents never leak
     rt.shutdown_all().await;
+    let flow = flow?;
     if cancelled {
         journal.log("mission", json!({ "state": format!("{:?}", S::Cancelled) }));
         if cfg.events.is_none() {
