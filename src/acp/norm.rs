@@ -46,10 +46,7 @@ pub struct Norm {
 
 fn clip(s: &str, cap: usize) -> String {
     if s.len() > cap {
-        let mut end = cap.min(s.len());
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = crate::context::floor_char_boundary(s, cap.min(s.len()));
         format!("{}…<truncated>", &s[..end])
     } else {
         s.to_string()

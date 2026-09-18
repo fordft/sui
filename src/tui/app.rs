@@ -582,15 +582,6 @@ fn norm_sel(a: (usize, usize), b: (usize, usize)) -> (usize, usize, usize, usize
     }
 }
 
-/// Largest index ≤ i on a char boundary (same as agent::floor_char —
-/// duplicated here because the live-preview cap trims by bytes).
-fn floor_char(s: &str, mut i: usize) -> usize {
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 /// Wall-clock HH:MM UTC label for chat items — dim, and honest about TZ.
 pub fn now_hm() -> String {
     let secs = std::time::SystemTime::now()
@@ -1274,7 +1265,10 @@ impl App {
                     if let Act::Tool { live, .. } = &mut items[i] {
                         live.push_str(&text);
                         if live.len() > Self::LIVE_CAP {
-                            let start = floor_char(live, live.len() - Self::LIVE_CAP);
+                            let start = crate::context::floor_char_boundary(
+                                live,
+                                live.len() - Self::LIVE_CAP,
+                            );
                             live.drain(..start);
                         }
                     }
