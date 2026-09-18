@@ -4,6 +4,14 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Event-type names are an implicit contract between writers (tui,
+/// mission, headless) and readers (export, --latest). Centralize the
+/// ones that must match so a fourth writer can't drift.
+pub mod ev {
+    /// Run-level metadata: mode, workspace, sui_version, approval.
+    pub const SESSION: &str = "session";
+}
+
 /// Append-only event journal. Lives outside the repo so writes never
 /// perturb the repository epoch fingerprint.
 pub struct Journal {

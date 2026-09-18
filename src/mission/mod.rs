@@ -801,7 +801,7 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
     let t0 = Instant::now();
     let mut journal = Journal::open_named(&cfg.run_dir, "mission")?;
     std::fs::create_dir_all(worktree::worktrees_dir(&cfg.run_dir))?;
-    journal.log("session", json!({
+    journal.log(crate::journal::ev::SESSION, json!({
         "mode": "mission",
         "workspace": cfg.repo,
         "sui_version": env!("CARGO_PKG_VERSION"),

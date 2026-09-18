@@ -158,13 +158,16 @@ async fn main() -> Result<()> {
         eprintln!("warning: no API key set (SUI_API_KEY / OPENAI_API_KEY)");
     }
 
-    let mut journal = journal::Journal::open(&cfg.run_dir)?;
+    let mut journal = journal::Journal::open_named(&cfg.run_dir, "headless")?;
     journal.log(
-        "session_start",
+        journal::ev::SESSION,
         serde_json::json!({
+            "mode": "headless",
+            "workspace": cfg.workspace,
+            "sui_version": env!("CARGO_PKG_VERSION"),
+            "approval": if cfg.auto_approve { "auto" } else { "ask" },
             "model": cfg.model,
             "base_url": cfg.base_url,
-            "workspace": cfg.workspace,
         }),
     );
 

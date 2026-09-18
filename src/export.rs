@@ -133,7 +133,7 @@ fn recorded_workspace(dir: &Path) -> Option<String> {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if v["type"] == "session" {
+                if v["type"] == crate::journal::ev::SESSION {
                     if let Some(w) = v["data"]["workspace"].as_str() {
                         return Some(w.to_string());
                     }
@@ -384,7 +384,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
             let ts = e["ts_unix"].as_u64().unwrap_or(0);
             let d = &e["data"];
             match e["type"].as_str().unwrap_or("") {
-                "session" => {
+                crate::journal::ev::SESSION => {
                     // run-level metadata — goes to the overview, not an
                     // agent timeline (mission.jsonl would otherwise render
                     // as a phantom zero-request agent)
@@ -1124,7 +1124,7 @@ fn render_event(m: &mut String, e: &Value) {
                 cap(&serde_json::to_string(d).unwrap_or_default(), 600)
             ));
         }
-        "session" => {}
+        crate::journal::ev::SESSION => {}
         _ => {}
     }
 }

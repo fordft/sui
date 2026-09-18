@@ -292,3 +292,36 @@ fn latest_picks_matching_workspace() {
     let p = run_export(&o).unwrap();
     assert!(p.to_string_lossy().contains("tui-new-1"), "{p:?}");
 }
+
+#[test]
+fn headless_journal_exports_session() {
+    // Regression: headless used to journal `session_start`, which no
+    // reader recognised — exports always carried "no session event".
+    let root = fixture_dir("headless");
+    let runs = root.join("runs");
+    let out = root.join("exports");
+    let run = runs.join("run-h1");
+    std::fs::create_dir_all(&run).unwrap();
+    write_journal(
+        &run,
+        "headless",
+        &[
+            jline(
+                "session",
+                json!({"mode":"headless","workspace":"/w","sui_version":"x","approval":"auto"}),
+            ),
+            jline("user", json!({"content":"go"})),
+        ],
+    );
+    let p = run_export(&opts(&runs, &out, "run-h1")).unwrap();
+    let md = std::fs::read_to_string(&p).unwrap();
+    assert!(!md.contains("no session event"), "{md}");
+    assert!(md.contains("headless"));
+
+    // --latest must be able to match a headless run by workspace.
+    let mut o = opts(&runs, &out, "");
+    o.run_id = None;
+    o.latest_for_workspace = Some(PathBuf::from("/w"));
+    let p = run_export(&o).unwrap();
+    assert!(p.to_string_lossy().contains("run-h1"), "{p:?}");
+}

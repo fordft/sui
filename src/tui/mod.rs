@@ -152,7 +152,7 @@ pub fn spawn_solo(
         agent.set_quiet(true);
         agent.wire_ui(sink.clone(), cancel, flag.clone(), Some(session.clone()));
         agent.jlog(
-            "session",
+            crate::journal::ev::SESSION,
             serde_json::json!({
                 "mode": "solo",
                 "workspace": workspace_for_log,
