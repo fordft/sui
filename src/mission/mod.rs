@@ -729,6 +729,63 @@ async fn escalate(
     }
 }
 
+/// Outcome of one escalate → respawn round. Callers map each arm to
+/// their own terminal message — abort and escalation-session error are
+/// always distinct from "still failing".
+enum Esc {
+    /// Respawned contract passed — its output.
+    Recovered(TaskOut),
+    /// Orchestrator declined to retry.
+    Aborted,
+    /// Respawn still failed (or failed to launch).
+    StillFailing,
+}
+
+/// The shared half of both escalation paths: decrements the budget,
+/// bumps the escalation counter, emits the phase line, and on success
+/// journals the ok_after_escalation record + TaskRows update.
+/// Err = escalation-session error (never a merge conflict).
+#[allow(clippy::too_many_arguments)]
+async fn escalate_and_respawn(
+    cfg: &MissionCfg,
+    rt: &MissionRt,
+    report: &mut MissionReport,
+    contract: &TaskContract,
+    out: &TaskOut,
+    escalations_left: &mut usize,
+    base: &str,
+    integ_branch: &str,
+) -> Result<Esc> {
+    *escalations_left -= 1;
+    report.escalations += 1;
+    if let Some(tx) = &cfg.events {
+        let why = out.capsule.lines().take(2).collect::<Vec<_>>().join(" ");
+        let _ = tx.send(crate::events::UiEvent::Phase {
+            run: cfg.run,
+            agent: "mission".into(),
+            text: format!("escalating {} to control — {}", contract.id, why),
+        });
+    }
+    let Some(newc) = escalate(cfg, rt, contract, out, *escalations_left).await? else {
+        return Ok(Esc::Aborted);
+    };
+    match spawn_task(cfg, rt, &newc, base, integ_branch)
+        .await
+        .map_err(|e| e.to_string())
+    {
+        Ok(o) if o.ok => {
+            report.tasks.push(json!({
+                "id": newc.id, "status": "ok_after_escalation",
+                "sha": o.sha, "changed": o.changed }));
+            if let Some(tx) = &cfg.events {
+                let _ = tx.send(crate::events::UiEvent::TaskRows(json!(report.tasks)));
+            }
+            Ok(Esc::Recovered(o))
+        }
+        _ => Ok(Esc::StillFailing),
+    }
+}
+
 /// Merge all task branches into integration, run integration checks.
 async fn integrate_all(integ_wt: &Path, branches: &[String], plan: &MissionPlan) -> Result<()> {
     for b in branches {
@@ -1146,42 +1203,26 @@ async fn body(
                         contract.id
                     ));
                 }
-                escalations_left -= 1;
-                report.escalations += 1;
-                if let Some(tx) = &cfg.events {
-                    let why = out.capsule.lines().take(2).collect::<Vec<_>>().join(" ");
-                    let _ = tx.send(crate::events::UiEvent::Phase {
-                        run: cfg.run,
-                        agent: "mission".into(),
-                        text: format!("escalating {} to control — {}", contract.id, why),
-                    });
-                }
-                match escalate(cfg, rt, &contract, &out, escalations_left).await {
-                    Ok(Some(newc)) => {
-                        let r2 = spawn_task(cfg, rt, &newc, &base, &integ_branch)
-                            .await
-                            .map_err(|e| e.to_string());
-                        match r2 {
-                            Ok(o3) if o3.ok => {
-                                out = o3;
-                                report.tasks.push(json!({
-                                    "id": newc.id, "status": "ok_after_escalation",
-                                    "sha": out.sha, "changed": out.changed }));
-                                if let Some(tx) = &cfg.events {
-                                    let _ = tx.send(crate::events::UiEvent::TaskRows(json!(
-                                        report.tasks
-                                    )));
-                                }
-                            }
-                            _ => fail!(format!(
-                                "task {} still failed after escalation",
-                                contract.id
-                            )),
-                        }
-                    }
-                    Ok(None) => {
+                match escalate_and_respawn(
+                    cfg,
+                    rt,
+                    report,
+                    &contract,
+                    &out,
+                    &mut escalations_left,
+                    &base,
+                    &integ_branch,
+                )
+                .await
+                {
+                    Ok(Esc::Recovered(o3)) => out = o3,
+                    Ok(Esc::Aborted) => {
                         fail!(format!("orchestrator aborted on task {}", contract.id))
                     }
+                    Ok(Esc::StillFailing) => fail!(format!(
+                        "task {} still failed after escalation",
+                        contract.id
+                    )),
                     Err(e) => fail!(format!("escalation error: {e:#}")),
                 }
             } else {
@@ -1213,33 +1254,30 @@ async fn body(
                     ..out
                 };
                 if escalations_left > 0 {
-                    escalations_left -= 1;
-                    report.escalations += 1;
-                    match escalate(cfg, rt, &contract, &conflict_out, escalations_left).await {
-                        Ok(Some(newc)) => {
-                            let r3 = spawn_task(cfg, rt, &newc, &base, &integ_branch)
-                                .await
-                                .map_err(|e| e.to_string());
-                            match r3 {
-                                Ok(o4) if o4.ok => {
-                                    worktree::merge(&integ_wt, &o4.branch).map_err(|e2| {
-                                        anyhow::anyhow!("merge after escalation: {e2:#}")
-                                    })?;
-                                    merged.push(o4.branch.clone());
-                                    report.tasks.push(json!({
-                                        "id": newc.id,
-                                        "status": "ok_after_escalation",
-                                        "sha": o4.sha, "changed": o4.changed }));
-                                    if let Some(tx) = &cfg.events {
-                                        let _ = tx.send(crate::events::UiEvent::TaskRows(json!(
-                                            report.tasks
-                                        )));
-                                    }
-                                }
-                                _ => fail!(format!("merge conflict persists for {}", contract.id)),
-                            }
+                    match escalate_and_respawn(
+                        cfg,
+                        rt,
+                        report,
+                        &contract,
+                        &conflict_out,
+                        &mut escalations_left,
+                        &base,
+                        &integ_branch,
+                    )
+                    .await
+                    {
+                        Ok(Esc::Recovered(o4)) => {
+                            worktree::merge(&integ_wt, &o4.branch)
+                                .map_err(|e2| anyhow::anyhow!("merge after escalation: {e2:#}"))?;
+                            merged.push(o4.branch.clone());
                         }
-                        _ => fail!(format!("merge conflict on {}: {e:#}", contract.id)),
+                        Ok(Esc::Aborted) => {
+                            fail!(format!("orchestrator aborted on task {}", contract.id))
+                        }
+                        Ok(Esc::StillFailing) => {
+                            fail!(format!("merge conflict persists for {}", contract.id))
+                        }
+                        Err(e2) => fail!(format!("escalation error: {e2:#}")),
                     }
                 } else {
                     fail!(format!("merge conflict on {}: {e:#}", contract.id));
