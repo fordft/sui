@@ -78,8 +78,10 @@ pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
             bail!("plan: task {} has no acceptance commands", t.id);
         }
         for p in &t.owned_paths {
-            let p = p.trim_end_matches("/**").trim_end_matches('/');
-            if p.is_empty() || p == "." || p == "**" {
+            let root = match parse_owned(p) {
+                Owned::Dir(r) | Owned::Exact(r) => r,
+            };
+            if root.is_empty() || root == "." || root == "**" {
                 bail!("plan: task {} owns the whole tree — must be bounded", t.id);
             }
         }
@@ -146,26 +148,51 @@ pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
     Ok(())
 }
 
-/// Does a changed file path fall inside an owned pattern?
-/// "x/**" or "x/" → directory prefix; otherwise exact file.
-pub fn path_owned(path: &str, patterns: &[String]) -> bool {
-    patterns.iter().any(|pat| {
-        if let Some(dir) = pat.strip_suffix("/**") {
-            path.starts_with(&format!("{dir}/"))
-        } else if let Some(dir) = pat.strip_suffix('/') {
-            path.starts_with(&format!("{dir}/"))
+/// Parsed `owned_paths` pattern — the single implementation of the
+/// convention documented on `TaskContract`: a trailing `/**` or `/`
+/// means a directory prefix, otherwise an exact file. `Dir` carries
+/// the canonical root with every trailing `/**`/`/` stripped.
+enum Owned<'a> {
+    Dir(&'a str),
+    Exact(&'a str),
+}
+
+fn parse_owned(p: &str) -> Owned<'_> {
+    let mut s = p;
+    loop {
+        if let Some(r) = s.strip_suffix("/**") {
+            s = r;
+        } else if let Some(r) = s.strip_suffix('/') {
+            s = r;
         } else {
-            path == pat
+            break;
         }
+    }
+    if s.len() == p.len() {
+        Owned::Exact(p)
+    } else {
+        Owned::Dir(s)
+    }
+}
+
+/// Does a changed file path fall inside an owned pattern?
+pub fn path_owned(path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pat| match parse_owned(pat) {
+        Owned::Dir(root) => path.starts_with(&format!("{root}/")),
+        Owned::Exact(f) => path == f,
     })
 }
 
 /// Do two owned patterns possibly cover the same file?
 fn patterns_overlap(a: &str, b: &str) -> bool {
-    let pa = a.trim_end_matches("/**").trim_end_matches('/');
-    let pb = b.trim_end_matches("/**").trim_end_matches('/');
-    let a_dir = a.ends_with("/**") || a.ends_with('/');
-    let b_dir = b.ends_with("/**") || b.ends_with('/');
+    let (pa, a_dir) = match parse_owned(a) {
+        Owned::Dir(r) => (r, true),
+        Owned::Exact(f) => (f, false),
+    };
+    let (pb, b_dir) = match parse_owned(b) {
+        Owned::Dir(r) => (r, true),
+        Owned::Exact(f) => (f, false),
+    };
     if a == b || pa == pb {
         return true;
     }
@@ -236,5 +263,29 @@ mod tests {
         assert!(path_owned("exact.txt", &own));
         assert!(!path_owned("other/x.rs", &own));
         assert!(!path_owned("exact2.txt", &own));
+    }
+
+    // membership and disjointness read the same parse: a file inside a
+    // pattern must always be flagged as overlapping it, and a file
+    // outside must never be.
+    #[test]
+    fn owned_and_overlap_agree() {
+        for pat in ["src/**", "src/", "exact.txt", "a/**", "a/b/c.rs"] {
+            for f in [
+                "src/x.rs",
+                "src/deep/y.rs",
+                "exact.txt",
+                "a/b/c.rs",
+                "a/z.rs",
+                "other.txt",
+            ] {
+                let owned = path_owned(f, &[pat.to_string()]);
+                assert_eq!(
+                    owned,
+                    patterns_overlap(pat, f),
+                    "{pat} vs {f}: membership and disjointness disagree"
+                );
+            }
+        }
     }
 }
