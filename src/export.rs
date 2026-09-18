@@ -395,6 +395,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 "task" => agent.timeline.push(tl(ts, "task", d.clone())),
                 "task_done" => agent.timeline.push(tl(ts, "task_done", d.clone())),
                 "acp_model" => agent.timeline.push(tl(ts, "acp_model", d.clone())),
+                "journal_error" => agent.timeline.push(tl(ts, "journal_error", d.clone())),
                 "user" => agent.timeline.push(tl(ts, "user", d.clone())),
                 "assistant" => {
                     let mut d = d.clone();
@@ -1106,6 +1107,12 @@ fn render_event(m: &mut String, e: &Value) {
                 }
             }
             m.push('\n');
+        }
+        "journal_error" => {
+            m.push_str(&format!(
+                "<sub>journal_error: {} — evidence gap in this journal</sub>\n\n",
+                md_str(&d["serialize_failed"]),
+            ));
         }
         "acp_model" => {
             m.push_str(&format!(
