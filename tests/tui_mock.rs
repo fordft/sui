@@ -2,10 +2,11 @@
 //! against an in-process SSE mock. No terminal required — App is pure
 //! state; the run loop is exercised via its public seams.
 
+mod common;
+
+use common::{sse_text, sse_tool_calls, tc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -25,29 +26,6 @@ fn key(c: char) -> KeyEvent {
 
 // ── scriptable SSE mock ────────────────────────────────────────────────
 
-fn tc(id: &str, name: &str, args: &str) -> Value {
-    json!({"id": id, "type": "function",
-           "function": {"name": name, "arguments": args}})
-}
-
-fn sse_tool_calls(calls: Value) -> String {
-    let d = json!({"choices": [{"index": 0, "delta": {"role": "assistant",
-        "tool_calls": calls}, "finish_reason": "tool_calls"}]});
-    let u = json!({"choices": [], "usage": {"prompt_tokens": 100,
-        "completion_tokens": 10,
-        "prompt_tokens_details": {"cached_tokens": 50}}});
-    format!("data: {d}\n\ndata: {u}\n\ndata: [DONE]\n\n")
-}
-
-fn sse_text(t: &str) -> String {
-    let d = json!({"choices": [{"index": 0, "delta": {"role": "assistant",
-        "content": t}, "finish_reason": "stop"}]});
-    let u = json!({"choices": [], "usage": {"prompt_tokens": 100,
-        "completion_tokens": 5,
-        "prompt_tokens_details": {"cached_tokens": 50}}});
-    format!("data: {d}\n\ndata: {u}\n\ndata: [DONE]\n\n")
-}
-
 /// Mock routing: "control plane" system → submit_result(plan); worker with
 /// last msg role=tool → text; user msg containing WRITEME → write_file;
 /// containing LONGTASK → bash sleep; else text "done".
@@ -66,116 +44,82 @@ fn mock_inner(
     plan: Value,
     gates: Option<[std::sync::Arc<std::sync::atomic::AtomicBool>; 2]>,
 ) -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for conn in l.incoming() {
-            let mut s = match conn {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let mut r = BufReader::new(s.try_clone().unwrap());
-            let mut len = 0usize;
-            loop {
-                let mut line = String::new();
-                if r.read_line(&mut line).unwrap_or(0) == 0 {
-                    break;
-                }
-                if line.trim().is_empty() {
-                    break;
-                }
-                if line.trim().to_lowercase().starts_with("content-length:") {
-                    len = line.trim()[15..].trim().parse().unwrap_or(0);
-                }
+    common::serve(move |_raw, msgs| {
+        let system = msgs
+            .iter()
+            .find(|m| m["role"] == "system")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let last = msgs.last().cloned().unwrap_or_default();
+        let last_user = msgs
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let n_tools = msgs.iter().filter(|m| m["role"] == "tool").count();
+        if system.contains("control plane") {
+            if last_user.contains("auditor") {
+                let sub = json!({"payload": {"verdict": "PASS", "findings": [],
+                    "required_fixes": []}});
+                sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
+            } else {
+                let sub = json!({"payload": plan});
+                sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
             }
-            let mut body = vec![0u8; len];
-            let _ = r.read_exact(&mut body);
-            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-            let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-            let system = msgs
-                .iter()
-                .find(|m| m["role"] == "system")
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-            let last = msgs.last().cloned().unwrap_or_default();
-            let last_user = msgs
+        } else if last_user.contains("WRITEME3") {
+            // three sequential protected writes — exercises live policy
+            // changes mid-run without respawning the agent
+            let last_tool = msgs
                 .iter()
                 .rev()
-                .find(|m| m["role"] == "user")
+                .find(|m| m["role"] == "tool")
                 .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let n_tools = msgs.iter().filter(|m| m["role"] == "tool").count();
-            let body = if system.contains("control plane") {
-                if last_user.contains("auditor") {
-                    let sub = json!({"payload": {"verdict": "PASS", "findings": [],
-                        "required_fixes": []}});
-                    sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
-                } else {
-                    let sub = json!({"payload": plan});
-                    sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
-                }
-            } else if last_user.contains("WRITEME3") {
-                // three sequential protected writes — exercises live policy
-                // changes mid-run without respawning the agent
-                let last_tool = msgs
-                    .iter()
-                    .rev()
-                    .find(|m| m["role"] == "tool")
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("");
-                if n_tools >= 3 || last_tool.contains("denied") {
-                    sse_text("done")
-                } else {
-                    if let Some(g) = &gates {
-                        // hold write#2 on gates[0], write#3 on gates[1]
-                        if (1..=2).contains(&n_tools) {
-                            let flag = &g[n_tools - 1];
-                            let t0 = std::time::Instant::now();
-                            while !flag.load(std::sync::atomic::Ordering::Relaxed)
-                                && t0.elapsed() < Duration::from_secs(10)
-                            {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
+                .unwrap_or("");
+            if n_tools >= 3 || last_tool.contains("denied") {
+                sse_text("done")
+            } else {
+                if let Some(g) = &gates {
+                    // hold write#2 on gates[0], write#3 on gates[1]
+                    if (1..=2).contains(&n_tools) {
+                        let flag = &g[n_tools - 1];
+                        let t0 = std::time::Instant::now();
+                        while !flag.load(std::sync::atomic::Ordering::Relaxed)
+                            && t0.elapsed() < Duration::from_secs(10)
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
                         }
                     }
-                    sse_tool_calls(json!([tc(
-                        "w",
-                        "write_file",
-                        &json!({"path": format!("out/tui{}.txt", n_tools + 1),
-                                "content": "written"})
-                        .to_string()
-                    )]))
                 }
-            } else if last["role"] == "tool" {
-                sse_text("done")
-            } else if last_user.contains("WRITEME") {
                 sse_tool_calls(json!([tc(
-                    "w1",
+                    "w",
                     "write_file",
-                    &json!({"path": "out/tui.txt", "content": "written by worker"}).to_string()
+                    &json!({"path": format!("out/tui{}.txt", n_tools + 1),
+                            "content": "written"})
+                    .to_string()
                 )]))
-            } else if last_user.contains("LONGTASK") {
-                sse_tool_calls(json!([tc(
-                    "b1",
-                    "bash",
-                    &json!({"command": "sleep 30"}).to_string()
-                )]))
-            } else {
-                sse_text("ack from mock")
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.flush();
+            }
+        } else if last["role"] == "tool" {
+            sse_text("done")
+        } else if last_user.contains("WRITEME") {
+            sse_tool_calls(json!([tc(
+                "w1",
+                "write_file",
+                &json!({"path": "out/tui.txt", "content": "written by worker"}).to_string()
+            )]))
+        } else if last_user.contains("LONGTASK") {
+            sse_tool_calls(json!([tc(
+                "b1",
+                "bash",
+                &json!({"command": "sleep 30"}).to_string()
+            )]))
+        } else {
+            sse_text("ack from mock")
         }
-    });
-    port
+    })
 }
 
 fn fixture_repo() -> PathBuf {
@@ -464,71 +408,41 @@ async fn tui_mission_events_flow() {
     // writes via the write_file tool when the task text mentions m.txt
     let port = {
         // local mock variant: worker writes out/m.txt when objective mentions it
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let p = l.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for conn in l.incoming() {
-                let mut s = match conn {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut r = BufReader::new(s.try_clone().unwrap());
-                let mut len = 0usize;
-                loop {
-                    let mut line = String::new();
-                    if r.read_line(&mut line).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    if line.trim().is_empty() {
-                        break;
-                    }
-                    if line.trim().to_lowercase().starts_with("content-length:") {
-                        len = line.trim()[15..].trim().parse().unwrap_or(0);
-                    }
-                }
-                let mut body = vec![0u8; len];
-                let _ = r.read_exact(&mut body);
-                let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-                let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-                let system = msgs
-                    .iter()
-                    .find(|m| m["role"] == "system")
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let last = msgs.last().cloned().unwrap_or_default();
-                let last_user = msgs
-                    .iter()
-                    .rev()
-                    .find(|m| m["role"] == "user")
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let body = if system.contains("control plane") {
-                    if last_user.contains("auditor") {
-                        let sub = json!({"payload": {"verdict": "PASS", "findings": [], "required_fixes": []}});
-                        sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
-                    } else {
-                        let sub = json!({"payload": plan});
-                        sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
-                    }
-                } else if last["role"] == "tool" {
-                    sse_text("done")
-                } else if last_user.contains("m.txt") {
-                    sse_tool_calls(json!([tc(
-                        "w1",
-                        "write_file",
-                        &json!({"path": "out/m.txt", "content": "ok"}).to_string()
-                    )]))
+        common::serve(move |_raw, msgs| {
+            let system = msgs
+                .iter()
+                .find(|m| m["role"] == "system")
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let last = msgs.last().cloned().unwrap_or_default();
+            let last_user = msgs
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "user")
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            if system.contains("control plane") {
+                if last_user.contains("auditor") {
+                    let sub = json!({"payload": {"verdict": "PASS", "findings": [], "required_fixes": []}});
+                    sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
                 } else {
-                    sse_text("done")
-                };
-                let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
-                let _ = s.write_all(resp.as_bytes());
-                let _ = s.flush();
+                    let sub = json!({"payload": plan});
+                    sse_tool_calls(json!([tc("s1", "submit_result", &sub.to_string())]))
+                }
+            } else if last["role"] == "tool" {
+                sse_text("done")
+            } else if last_user.contains("m.txt") {
+                sse_tool_calls(json!([tc(
+                    "w1",
+                    "write_file",
+                    &json!({"path": "out/m.txt", "content": "ok"}).to_string()
+                )]))
+            } else {
+                sse_text("done")
             }
-        });
-        p
+        })
     };
 
     let mut app = app_with_mock(&repo, port);
@@ -1954,67 +1868,31 @@ fn transcript_phase_notes_visible() {
 async fn transcript_display_never_changes_requests() {
     // recording mock: every request body lands in <dir>/req<N>.json
     fn mock_rec(rec: PathBuf) -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
         std::fs::create_dir_all(&rec).unwrap();
-        std::thread::spawn(move || {
-            let n = std::sync::atomic::AtomicUsize::new(0);
-            for conn in l.incoming() {
-                let mut s = match conn {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut r = BufReader::new(s.try_clone().unwrap());
-                let mut len = 0usize;
-                loop {
-                    let mut line = String::new();
-                    if r.read_line(&mut line).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    if line.trim().is_empty() {
-                        break;
-                    }
-                    if line.trim().to_lowercase().starts_with("content-length:") {
-                        len = line.trim()[15..].trim().parse().unwrap_or(0);
-                    }
-                }
-                let mut body = vec![0u8; len];
-                if r.read_exact(&mut body).is_err() {
-                    continue;
-                }
-                let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                std::fs::write(rec.join(format!("req{i}.json")), &body).unwrap();
-                let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-                let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-                let last = msgs.last().cloned().unwrap_or_default();
-                let last_user = msgs
-                    .iter()
-                    .rev()
-                    .find(|m| m["role"] == "user")
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let body = if last["role"] == "tool" {
-                    sse_text("done")
-                } else if last_user.contains("WRITEME") {
-                    sse_tool_calls(json!([tc(
-                        "w1",
-                        "write_file",
-                        &json!({"path": "out/rec.txt", "content": "x"}).to_string()
-                    )]))
-                } else {
-                    sse_text("ack")
-                };
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(), body);
-                if s.write_all(resp.as_bytes()).is_err() {
-                    continue;
-                }
-                let _ = s.flush();
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        common::serve(move |raw, msgs| {
+            let i = n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::fs::write(rec.join(format!("req{i}.json")), raw).unwrap();
+            let last = msgs.last().cloned().unwrap_or_default();
+            let last_user = msgs
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "user")
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            if last["role"] == "tool" {
+                sse_text("done")
+            } else if last_user.contains("WRITEME") {
+                sse_tool_calls(json!([tc(
+                    "w1",
+                    "write_file",
+                    &json!({"path": "out/rec.txt", "content": "x"}).to_string()
+                )]))
+            } else {
+                sse_text("ack")
             }
-        });
-        port
+        })
     }
 
     async fn one_run(repo: &PathBuf, rec: PathBuf, fiddle: bool) {

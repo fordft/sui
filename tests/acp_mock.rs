@@ -17,6 +17,8 @@ use sui::acp::driver::{AcpSession, BridgeCfg};
 use sui::acp::norm::Norm;
 use sui::backend::Backend;
 use sui::config::AcpSpec;
+
+mod common;
 use sui::events::{GateChoice, UiEvent};
 use sui::journal::Journal;
 use sui::mission::{self, MissionCfg};
@@ -405,8 +407,6 @@ mod sse {
     // reuse the in-process SSE mock pattern: a tiny one here to keep the
     // ACP test file self-contained
     use serde_json::{json, Value};
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
     use std::sync::Mutex;
 
     pub fn tool_calls(calls: Value) -> String {
@@ -426,65 +426,30 @@ mod sse {
 
     /// plan on first control turn, verdict thereafter; workers get text.
     pub fn serve(plan: Value, verdict: &'static str) -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
         let plan = Mutex::new(plan);
-        std::thread::spawn(move || {
-            for conn in l.incoming() {
-                let mut s = match conn {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut r = BufReader::new(s.try_clone().unwrap());
-                let mut len = 0usize;
-                loop {
-                    let mut line = String::new();
-                    if r.read_line(&mut line).unwrap_or(0) == 0 {
-                        break;
-                    }
-                    let t = line.trim().to_string();
-                    if t.is_empty() {
-                        break;
-                    }
-                    if t.to_lowercase().starts_with("content-length:") {
-                        len = t[15..].trim().parse().unwrap_or(0);
-                    }
-                }
-                let mut body = vec![0u8; len];
-                let _ = r.read_exact(&mut body);
-                let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-                let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-                let last_user = msgs
-                    .iter()
-                    .rev()
-                    .find(|m| m["role"] == "user")
-                    .and_then(|m| m["content"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let is_tool = msgs.last().map(|m| m["role"] == "tool").unwrap_or(false);
-                let body = if last_user.contains("ROLE: auditor")
-                    || is_tool && last_user.contains("audit")
-                {
-                    tool_calls(submit(json!({"verdict": verdict, "findings": [],
-                        "required_fixes": []})))
-                } else if last_user.contains("objective") || is_tool {
-                    // orchestrator plans; post-submit turns just end
-                    if is_tool {
-                        text("done")
-                    } else {
-                        tool_calls(submit(plan.lock().unwrap().clone()))
-                    }
-                } else {
+        crate::common::serve(move |_raw, msgs| {
+            let last_user = msgs
+                .iter()
+                .rev()
+                .find(|m| m["role"] == "user")
+                .and_then(|m| m["content"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let is_tool = msgs.last().map(|m| m["role"] == "tool").unwrap_or(false);
+            if last_user.contains("ROLE: auditor") || is_tool && last_user.contains("audit") {
+                tool_calls(submit(json!({"verdict": verdict, "findings": [],
+                    "required_fixes": []})))
+            } else if last_user.contains("objective") || is_tool {
+                // orchestrator plans; post-submit turns just end
+                if is_tool {
                     text("done")
-                };
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(), body);
-                let _ = s.write_all(resp.as_bytes());
-                let _ = s.flush();
+                } else {
+                    tool_calls(submit(plan.lock().unwrap().clone()))
+                }
+            } else {
+                text("done")
             }
-        });
-        port
+        })
     }
 }
 

@@ -6,24 +6,15 @@
 //! byte — no Enter — and a session approval must release the gate for
 //! every later protected tool without another prompt.
 
+mod common;
+
+use common::{sse, tc};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-fn tc(id: &str, name: &str, args: &str) -> Value {
-    json!({"id": id, "type": "function",
-           "function": {"name": name, "arguments": args}})
-}
-
-fn sse(payload: Value) -> String {
-    let u = json!({"choices": [], "usage": {"prompt_tokens": 5,
-        "completion_tokens": 2}});
-    format!("data: {payload}\n\ndata: {u}\n\ndata: [DONE]\n\n")
-}
 
 fn write_file_call(id: &str, path: &str) -> String {
     sse(
@@ -46,58 +37,20 @@ fn text_done() -> String {
 /// two tool results → text. Any refusal must come back as a tool message
 /// containing "denied" (the gate's denial result text).
 fn mock() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for conn in l.incoming() {
-            let mut s = match conn {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let mut r = BufReader::new(s.try_clone().unwrap());
-            let mut len = 0usize;
-            loop {
-                let mut line = String::new();
-                if r.read_line(&mut line).unwrap_or(0) == 0 {
-                    break;
-                }
-                if line.trim().is_empty() {
-                    break;
-                }
-                if line.trim().to_lowercase().starts_with("content-length:") {
-                    len = line.trim()[15..].trim().parse().unwrap_or(0);
-                }
-            }
-            let mut body = vec![0u8; len];
-            if r.read_exact(&mut body).is_err() {
-                continue;
-            }
-            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-            let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-            let tools: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool").collect();
-            let last_tool = tools
-                .last()
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("");
-            let body = if last_tool.contains("denied") || tools.len() >= 2 {
-                text_done()
-            } else if tools.len() == 1 {
-                write_file_call("w2", "out/perm2.txt")
-            } else {
-                write_file_call("w1", "out/perm1.txt")
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            if s.write_all(resp.as_bytes()).is_err() {
-                continue;
-            }
-            let _ = s.flush();
+    common::serve(|_raw, msgs| {
+        let tools: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool").collect();
+        let last_tool = tools
+            .last()
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("");
+        if last_tool.contains("denied") || tools.len() >= 2 {
+            text_done()
+        } else if tools.len() == 1 {
+            write_file_call("w2", "out/perm2.txt")
+        } else {
+            write_file_call("w1", "out/perm1.txt")
         }
-    });
-    port
+    })
 }
 
 fn fixture() -> (PathBuf, PathBuf) {

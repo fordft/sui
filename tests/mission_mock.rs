@@ -2,9 +2,10 @@
 //! drives the real mission::run driver end to end. All tests serialize on
 //! a global lock because the cancellation test raises a real SIGINT.
 
+mod common;
+
+use common::{sse_text, sse_tool_calls, submit, tc};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -29,155 +30,86 @@ struct Script {
     escalation: Value, // payload for ESCALATION
 }
 
-fn tc(id: &str, name: &str, args: &str) -> Value {
-    json!({"id": id, "type": "function",
-           "function": {"name": name, "arguments": args}})
-}
-
-fn submit(payload: Value) -> Value {
-    json!([tc(
-        "s1",
-        "submit_result",
-        &json!({"payload": payload}).to_string()
-    )])
-}
-
-fn sse_tool_calls(calls: Value) -> String {
-    let d = json!({"choices": [{"index": 0, "delta": {"role": "assistant",
-        "tool_calls": calls}, "finish_reason": "tool_calls"}]});
-    let u = json!({"choices": [], "usage": {"prompt_tokens": 100,
-        "completion_tokens": 10,
-        "prompt_tokens_details": {"cached_tokens": 50}}});
-    format!("data: {d}\n\ndata: {u}\n\ndata: [DONE]\n\n")
-}
-
-fn sse_text(t: &str) -> String {
-    let d = json!({"choices": [{"index": 0, "delta": {"role": "assistant",
-        "content": t}, "finish_reason": "stop"}]});
-    let u = json!({"choices": [], "usage": {"prompt_tokens": 100,
-        "completion_tokens": 5,
-        "prompt_tokens_details": {"cached_tokens": 50}}});
-    format!("data: {d}\n\ndata: {u}\n\ndata: [DONE]\n\n")
-}
-
 fn mock(script: Script) -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    let audit_left = Mutex::new(script.audit_verdicts);
-    std::thread::spawn(move || {
-        for conn in l.incoming() {
-            let mut s = match conn {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let mut r = BufReader::new(s.try_clone().unwrap());
-            // read headers
-            let mut len = 0usize;
-            loop {
-                let mut line = String::new();
-                if r.read_line(&mut line).unwrap_or(0) == 0 {
-                    break;
-                }
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    break;
-                }
-                if line.to_lowercase().starts_with("content-length:") {
-                    len = line[15..].trim().parse().unwrap_or(0);
-                }
-            }
-            let mut body = vec![0u8; len];
-            let _ = r.read_exact(&mut body);
-            let req: Value = serde_json::from_slice(&body).unwrap_or_default();
-            let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-            let system = msgs
-                .iter()
-                .find(|m| m["role"] == "system")
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-            let last = msgs.last().cloned().unwrap_or_default();
-            let last_user = msgs
-                .iter()
-                .rev()
-                .find(|m| m["role"] == "user")
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or("")
-                .to_string();
+    let audit_left = Mutex::new(script.audit_verdicts.clone());
+    common::serve(move |_raw, msgs| {
+        let system = msgs
+            .iter()
+            .find(|m| m["role"] == "system")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let last = msgs.last().cloned().unwrap_or_default();
+        let last_user = msgs
+            .iter()
+            .rev()
+            .find(|m| m["role"] == "user")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string();
 
-            let body = if system.contains("control plane") {
-                if last["role"] == "tool" {
-                    // resubmission / post-submit turn
-                    if last_user.contains("ESCALATION") {
-                        sse_tool_calls(submit(script.escalation.clone()))
-                    } else if last_user.contains("auditor") {
-                        let v = audit_left
-                            .lock()
-                            .unwrap()
-                            .first()
-                            .cloned()
-                            .unwrap_or("PASS".into());
-                        sse_tool_calls(submit(json!({"verdict": v, "findings": [],
-                            "required_fixes": []})))
-                    } else {
-                        sse_tool_calls(submit(script.plan_payload.clone()))
-                    }
-                } else if last_user.contains("ESCALATION") {
+        if system.contains("control plane") {
+            if last["role"] == "tool" {
+                // resubmission / post-submit turn
+                if last_user.contains("ESCALATION") {
                     sse_tool_calls(submit(script.escalation.clone()))
-                } else if last_user.contains("ROLE: auditor") {
-                    let v = {
-                        let mut q = audit_left.lock().unwrap();
-                        if q.len() > 1 {
-                            q.remove(0)
-                        } else {
-                            q.first().cloned().unwrap_or("PASS".into())
-                        }
-                    };
-                    sse_tool_calls(submit(json!({
-                        "verdict": v,
-                        "findings": [{"severity":"blocker","detail":"missing marker"}],
-                        "required_fixes": ["create out/fix.txt containing fixed"]})))
+                } else if last_user.contains("auditor") {
+                    let v = audit_left
+                        .lock()
+                        .unwrap()
+                        .first()
+                        .cloned()
+                        .unwrap_or("PASS".into());
+                    sse_tool_calls(submit(json!({"verdict": v, "findings": [],
+                        "required_fixes": []})))
                 } else {
                     sse_tool_calls(submit(script.plan_payload.clone()))
                 }
-            } else if last["role"] == "tool" {
-                sse_text("done")
-            } else if last_user.contains("REPAIR ROUND") || last_user.contains("AUDIT REPAIR") {
-                match &script.worker_repair {
-                    v if v.is_array() => sse_tool_calls(v.clone()),
-                    v if v.as_str() == Some("text") => sse_text("nothing to fix"),
-                    _ => sse_text("done"),
-                }
-            } else {
-                let routed = script
-                    .worker_routes
-                    .iter()
-                    .find(|(m, _)| last_user.contains(m))
-                    .map(|(_, v)| v.clone());
-                match routed.or_else(|| {
-                    if script.worker_first.is_array() {
-                        Some(script.worker_first.clone())
+            } else if last_user.contains("ESCALATION") {
+                sse_tool_calls(submit(script.escalation.clone()))
+            } else if last_user.contains("ROLE: auditor") {
+                let v = {
+                    let mut q = audit_left.lock().unwrap();
+                    if q.len() > 1 {
+                        q.remove(0)
                     } else {
-                        None
+                        q.first().cloned().unwrap_or("PASS".into())
                     }
-                }) {
-                    Some(v) => sse_tool_calls(v),
-                    None => sse_text("done"),
+                };
+                sse_tool_calls(submit(json!({
+                    "verdict": v,
+                    "findings": [{"severity":"blocker","detail":"missing marker"}],
+                    "required_fixes": ["create out/fix.txt containing fixed"]})))
+            } else {
+                sse_tool_calls(submit(script.plan_payload.clone()))
+            }
+        } else if last["role"] == "tool" {
+            sse_text("done")
+        } else if last_user.contains("REPAIR ROUND") || last_user.contains("AUDIT REPAIR") {
+            match &script.worker_repair {
+                v if v.is_array() => sse_tool_calls(v.clone()),
+                v if v.as_str() == Some("text") => sse_text("nothing to fix"),
+                _ => sse_text("done"),
+            }
+        } else {
+            let routed = script
+                .worker_routes
+                .iter()
+                .find(|(m, _)| last_user.contains(m))
+                .map(|(_, v)| v.clone());
+            match routed.or_else(|| {
+                if script.worker_first.is_array() {
+                    Some(script.worker_first.clone())
+                } else {
+                    None
                 }
-            };
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.flush();
+            }) {
+                Some(v) => sse_tool_calls(v),
+                None => sse_text("done"),
+            }
         }
-    });
-    port
+    })
 }
-
-// ── fixtures ───────────────────────────────────────────────────────────
 
 fn git(repo: &PathBuf, args: &[&str]) {
     let o = std::process::Command::new("git")
