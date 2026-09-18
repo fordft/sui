@@ -432,7 +432,21 @@ impl WebService {
                 // which already reached the server.
                 if e.to_string().starts_with("mcp:") || e.to_string().contains("timeout") {
                     tokio::time::sleep(Duration::from_millis(800)).await;
-                    call().await
+                    match call().await {
+                        Err(e2)
+                            if e2.to_string().starts_with("mcp:")
+                                || e2.to_string().contains("timeout") =>
+                        {
+                            // Confirmed transport death — latch dead so
+                            // later calls don't silently reconnect into a
+                            // possibly-side-effected fetch (State.dead).
+                            let mut st = self.st.lock().unwrap();
+                            st.dead = true;
+                            st.client = None;
+                            Err(e2)
+                        }
+                        r => r,
+                    }
                 } else {
                     Err(e)
                 }
@@ -951,6 +965,14 @@ mod tests {
         let out = (p.render)(&p.sources);
         assert!(out.contains("truncated: yes"));
         assert!(out.contains("source: https://ex.com"));
+    }
+
+    #[tokio::test]
+    async fn dead_latch_blocks_reconnect() {
+        let s = svc(WebAccess::Auto);
+        s.st.lock().unwrap().dead = true;
+        let r = s.client().await;
+        assert!(format!("{:#}", r.unwrap_err()).contains("down for this run"));
     }
 
     #[tokio::test]
