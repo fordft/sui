@@ -240,7 +240,15 @@ pub async fn spawn_bounded(
     let timed_out = matches!(end, End::TimedOut);
 
     let status = match end {
-        End::Done(s) => Some(s),
+        End::Done(s) => {
+            // Kill the group NOW, not at Drop: a background job the
+            // command left behind holds the pipes — killing it here is
+            // what lets the drains below finish at all. Also shrinks
+            // the pgid-reuse window to ~µs after wait() reaped.
+            kill_tree(pid);
+            guard.disarm();
+            Some(s)
+        }
         End::TimedOut | End::Cancelled => {
             kill_tree(pid);
             guard.disarm();
@@ -249,8 +257,11 @@ pub async fn spawn_bounded(
             None
         }
     };
-    let _ = out_h.await;
-    let _ = err_h.await;
+    // Bounded drain: a descendant that escaped via setsid still holds
+    // the pipes — without a cap the tool call hangs forever.
+    let drain_deadline = Duration::from_secs(5);
+    let _ = tokio::time::timeout(drain_deadline, out_h).await;
+    let _ = tokio::time::timeout(drain_deadline, err_h).await;
     let (stdout, t1) = out_cap.lock().unwrap().render();
     let (stderr, t2) = err_cap.lock().unwrap().render();
     Ok(ProcOut {
@@ -281,7 +292,9 @@ pub async fn run(
     let req_ms = args["timeout_ms"]
         .as_u64()
         .unwrap_or(ctx.bash_timeout.as_millis() as u64);
-    let dur = Duration::from_millis(req_ms);
+    // The envelope must report the EFFECTIVE deadline — spawn_bounded
+    // clamps silently, so "exceeded {req}ms" would lie when req > max
+    let dur = Duration::from_millis(req_ms).min(ctx.bash_timeout_max);
     let out = spawn_bounded(&ctx.workspace, &cmd, dur, ctx.bash_timeout_max, cancel, obs).await?;
     let dropped = out.preview_dropped;
 
@@ -354,7 +367,10 @@ impl Drop for PgGuard {
 /// SIGKILL the child's whole process group (process_group(0) made it the
 /// group leader). ESRCH on an already-dead group is harmless.
 fn kill_tree(pid: Option<u32>) {
-    if let Some(pid) = pid {
+    // pid > i32::MAX would wrap negative under `as i32`, and -(neg) is
+    // positive → kill() would hit a single wrong process. Unreachable on
+    // Linux (pid_max ≤ 2^22) but the cast makes it possible in principle.
+    if let Some(pid) = pid.filter(|&p| p > 0 && p <= i32::MAX as u32) {
         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     }
 }

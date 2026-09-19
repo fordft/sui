@@ -59,7 +59,10 @@ pub enum Hit {
     Tab(Tab),
     /// Transcript row owner: group id + item id (None = group row).
     Activity(u64, Option<u64>),
-    Perm(GateChoice),
+    /// Permission decision button. The u64 is the ask's id — a stale
+    /// zone from a just-decided modal must not decide the NEXT ask that
+    /// took its place before the next frame.
+    Perm(GateChoice, u64),
     Setting(usize),
     /// Wheel-scrollable details modal body.
     ViewScroll,
@@ -839,14 +842,26 @@ impl App {
             // arrives inside a shared deadline — missing entries behave
             // exactly like NoEntry (session-only), never a startup hang.
             let (tx, rx) = std::sync::mpsc::channel();
-            let mut names: Vec<String> = profiles.keys().cloned().collect();
-            names.push("web".into());
+            // (keyring entry name, is the web-search key slot) — the bool
+            // keeps a profile literally named "web" distinct from it.
+            // The web slot itself is namespaced "svc:web": profile slots
+            // share the flat `sui` service namespace, so the plain "web"
+            // slot both collided with a `web` profile AND let an Exa key
+            // be sent to a provider endpoint (or vice versa). Legacy
+            // "web" is still read as a fallback — only when no profile
+            // claims it — and only wins when the namespaced slot is empty.
+            let mut names: Vec<(String, bool)> =
+                profiles.keys().map(|k| (k.clone(), false)).collect();
+            if !profiles.contains_key("web") {
+                names.push(("web".into(), true));
+            }
+            names.push(("svc:web".into(), true));
             std::thread::spawn(move || {
-                for name in names {
+                for (name, is_web) in names {
                     let r = keyring::Entry::new("sui", &name)
                         .and_then(|e| e.get_password())
                         .ok();
-                    if tx.send((name, r)).is_err() {
+                    if tx.send((name, is_web, r)).is_err() {
                         return;
                     }
                 }
@@ -854,8 +869,15 @@ impl App {
             let deadline = Instant::now() + std::time::Duration::from_secs(5);
             while let Some(rem) = deadline.checked_duration_since(Instant::now()) {
                 match rx.recv_timeout(rem) {
-                    Ok((n, Some(k))) if n == "web" => web_key = Some(k),
-                    Ok((n, Some(k))) => {
+                    // namespaced slot wins over the legacy fallback —
+                    // a present svc:web key overrides, an absent one
+                    // doesn't clobber a migrated value
+                    Ok((_, true, k)) => {
+                        if k.is_some() {
+                            web_key = k;
+                        }
+                    }
+                    Ok((n, false, Some(k))) => {
                         session_keys.insert(n, k);
                     }
                     Ok(_) => {}      // entry absent — same as NoEntry
@@ -1295,6 +1317,7 @@ impl App {
                 agent,
                 call,
                 name,
+                summary,
                 ms,
                 status,
                 exit,
@@ -1347,7 +1370,7 @@ impl App {
                             agent,
                             call,
                             name,
-                            summary: String::new(),
+                            summary, // denied/skipped rows show what was refused
                             status: Some(status),
                             exit,
                             result,
@@ -1385,9 +1408,11 @@ impl App {
                 reply,
                 ..
             } => {
-                // never overwrite an open prompt — the dropped reply
-                // channel would silently deny the parked request
-                if matches!(self.modal, Some(Modal::Permission { .. })) {
+                // Park the ask while ANY modal is open — not just a
+                // Permission. Replacing e.g. a provider form would drop
+                // its state AND the next keystrokes meant for it would
+                // become permission decisions (`a` = session-approve).
+                if self.modal.is_some() {
                     self.pending_perms.push_back((id, agent, summary, reply));
                 } else {
                     self.modal = Some(Modal::Permission {
@@ -1449,6 +1474,9 @@ impl App {
                 accepted_sha,
             } => {
                 self.running = false;
+                // pending permission asks deliberately survive run end —
+                // never auto-decide or hide a prompt (pinned by
+                // transcript_permission_never_hidden)
                 self.outcome = outcome.clone();
                 if let Some(s) = accepted_sha {
                     self.accepted_sha = Some(s);
@@ -1640,19 +1668,29 @@ impl App {
         Some((g.top + (row - g.y) as usize, (col - g.x) as usize))
     }
 
-    /// Single-cell click → hit-test the last drawn frame.
+    /// Single-cell click → hit-test the last drawn frame. Zones are
+    /// registered body-first, modal-last — iterate in REVERSE so a
+    /// modal zone wins over the transcript zone beneath it (otherwise
+    /// permission buttons overlapping the chat pane are dead clicks).
     fn click(&mut self, col: u16, row: u16) {
         let hit = self
             .hits
             .borrow()
             .iter()
+            .rev()
             .find(|z| z.has(col, row))
             .map(|z| z.hit);
         match hit {
-            Some(Hit::Perm(c)) => {
-                // only a live Permission modal may be decided — a stale
-                // zone must never eat a different modal
-                if matches!(self.modal, Some(Modal::Permission { .. })) {
+            Some(Hit::Perm(c, zone_id)) => {
+                // only a live Permission modal may be decided, and only
+                // by a zone drawn FOR that ask — a stale zone from the
+                // previous prompt must never decide the parked ask that
+                // replaced it, nor eat a different modal entirely
+                let live = matches!(
+                    &self.modal,
+                    Some(Modal::Permission { id, .. }) if *id == zone_id
+                );
+                if live {
                     if let Some(Modal::Permission { reply, .. }) = self.modal.take() {
                         self.modal = self.decide_perm(c, reply);
                     }
@@ -1685,7 +1723,10 @@ impl App {
                 // click outside a dismissible modal closes it; a click
                 // inside the transcript pane focuses it for keyboard nav
                 match self.modal {
-                    Some(Modal::Help) | Some(Modal::View { .. }) => self.modal = None,
+                    Some(Modal::Help) | Some(Modal::View { .. }) => {
+                        self.modal = None;
+                        self.promote_perm();
+                    }
                     _ => {
                         let g = self.chat_geom.get();
                         let inside = col >= g.x
@@ -1967,6 +2008,7 @@ impl App {
                 // handlers consume the modal and return the next state —
                 // Some(m) stays open, a different Some replaces, None closes
                 self.modal = self.modal_key(k, m);
+                self.promote_perm();
             } else {
                 self.modal = Some(m);
             }
@@ -2237,6 +2279,8 @@ impl App {
             self.cancel.notify_waiters();
             self.effects.push(Effect::Stop);
             self.status = "stopping…".into();
+            self.drain_perms(); // the gate will deny on drop — don't let
+                                // the user "decide" dead asks
         }
     }
 
@@ -2257,6 +2301,32 @@ impl App {
                 summary,
                 reply,
             })
+    }
+
+    /// Surface a parked permission ask when the modal slot frees up —
+    /// asks are parked while ANY modal is open, so closing a provider
+    /// form or picker must promote the next ask, not strand it.
+    fn promote_perm(&mut self) {
+        if self.modal.is_none() {
+            if let Some((id, agent, summary, reply)) = self.pending_perms.pop_front() {
+                self.modal = Some(Modal::Permission {
+                    id,
+                    agent,
+                    summary,
+                    reply,
+                });
+            }
+        }
+    }
+
+    /// Drop every pending ask and any open Permission modal — on stop or
+    /// run-end the reply channels are dead, and deciding a zombie prompt
+    /// silently no-ops while popping more dead asks into view.
+    fn drain_perms(&mut self) {
+        self.pending_perms.clear();
+        if matches!(self.modal, Some(Modal::Permission { .. })) {
+            self.modal = None;
+        }
     }
 
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
@@ -2372,7 +2442,10 @@ impl App {
                             self.status = if !self.keyring_ok {
                                 "no OS keyring — key is session-only".to_string()
                             } else {
-                                match keyring::Entry::new("sui", "web") {
+                                // namespaced slot — see the startup
+                                // loader; the plain "web" slot belongs
+                                // to a profile of that name
+                                match keyring::Entry::new("sui", "svc:web") {
                                     Ok(e) => match &self.web_key {
                                         Some(k) => match e.set_password(k) {
                                             Ok(()) => "web key → OS keyring".to_string(),
@@ -2582,6 +2655,16 @@ impl App {
                     self.status = "auditor follows orchestrator".into();
                     return None;
                 }
+                // ACP agents aren't profiles — resolve() misses them, so
+                // picking one used to close the modal without setting the
+                // role. `acp:<name>` is a valid role value end-to-end
+                // (resolve_to_backend handles it); no model pick follows.
+                if choice.starts_with("acp:") {
+                    self.set_role_profile(r, choice.clone());
+                    self.effects.push(Effect::SaveUi);
+                    self.status = format!("{} → {choice}", r.name());
+                    return None;
+                }
                 // profile chosen → fetch its models for a second pick
                 if let Some((base, key, _)) = self.resolve(&choice) {
                     let prof = choice.clone();
@@ -2609,6 +2692,27 @@ impl App {
                 }
                 self.status = format!("{prof} → {choice}");
                 self.effects.push(Effect::SaveUi);
+                // SaveUi writes only [ui] — the [profiles.*] model would
+                // revert on restart. Persist it on the profile too,
+                // carrying base_url/key_env/api_key through verbatim so
+                // the rewrite can't strip the credential or an inherited
+                // endpoint.
+                if let Some(p) = self.profiles.get(&prof) {
+                    if p.base_url.is_some() {
+                        self.effects.push(Effect::SaveProfile {
+                            name: prof.clone(),
+                            base_url: p.base_url.clone().unwrap_or_default(),
+                            model: choice.clone(),
+                            key_env: p.key_env.clone(),
+                            key: p.api_key.clone(),
+                            store: if p.api_key.is_some() {
+                                Store::ConfigFile // keeps the inline key
+                            } else {
+                                Store::Keychain // key=None → no keyring write
+                            },
+                        });
+                    }
+                }
                 None
             }
             PickTarget::NewProvider => {

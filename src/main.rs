@@ -222,27 +222,22 @@ async fn repl(agent: &mut agent::Agent) -> Result<()> {
         .join(".local/share/sui/history.txt");
     let _ = rl.load_history(&hist);
     eprintln!("REPL · /quit to exit · /help for commands");
-    loop {
-        match rl.readline("sui> ") {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(line);
-                match line {
-                    "/quit" | "/q" | "/exit" => break,
-                    "/help" => {
-                        eprintln!("commands: /quit /help — anything else is sent to the agent")
-                    }
-                    _ => {
-                        if let Err(e) = agent.run_turn(line).await {
-                            eprintln!("error: {e:#}");
-                        }
-                    }
+    while let Ok(line) = rl.readline("sui> ") {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let _ = rl.add_history_entry(line);
+        match line {
+            "/quit" | "/q" | "/exit" => break,
+            "/help" => {
+                eprintln!("commands: /quit /help — anything else is sent to the agent")
+            }
+            _ => {
+                if let Err(e) = agent.run_turn(line).await {
+                    eprintln!("error: {e:#}");
                 }
             }
-            Err(_) => break, // Ctrl-C / Ctrl-D
         }
     }
     if let Some(dir) = hist.parent() {

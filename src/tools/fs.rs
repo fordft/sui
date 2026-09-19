@@ -18,14 +18,18 @@ const READ_MAX: usize = 400;
 /// resolve() against a ToolContext — canonicalizes the workspace root
 /// once per context, not once per call.
 pub fn resolve_ctx(ctx: &ToolContext, rel: &str) -> Result<PathBuf> {
-    let root = ctx
-        .canon_root
-        .get_or_init(|| {
-            ctx.workspace
-                .canonicalize()
-                .unwrap_or_else(|_| ctx.workspace.clone())
-        })
-        .clone();
+    // Only the canonicalized result is cached — a transient canonicalize
+    // failure (fd exhaustion) must not latch the raw path forever.
+    let root = match ctx.canon_root.get() {
+        Some(r) => r.clone(),
+        None => match ctx.workspace.canonicalize() {
+            Ok(r) => {
+                let _ = ctx.canon_root.set(r.clone());
+                r
+            }
+            Err(_) => ctx.workspace.clone(),
+        },
+    };
     resolve_in(&root, rel)
 }
 
@@ -78,8 +82,12 @@ fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
 
 pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let path = args["path"].as_str().unwrap_or("");
-    let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
-    let limit = (args["limit"].as_u64().unwrap_or(READ_DEFAULT as u64) as usize).min(READ_MAX);
+    // try_from: on 32-bit a u64 offset/limit above usize::MAX would wrap
+    // to a small number and silently read the wrong window
+    let offset = usize::try_from(args["offset"].as_u64().unwrap_or(1).max(1)).unwrap_or(usize::MAX);
+    let limit = usize::try_from(args["limit"].as_u64().unwrap_or(READ_DEFAULT as u64))
+        .unwrap_or(usize::MAX)
+        .clamp(1, READ_MAX); // limit=0 produced "showing: 1-0" nonsense
     let p = resolve_ctx(ctx, path)?;
 
     use std::fmt::Write;
@@ -92,14 +100,17 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let mut buf = String::new();
     loop {
         buf.clear();
-        if r.read_line(&mut buf)? == 0 {
+        if r.read_line(&mut buf)
+            .with_context(|| format!("cannot read {}", p.display()))?
+            == 0
+        {
             break;
         }
         total += 1;
         if total > start && total <= start + limit {
-            let _ = write!(
+            let _ = writeln!(
                 window,
-                "{:>5}  {}\n",
+                "{:>5}  {}",
                 total,
                 buf.trim_end_matches(['\n', '\r'])
             );
@@ -117,13 +128,18 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     );
     out.push_str(&window);
     if end < total {
-        let _ = write!(out, "truncated: true ({} lines remain)\n", total - end);
+        let _ = writeln!(out, "truncated: true ({} lines remain)", total - end);
     }
     Ok(out)
 }
 
 pub fn write_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let path = args["path"].as_str().unwrap_or("");
+    if path.is_empty() {
+        // "" resolves to the workspace root itself — refuse with a clear
+        // error instead of letting atomic_write hit EISDIR on a directory
+        return Ok("status: error\nerror: path must not be empty".into());
+    }
     let content = args["content"].as_str().unwrap_or("");
     let p = resolve_ctx(ctx, path)?;
     if let Some(parent) = p.parent() {

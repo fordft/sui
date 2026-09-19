@@ -12,6 +12,9 @@ pub mod ev {
     pub const SESSION: &str = "session";
 }
 
+/// One-shot failure-diagnostic sink (see `Journal::notice`).
+type Notice = Box<dyn Fn(&str) + Send>;
+
 /// Append-only event journal. Lives outside the repo so writes never
 /// perturb the repository epoch fingerprint.
 pub struct Journal {
@@ -20,6 +23,10 @@ pub struct Journal {
     /// run's evidence trail, so once writes break we stop half-writing
     /// and let consumers see the gap.
     failed: bool,
+    /// Where the one-time failure diagnostic goes. Default stderr —
+    /// but under the TUI alt-screen a raw eprintln corrupts the
+    /// display, so wired agents reroute it into the UiEvent stream.
+    notice: Option<Notice>,
 }
 
 impl Journal {
@@ -30,11 +37,40 @@ impl Journal {
     /// Named journal within the same run dir (per-scenario logs).
     pub fn open_named(run_dir: &Path, name: &str) -> Result<Self> {
         std::fs::create_dir_all(run_dir)?;
-        let f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(run_dir.join(format!("{name}.jsonl")))?;
-        Ok(Self { f, failed: false })
+        // Journals hold prompts, code, and command output — same
+        // sensitivity as the sanitized export, which is written 0600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let mut o = OpenOptions::new();
+        o.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let f = o.open(run_dir.join(format!("{name}.jsonl")))?;
+        Ok(Self {
+            f,
+            failed: false,
+            notice: None,
+        })
+    }
+
+    /// Route the failure diagnostic somewhere other than stderr —
+    /// called by agents with a UI event channel. Fires on the first
+    /// failure only (the latch suppresses repeats).
+    pub fn set_notice(&mut self, f: Box<dyn Fn(&str) + Send>) {
+        self.notice = Some(f);
+    }
+
+    fn notice(&self, msg: &str) {
+        match &self.notice {
+            Some(f) => f(msg),
+            None => eprintln!("journal: {msg}"),
+        }
     }
 
     /// Path of a named journal file (for replay/reconstruction).
@@ -62,10 +98,13 @@ impl Journal {
             Err(e) => {
                 // serialize failure is a data bug, not IO — record a
                 // fixed-format marker (can't itself fail to serialize)
-                // so replay/export sees the gap, not a bare newline
-                eprintln!("journal: serialize {kind}: {e}");
+                // so replay/export sees the gap, not a bare newline.
+                // `kind` is a compile-time string, but escape anyway —
+                // a raw " in a kind name would corrupt the marker JSON.
+                self.notice(&format!("serialize {kind}: {e}"));
                 format!(
-                    "{{\"ts_unix\":{ts},\"type\":\"journal_error\",\"data\":{{\"serialize_failed\":\"{kind}\"}}}}"
+                    "{{\"ts_unix\":{ts},\"type\":\"journal_error\",\"data\":{{\"serialize_failed\":{}}}}}",
+                    json!(kind)
                 )
             }
         };
@@ -77,7 +116,7 @@ impl Journal {
             .is_err()
         {
             self.failed = true;
-            eprintln!("journal: write failed — evidence for this run is incomplete");
+            self.notice("write failed — evidence for this run is incomplete");
         }
     }
 
@@ -91,7 +130,11 @@ impl Journal {
 #[cfg(test)]
 impl Journal {
     fn for_test(f: File) -> Self {
-        Self { f, failed: false }
+        Self {
+            f,
+            failed: false,
+            notice: None,
+        }
     }
 }
 

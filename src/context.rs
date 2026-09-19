@@ -186,7 +186,12 @@ pub fn estimate_tokens(messages: &Compiled<'_>) -> usize {
                                 .unwrap_or(&[])
                                 .iter()
                                 .map(|t| {
-                                    t.id.len() + t.function.name.len() + t.function.arguments.len()
+                                    // 40 ≈ the {"id":,"type":,"function":
+                                    // {"name":,"arguments":}} envelope —
+                                    // missing it undercounts every call
+                                    40 + t.id.len()
+                                        + t.function.name.len()
+                                        + t.function.arguments.len()
                                 })
                                 .sum::<usize>()
                             + response_items

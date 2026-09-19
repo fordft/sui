@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -258,8 +258,10 @@ fn rules() -> &'static [(regex::Regex, &'static str, &'static str)] {
             (r"(?i)(authorization|x-api-key|x-auth-token)\s*[:=]\s*\S+", "auth header", "$1: «redacted:auth»"),
             (r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}", "bearer token", "Bearer «redacted:token»"),
             (r"(?i)cookie\s*[:=]\s*[^\n;]+", "cookie", "Cookie: «redacted:cookie»"),
-            // well-known token shapes
-            (r"\b(?:sk|pk|rk|key|ds|or)[-_][A-Za-z0-9]{12,}", "api key", "«redacted:api-key»"),
+            // well-known token shapes — the tail allows separators so
+            // modern formats match: sk-proj-…, sk-ant-api03-…, sk_live_…,
+            // rk_live_… (a bare [A-Za-z0-9]{12,} misses every one of them)
+            (r"\b(?:sk|pk|rk|key|ds|or)[-_][A-Za-z0-9][A-Za-z0-9_-]{10,}", "api key", "«redacted:api-key»"),
             (r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}", "github token", "«redacted:gh-token»"),
             (r"\bgithub_pat_[A-Za-z0-9_]{20,}", "github token", "«redacted:gh-token»"),
             (r"\bglpat-[A-Za-z0-9_-]{15,}", "gitlab token", "«redacted:gl-token»"),
@@ -294,17 +296,33 @@ fn scan_journal(path: &Path, ctx: &mut Ctx) -> Vec<Value> {
         Ok(f) => f,
         Err(_) => return vec![],
     };
+    // journal lines carry full request payloads — legitimately large,
+    // but not unbounded: a corrupt/hostile file must not exhaust memory
+    const MAX_LINE: u64 = 16 * 1024 * 1024;
+    let mut rd = BufReader::new(f);
     let mut out = Vec::new();
-    let mut last_line = 0usize;
-    for (i, line) in BufReader::new(f).lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        // take() bounds the bytes one line can claim; a hit without a
+        // newline means an oversized line — drain it and count malformed
+        let n = match rd.by_ref().take(MAX_LINE).read_until(b'\n', &mut raw) {
+            Ok(n) => n,
             Err(_) => {
                 ctx.malformed_lines += 1;
-                continue;
+                break;
             }
         };
-        last_line = i;
+        if n == 0 {
+            break;
+        }
+        if !raw.ends_with(b"\n") && n as u64 >= MAX_LINE {
+            ctx.malformed_lines += 1;
+            let mut sink = Vec::new();
+            let _ = rd.read_until(b'\n', &mut sink); // discard rest of line
+            continue;
+        }
+        let line = String::from_utf8_lossy(&raw);
         if line.trim().is_empty() {
             continue;
         }
@@ -315,7 +333,6 @@ fn scan_journal(path: &Path, ctx: &mut Ctx) -> Vec<Value> {
             }
         }
     }
-    let _ = last_line;
     out
 }
 
@@ -470,9 +487,9 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 "mission" => {
                     mission_states.push((ts, field_str(d, "state").unwrap_or_else(|| "?".into())));
                     if let Some(why) = field_str(d, "why") {
-                        mission_states
-                            .last_mut()
-                            .map(|(_, s)| *s = format!("{s} — {why}"));
+                        if let Some((_, s)) = mission_states.last_mut() {
+                            *s = format!("{s} — {why}");
+                        }
                     }
                 }
                 "plan" => plan = Some(d.clone()),
@@ -741,8 +758,11 @@ fn objective_from(agents: &[AgentRec], plan: Option<&Value>) -> Value {
     json!("Not recorded.")
 }
 
-/// Secret values already known locally (config api_key + key_env
-/// variables) — literal-masked wherever they appear.
+/// Secret values already known locally — literal-masked wherever they
+/// appear. Covers every credential channel: profile api_key + key_env,
+/// the global [provider] api_key, ambient env keys, and the web-search
+/// key (value or env). The run's own key is the most likely thing to
+/// leak into a journal — it must be in this list.
 fn known_secrets() -> Vec<String> {
     let mut v = vec![];
     if let Ok(profiles) = crate::config::profiles(None) {
@@ -757,10 +777,45 @@ fn known_secrets() -> Vec<String> {
             }
         }
     }
+    // Ambient + global-config provider/web credentials.
+    if let Some(k) = crate::config::global_provider_key() {
+        v.push(k);
+    }
+    for e in ["SUI_API_KEY", "OPENAI_API_KEY", "SUI_EXA_API_KEY"] {
+        if let Ok(k) = std::env::var(e) {
+            v.push(k);
+        }
+    }
+    if let Some(k) = crate::web::load_cfg(None).api_key {
+        v.push(k);
+    }
+    // Masking a 3-char config value would wreck the report — secrets are
+    // long; skip anything too short to be a real credential.
+    v.retain(|s| s.len() >= 8);
     v
 }
 
 fn git_diff(ws: &Path, base: &str, head: &str, ctx: &mut Ctx) -> Value {
+    // base/head come from journal records — a value starting with '-'
+    // would be parsed as an option (e.g. --output=), and '..' inside a
+    // side would rewrite the range. Only rev-safe strings pass; HEAD,
+    // branch names, and shas all remain valid.
+    let rev_ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 128
+            && !s.starts_with('-')
+            && !s.contains("..")
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._/^~-{}".contains(c))
+    };
+    if !rev_ok(base) || !rev_ok(head) {
+        ctx.limitations
+            .push("git diff skipped — recorded revisions aren't commit shas".into());
+        return json!({
+            "base": base, "head": head, "stat": "Not recorded.",
+            "diff": "Not recorded.", "truncated_by_export": false,
+        });
+    }
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(ws)

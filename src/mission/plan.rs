@@ -35,21 +35,12 @@ pub struct TaskContract {
 const MAX_TASKS: usize = 8;
 
 /// Full validation: shape invariants + the base revision resolves in-repo.
-pub fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
+/// Async — the rev-parse must not block the mission runtime's executor.
+pub async fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
     validate_shape(plan)?;
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo)
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("{}^{{commit}}", plan.base_commit),
-        ])
-        .output()
-        .context("git rev-parse")?;
-    if !out.status.success() {
-        bail!("plan: base_commit '{}' does not resolve", plan.base_commit);
-    }
+    super::worktree::git_rev(repo, &plan.base_commit)
+        .await
+        .with_context(|| format!("plan: base_commit '{}' does not resolve", plan.base_commit))?;
     Ok(())
 }
 
@@ -68,8 +59,14 @@ pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
 
     let mut ids = HashSet::new();
     for t in &plan.tasks {
-        if t.id.trim().is_empty() || !ids.insert(t.id.clone()) {
-            bail!("plan: duplicate or empty task id '{}'", t.id);
+        // Task ids become worktree dir names (wt_dir.join(&id) — a
+        // "../" id would make remove_dir_all delete arbitrary paths),
+        // git branch names, journal filenames, session keys, and ACP
+        // artifact dirs. Restrict to a filesystem-and-ref-safe alphabet
+        // and reserve the control-plane names so a task can't collide
+        // with orchestrator/auditor/escalation session keys.
+        if !valid_task_id(&t.id) || !ids.insert(t.id.clone()) {
+            bail!("plan: duplicate or invalid task id '{}'", t.id);
         }
         if t.owned_paths.is_empty() {
             bail!("plan: task {} has no owned_paths", t.id);
@@ -146,6 +143,19 @@ pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Safe task-id alphabet: worktree dir component, git branch suffix,
+/// journal filename, session key. Reserved names are control-plane
+/// session keys — a task using one would hijack the shared pool.
+fn valid_task_id(id: &str) -> bool {
+    const RESERVED: &[&str] = &["orchestrator", "auditor", "escalation"];
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !RESERVED.contains(&id)
 }
 
 /// Parsed `owned_paths` pattern — the single implementation of the

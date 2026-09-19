@@ -240,6 +240,15 @@ pub fn profiles(config_path: Option<&Path>) -> Result<BTreeMap<String, ProfileCf
     Ok(out)
 }
 
+/// The global `[provider]` credential (api_key inline or via key_env) —
+/// used by export's known-secrets masking so the run's own key is
+/// literal-masked wherever it leaked into a journal.
+pub fn global_provider_key() -> Option<String> {
+    let p = global_cfg_path().filter(|p| p.exists())?;
+    let pc = read_toml(&p).ok()?.provider?;
+    pc.api_key.filter(|k| !k.is_empty())
+}
+
 /// Names of every defined `[agents.<name>]` (user-owned files only) —
 /// for the TUI role picker; resolution/approval still goes through
 /// `resolve_agent`.
@@ -378,6 +387,17 @@ pub fn load(ov: Overrides) -> Result<Config> {
     if project.agents.is_some() {
         eprintln!("warning: [agents] in project sui.toml ignored (agents are global-only)");
     }
+    if project
+        .agent
+        .as_ref()
+        .and_then(|a| a.auto_approve)
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "warning: auto_approve in project sui.toml ignored \
+             (a repo must never grant itself unattended tool execution)"
+        );
+    }
 
     let gp = global.provider.unwrap_or_default();
     let pp = project.provider.unwrap_or_default();
@@ -469,9 +489,17 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .or(gp.model)
         .unwrap_or_else(|| "gpt-5".into());
 
+    // prompt_cache_key picks the provider-side cache domain — letting a
+    // repo file choose it would let a checked-in sui.toml borrow (or
+    // poison) another trust context's cache prefix. Trusted sources only.
+    if pp.prompt_cache_key.is_some() {
+        eprintln!(
+            "warning: prompt_cache_key in project sui.toml ignored \
+             (cache domains are user-controlled)"
+        );
+    }
     let prompt_cache_key = env("SUI_CACHE_KEY")
         .or(fp.prompt_cache_key)
-        .or(pp.prompt_cache_key)
         .or(gp.prompt_cache_key);
 
     let al = resolve_limits(&fa, &pa, &ga);
@@ -491,12 +519,10 @@ pub fn load(ov: Overrides) -> Result<Config> {
         workspace,
         run_dir,
         session_id,
-        auto_approve: ov.auto_approve
-            || fa
-                .auto_approve
-                .or(pa.auto_approve)
-                .or(ga.auto_approve)
-                .unwrap_or(false),
+        // auto_approve is flag/global-only — same trust class as
+        // [profiles]/[agents]/api_key: a checked-in project file must
+        // not be able to turn on unattended bash/write execution.
+        auto_approve: ov.auto_approve || fa.auto_approve.or(ga.auto_approve).unwrap_or(false),
         max_turns: al.max_turns,
         bash_timeout_ms: al.bash_timeout_ms,
         bash_timeout_max_ms: al.bash_timeout_max_ms,
@@ -508,7 +534,11 @@ pub fn load(ov: Overrides) -> Result<Config> {
 
 /// TUI state persisted in the global config under [ui]. Secrets never
 /// appear here — auth stays env/keyring/session.
+/// `serde(default)` matters: every field is Option except `acceptance`,
+/// so a [ui] table missing that one key would fail try_into() and drop
+/// ALL persisted settings to defaults without it.
 #[derive(Debug, serde::Deserialize, serde::Serialize, Default, Clone)]
+#[serde(default)]
 pub struct UiSettings {
     pub workspace: Option<String>,
     /// "solo" | "mission"
@@ -585,7 +615,28 @@ pub fn save_ui(ui: &UiSettings) -> Result<()> {
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(&p, toml::to_string_pretty(&doc)?)?;
+    write_private(&p, &toml::to_string_pretty(&doc)?)
+}
+
+/// Config files can hold an inline api_key — never write them
+/// world-readable. mode() covers creation; set_permissions tightens a
+/// pre-existing loose file (truncate alone keeps the old mode).
+fn write_private(p: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(p)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+    }
+    f.write_all(contents.as_bytes())?;
     Ok(())
 }
 
@@ -644,8 +695,7 @@ pub fn save_profile_at(
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
-    std::fs::write(p, toml::to_string_pretty(&doc)?)?;
-    Ok(())
+    write_private(p, &toml::to_string_pretty(&doc)?)
 }
 
 fn unix_ts() -> u64 {

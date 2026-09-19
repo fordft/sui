@@ -384,7 +384,7 @@ fn emit_group(
                             "  {}✓ {who}{n2} · exit 0 · {}ms — {}  ×{n}",
                             mark(owner),
                             ms2,
-                            s2.lines().next().unwrap_or("")
+                            clean(s2.lines().next().unwrap_or(""))
                         ),
                         sel_style(owner).unwrap_or_else(|| Style::default().fg(Color::DarkGray)),
                     )],
@@ -536,7 +536,10 @@ fn emit_item(
             at,
             ..
         } => {
-            let head = summary.lines().next().unwrap_or("");
+            // summary is model/ACP-generated text — strip control
+            // sequences before it reaches a header row (escape-sequence
+            // injection into the transcript).
+            let head = clean(summary.lines().next().unwrap_or(""));
             let (glyph, label, gsty) = match status {
                 None => ("⠋", "…", Style::default().fg(Color::Magenta)),
                 Some(ToolStatus::Ok) => ("✓", "ok", Style::default().fg(Color::DarkGray)),

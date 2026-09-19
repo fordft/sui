@@ -154,6 +154,26 @@ enum CacheEntry {
     InFlight(tokio::sync::broadcast::Sender<()>),
 }
 
+/// Removes a still-InFlight cache entry on drop — cancel/panic safety
+/// for the producer side of `cached_call`. A no-op once the entry has
+/// been resolved to Ready (or already removed by the normal path).
+struct FlightGuard<'a> {
+    st: &'a Mutex<State>,
+    key: &'a str,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self.st.lock().unwrap();
+        if let Some(CacheEntry::InFlight(tx)) = st.cache.get(self.key) {
+            let tx = tx.clone();
+            st.cache.remove(self.key);
+            drop(st);
+            let _ = tx.send(());
+        }
+    }
+}
+
 struct State {
     cache: HashMap<String, CacheEntry>,
     sources: Vec<Source>,
@@ -193,11 +213,24 @@ impl WebService {
     }
 
     /// Fresh counters for a new run (solo turns share one service).
+    /// Per-run state resets too: cache entries are labeled "this run",
+    /// sources are per-run provenance, and the `dead` latch must not
+    /// brick web access forever after one transient double-failure.
+    /// The MCP client survives across runs when it wasn't latched dead
+    /// — per-turn reconnects would defeat its keep-alive.
     pub fn begin_run(&self, run: u64) {
         let mut r = self.run.lock().unwrap();
         if *r != run {
             *r = run;
             self.reqs.store(0, Ordering::Relaxed);
+            let mut st = self.st.lock().unwrap();
+            st.cache.clear();
+            st.sources.clear();
+            st.next_id = 1;
+            if st.dead {
+                st.dead = false;
+                st.client = None;
+            }
         }
     }
 
@@ -355,6 +388,10 @@ impl WebService {
                 }
             }
             Action::Miss => {
+                // On cancel/panic mid-flight this guard still removes
+                // the InFlight entry and wakes waiters — otherwise every
+                // twin of this request would block until the wait timeout.
+                let _flight = FlightGuard { st: &self.st, key };
                 let result = f(Arc::clone(self)).await;
                 let mut st = self.st.lock().unwrap();
                 let finisher = match st.cache.remove(key) {
@@ -370,13 +407,15 @@ impl WebService {
                             st.sources.push(s.clone());
                         }
                         let text = (parsed.render)(&sources);
-                        st.cache.insert(
-                            key.to_string(),
-                            CacheEntry::Ready(Cached {
-                                text: text.clone(),
-                                fetched_at: Instant::now(),
-                            }),
-                        );
+                        if st.cache.len() < CACHE_CAP {
+                            st.cache.insert(
+                                key.to_string(),
+                                CacheEntry::Ready(Cached {
+                                    text: text.clone(),
+                                    fetched_at: Instant::now(),
+                                }),
+                            );
+                        }
                         if let Some(tx) = finisher {
                             let _ = tx.send(());
                         }
@@ -387,10 +426,21 @@ impl WebService {
                         if let Some(tx) = finisher {
                             let _ = tx.send(());
                         }
-                        err_out(&format!("web request failed: {e:#}"))
+                        err_out(&format!("web request failed: {}", self.redact(e)))
                     }
                 }
             }
+        }
+    }
+
+    /// The API key travels in the request URI (`?exaApiKey=…`), so
+    /// transport errors embed it in their Display chain. Scrub it
+    /// before any error reaches model context, the TUI, or the journal.
+    fn redact(&self, e: anyhow::Error) -> String {
+        let s = format!("{e:#}");
+        match &self.cfg.api_key {
+            Some(k) if !k.is_empty() => s.replace(k.as_str(), "***"),
+            _ => s,
         }
     }
 
@@ -402,7 +452,10 @@ impl WebService {
             bail!("run web-request limit ({MAX_REQUESTS}) reached");
         }
         let _permit = self.sem.acquire().await?;
-        let client = self.client().await?;
+        let client = self
+            .client()
+            .await
+            .map_err(|e| anyhow::anyhow!(self.redact(e)))?;
         let arguments = args.as_object().cloned().unwrap_or_default();
         let call = || async {
             let res = tokio::time::timeout(
@@ -416,12 +469,15 @@ impl WebService {
             match res {
                 Ok(Ok(r)) => {
                     if r.is_error == Some(true) {
-                        bail!("{}", text_of(&r.content))
+                        // Upstream error bodies are unbounded — cap what
+                        // can flow back into model context.
+                        let t = text_of(&r.content);
+                        bail!("{}", crate::provider::truncate(&t, 4_000))
                     } else {
                         Ok(text_of(&r.content))
                     }
                 }
-                Ok(Err(e)) => bail!("mcp: {e}"),
+                Ok(Err(e)) => bail!("mcp: {}", self.redact(e.into())),
                 Err(_) => bail!("upstream timeout ({}s)", CALL_TIMEOUT.as_secs()),
             }
         };
@@ -430,11 +486,11 @@ impl WebService {
             Err(e) => {
                 // One retry on transport failures — not on tool errors,
                 // which already reached the server.
-                if e.to_string().starts_with("mcp:") || e.to_string().contains("timeout") {
+                if e.to_string().starts_with("mcp") || e.to_string().contains("timeout") {
                     tokio::time::sleep(Duration::from_millis(800)).await;
                     match call().await {
                         Err(e2)
-                            if e2.to_string().starts_with("mcp:")
+                            if e2.to_string().starts_with("mcp")
                                 || e2.to_string().contains("timeout") =>
                         {
                             // Confirmed transport death — latch dead so
@@ -443,12 +499,12 @@ impl WebService {
                             let mut st = self.st.lock().unwrap();
                             st.dead = true;
                             st.client = None;
-                            Err(e2)
+                            Err(anyhow::anyhow!(self.redact(e2)))
                         }
-                        r => r,
+                        r => r.map_err(|e| anyhow::anyhow!(self.redact(e))),
                     }
                 } else {
-                    Err(e)
+                    Err(anyhow::anyhow!(self.redact(e)))
                 }
             }
         }
@@ -643,16 +699,28 @@ pub fn check_url(url: &str) -> Result<(), String> {
     if !u.username().is_empty() || u.password().is_some() {
         return Err("URL carries credentials".into());
     }
+    // A trailing dot (`localhost.`, `10.0.0.1.`) resolves identically —
+    // normalize before hostname/IP checks so it can't smuggle past them.
     let host = u
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?
         .to_lowercase();
+    let host = host.trim_end_matches('.');
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
         return Err("local hostnames are not public web targets".into());
     }
     // host_str keeps [] around IPv6 literals — strip before IpAddr::parse
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<IpAddr>() {
+        // IPv4-mapped IPv6 (`::ffff:127.0.0.1`) carries a v4 address —
+        // judge it by the embedded v4 rules, not the v6 ones.
+        let ip = match ip {
+            IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(IpAddr::V4)
+                .unwrap_or(IpAddr::V6(v6)),
+            v4 => v4,
+        };
         let bad = match ip {
             IpAddr::V4(v4) => {
                 v4.is_private()

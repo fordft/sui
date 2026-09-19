@@ -53,7 +53,7 @@ DOMAIN control (frontier model)     DOMAIN worker (cheap model)
 ## Per-agent prompt layout
 
 ```
-[static contract + 4 tool schemas]   lowest mutation
+[static contract + 7 tool schemas]   lowest mutation
 [frozen repo epoch / map]
 [mission contract | task spec]
 ── cache breakpoint ──
@@ -73,6 +73,9 @@ rolling truncation.
 | `write_file(path, content)` | atomic tmp+rename, workspace-confined |
 | `edit_file(path, old_str, new_str)` | exact match; 0→fail, >1→fail ambiguous |
 | `bash(command, timeout_ms)` | workspace cwd, hard timeout, head+tail bound |
+| `web_search(query)` | bounded results + source IDs; needs `[web]` key |
+| `web_fetch(url)` | public http(s) only, SSRF-checked, markdown text |
+| `skill(name)` | loads an engineering lens from the prompt index |
 
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
@@ -86,22 +89,25 @@ truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
   `INTERFACE_CHANGE_REQUEST` to orchestrator.
 - Foundation-first: orchestrator defines interfaces → worker implements →
   freeze M0 → parallel workers branch from M0.
-- Merge in task-id order; integration tests after each merge for attribution.
+- Merge in task-id order; integration checks run once on the combined
+  candidate (identical commands on identical state — duplicates audited
+  out in the perf pass), with merged-tree acceptance re-runs journaled.
 - Orchestration state lives OUTSIDE the repo:
   `~/.local/share/sui/runs/<run-id>/` (mission.json, workers/, events.jsonl).
 
 ## Budgets (concrete stop conditions)
 
 - worker: max turns, max output tokens, max wall-clock — stop, don't spiral
-- escalation: bounded packet, hard cap per task (~3); advisor_call_rate >30%
-  means worker model too weak for that workload class
-- concurrency: start at 3, adapt on cache_fraction / 429s / merge rework
+- escalation: bounded packet, hard cap — 1 per mission (a worker that
+  can't finish after repair gets one control-model shot, then fail)
+- concurrency: pool 1 by default, max 2 — a wave only parallelizes on
+  exactly 2 independent tasks
 
 ## Metrics
 
 Per mission: total/control/worker cost, input/cached/write/output tokens,
 cache_fraction (token-weighted), TTFT, wall/parallel/integration/audit time,
-worker_attempts, advisor_calls, test/audit failures, merge_conflicts, accepted.
+worker_attempts, test/audit failures, merge_conflicts, accepted.
 
 Optimize $/accepted-task, not $/token.
 
@@ -305,7 +311,7 @@ prefixes are unchanged).
 
 ## Build order
 
-- **v0** fast path: worker loop + 4 tools + journal + context compiler +
+- **v0** fast path: worker loop + 7 tools + journal + context compiler +
   OpenAI-compatible provider + permission gate — done
 - **v0.1** certification runner, endpoint trust gate, execution invariants —
   done

@@ -588,7 +588,9 @@ fn centered(w: u16, h: u16, a: Rect) -> Rect {
 
 fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
     match m {
-        Modal::Permission { agent, summary, .. } => {
+        Modal::Permission {
+            id, agent, summary, ..
+        } => {
             let r = centered(76, 12, area);
             let more = app.pending_perms.len();
             let title = format!(
@@ -600,13 +602,19 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 }
             );
             // bounded preview: never approve a command you can't read —
-            // heredocs/very long commands show head lines + a marker
-            let sl: Vec<&str> = summary.lines().collect();
-            let show = 8usize;
+            // heredocs/very long commands show head lines + a marker.
+            // clean() first: the summary is model/ACP-generated text and
+            // raw control sequences would inject escapes into the modal
+            // (e.g. repainting the screen to hide the real command).
+            let sl: Vec<String> = summary.lines().map(crate::tui::transcript::clean).collect();
+            // leave room for the marker + blank + button row — a clipped
+            // button row makes the modal undecidable by mouse
+            let inner_h = r.height.saturating_sub(2) as usize;
+            let show = inner_h.saturating_sub(3).clamp(1, 8);
             let mut lines: Vec<Line> = sl
                 .iter()
                 .take(show)
-                .map(|l| Line::from((*l).to_string()))
+                .map(|l| Line::from(l.clone()))
                 .collect();
             if sl.len() > show {
                 lines.push(Line::from(Span::styled(
@@ -635,7 +643,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                         y: by,
                         w: label.len() as u16,
                         h: 1,
-                        hit: Hit::Perm(choice),
+                        hit: Hit::Perm(choice, *id),
                     });
                 }
             }

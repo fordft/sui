@@ -117,6 +117,10 @@ pub enum UiEvent {
         agent: String,
         call: String,
         name: String,
+        /// One-line "what" (e.g. `bash: cargo test`) — denied/skipped/
+        /// intercepted calls emit no ToolStart, so without this their
+        /// transcript row can't say what was refused.
+        summary: String,
         ms: u128,
         status: ToolStatus,
         exit: Option<i32>,

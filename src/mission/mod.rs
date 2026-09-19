@@ -362,9 +362,13 @@ async fn drive_task(
     }
 }
 
+/// Shape validator for a control payload (plan, verdict, escalation).
+type PayloadCheck = Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>;
+
 /// Control-role dispatch: native uses submit_result interception; ACP
 /// reads the session's artifact drops (shape-validated by the bridge,
 /// re-validated here authoritatively). Returns the captured payload.
+#[allow(clippy::too_many_arguments)]
 async fn run_control(
     cfg: &MissionCfg,
     rt: &MissionRt,
@@ -373,12 +377,16 @@ async fn run_control(
     workspace: &Path,
     prompt: String,
     expect: &str,
-    check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>,
+    check: PayloadCheck,
 ) -> Result<Cap> {
     match backend {
         Backend::Native(prof) => {
             let (mut a, cap) = control_agent(cfg, rt, prof, workspace, agent_id, check)?;
-            a.run_turn(&prompt).await?;
+            // same deadline as the ACP arm — a stuck control turn must
+            // not hang the mission (max_turns alone bounds it much looser)
+            tokio::time::timeout(cfg.task_timeout, a.run_turn(&prompt))
+                .await
+                .context("control deadline")??;
             let c = cap.lock().unwrap();
             Ok(Cap {
                 payload: c.payload.clone(),
@@ -391,6 +399,12 @@ async fn run_control(
             if dir.exists() {
                 std::fs::remove_dir_all(&dir)?;
             }
+            // Recreate even when the session is pooled: session() only
+            // makes the dir on the SPAWN path, but the bridge writes
+            // artifacts into it on every submit_result — a reused
+            // session would find its drop dir gone and every
+            // submission would fail.
+            std::fs::create_dir_all(&dir)?;
             let sess = rt
                 .session(cfg, spec, agent_id, agent_id, workspace, expect)
                 .await?;
@@ -436,7 +450,7 @@ fn control_agent(
     prof: &Profile,
     workspace: &Path,
     agent_id: &str,
-    check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>,
+    check: PayloadCheck,
 ) -> Result<(Agent, Arc<Mutex<Cap>>)> {
     let mut a = mk_agent(
         cfg,
@@ -543,19 +557,18 @@ fn gate_rec(kind: &str, cmd: &str, cwd: &Path, out: &crate::tools::bash::ProcOut
 
 /// Which revision a task's worktree branches from: the mission base for
 /// independent tasks, the integration tip once dependencies have merged.
-fn base_for(cfg: &MissionCfg, c: &TaskContract, base: &str, integ_branch: &str) -> Result<String> {
+async fn base_for(
+    cfg: &MissionCfg,
+    c: &TaskContract,
+    base: &str,
+    integ_branch: &str,
+) -> Result<String> {
     if c.depends_on.is_empty() {
         Ok(base.to_string())
     } else {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&cfg.repo)
-            .args(["rev-parse", integ_branch])
-            .output()?;
-        if !out.status.success() {
-            bail!("integration branch missing for dependent task {}", c.id);
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        worktree::git_rev(&cfg.repo, integ_branch)
+            .await
+            .with_context(|| format!("integration branch missing for dependent task {}", c.id))
     }
 }
 
@@ -574,10 +587,10 @@ async fn spawn_task(
     let wt = wt_dir.join(&c.id);
     let branch = format!("sui-task-{}-{}", cfg.session, c.id);
     // idempotent: a re-dispatch reuses the path
-    worktree::remove(&cfg.repo, &wt);
+    worktree::remove(&cfg.repo, &wt).await;
     let _ = std::fs::remove_dir_all(&wt);
-    let task_base = base_for(cfg, c, base, integ_branch)?;
-    worktree::add(&cfg.repo, &wt, &branch, &task_base)?;
+    let task_base = base_for(cfg, c, base, integ_branch).await?;
+    worktree::add(&cfg.repo, &wt, &branch, &task_base).await?;
     drive_task(
         cfg,
         rt,
@@ -609,7 +622,7 @@ async fn finish_task(
         task_base: base.to_string(),
         gates: vec![],
     };
-    let changed = worktree::changed_files(wt, base)?;
+    let changed = worktree::changed_files(wt, base).await?;
     out.changed = changed.clone();
     if changed.is_empty() {
         out.capsule = capsule("empty", "no changes produced");
@@ -646,7 +659,7 @@ async fn finish_task(
         );
         return Ok(out);
     }
-    out.sha = worktree::commit_all(wt, &format!("task {} [{}]", c.id, cfg.session))?;
+    out.sha = worktree::commit_all(wt, &format!("task {} [{}]", c.id, cfg.session)).await?;
     for cmd in &c.acceptance {
         let r = spawn_bounded(
             wt,
@@ -701,27 +714,53 @@ async fn repair_task(
 async fn escalate(
     cfg: &MissionCfg,
     rt: &MissionRt,
+    plan: &MissionPlan,
     c: &TaskContract,
     prev: &TaskOut,
     budget_left: usize,
 ) -> Result<Option<TaskContract>> {
-    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> =
-        Arc::new(|p| match p["decision"].as_str() {
-            Some("abort") => Ok(()),
-            Some("retry") => {
-                serde_json::from_value::<TaskContract>(p["revised_task"].clone())
-                    .context("revised_task is not a contract")?;
-                Ok(())
+    let orig_id = c.id.clone();
+    // A retry contract is validated by substituting it into the plan and
+    // running the FULL shape validator — same id (repair/merge/audit
+    // key on the original ids), bounded owned_paths, disjointness vs
+    // siblings, acyclic depends_on. A bare from_value would admit a
+    // contract that breaks the ownership invariant or orphans the
+    // repair path under a different id.
+    let shape_check = {
+        let orig_id = orig_id.clone();
+        let plan = plan.clone();
+        move |newc: &TaskContract| -> Result<()> {
+            if newc.id != orig_id {
+                bail!(
+                    "revised_task id '{}' must keep the original id '{orig_id}'",
+                    newc.id
+                );
             }
-            _ => bail!("decision must be retry or abort"),
-        });
+            let mut p2 = plan.clone();
+            for t in &mut p2.tasks {
+                if t.id == orig_id {
+                    *t = newc.clone();
+                }
+            }
+            plan::validate_shape(&p2).context("revised_task fails plan invariants")
+        }
+    };
+    let check: PayloadCheck = Arc::new(move |p| match p["decision"].as_str() {
+        Some("abort") => Ok(()),
+        Some("retry") => {
+            let newc: TaskContract = serde_json::from_value(p["revised_task"].clone())
+                .context("revised_task is not a contract")?;
+            shape_check(&newc)
+        }
+        _ => bail!("decision must be retry or abort"),
+    });
     let contract_json = serde_json::to_string_pretty(c).unwrap_or_default();
     let c2 = run_control(
         cfg,
         rt,
         &cfg.control,
         "escalation",
-        &cfg.repo,
+        &worktree::worktrees_dir(&cfg.run_dir).join("control"),
         prompts::escalation_task(&contract_json, &prev.capsule, budget_left),
         "decision",
         check,
@@ -757,6 +796,7 @@ async fn escalate_and_respawn(
     cfg: &MissionCfg,
     rt: &MissionRt,
     report: &mut MissionReport,
+    plan: &MissionPlan,
     contract: &TaskContract,
     out: &TaskOut,
     escalations_left: &mut usize,
@@ -773,7 +813,7 @@ async fn escalate_and_respawn(
             text: format!("escalating {} to control — {}", contract.id, why),
         });
     }
-    let Some(newc) = escalate(cfg, rt, contract, out, *escalations_left).await? else {
+    let Some(newc) = escalate(cfg, rt, plan, contract, out, *escalations_left).await? else {
         return Ok(Esc::Aborted);
     };
     match spawn_task(cfg, rt, &newc, base, integ_branch)
@@ -835,7 +875,7 @@ async fn integrate_all(
     journal: &mut Journal,
 ) -> Result<Vec<String>> {
     for b in branches {
-        worktree::merge(integ_wt, b)?;
+        worktree::merge(integ_wt, b).await?;
     }
     run_integration_checks(integ_wt, plan, journal).await
 }
@@ -846,7 +886,12 @@ async fn integrate_all(
 /// integration checks come pre-run — they already executed on this
 /// exact state and re-running would duplicate the most expensive
 /// commands in the system verbatim.
-async fn gate_summary(plan: &MissionPlan, integ_wt: &Path, integ_lines: &[String]) -> String {
+async fn gate_summary(
+    plan: &MissionPlan,
+    integ_wt: &Path,
+    integ_lines: &[String],
+    journal: &mut Journal,
+) -> String {
     let mut s = String::new();
     for t in &plan.tasks {
         for cmd in &t.acceptance {
@@ -860,7 +905,13 @@ async fn gate_summary(plan: &MissionPlan, integ_wt: &Path, integ_lines: &[String
             )
             .await;
             match r {
-                Ok(o) => s.push_str(&format!("{} [{}]: exit {:?}\n", t.id, cmd, o.code)),
+                Ok(o) => {
+                    // these re-runs ARE the merged-tree gate evidence —
+                    // journal them like every other gate record or the
+                    // audit report has no proof they happened
+                    journal.log("gate", gate_rec("merged-acceptance", cmd, integ_wt, &o));
+                    s.push_str(&format!("{} [{}]: exit {:?}\n", t.id, cmd, o.code))
+                }
                 Err(e) => s.push_str(&format!("{} [{cmd}]: error {e:#}\n", t.id)),
             }
         }
@@ -881,11 +932,10 @@ async fn audit_once(
     gates: &str,
     risks: &str,
 ) -> Result<(String, Value)> {
-    let check: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> =
-        Arc::new(|p| match p["verdict"].as_str() {
-            Some("PASS") | Some("FAIL") => Ok(()),
-            _ => bail!("verdict must be PASS or FAIL"),
-        });
+    let check: PayloadCheck = Arc::new(|p| match p["verdict"].as_str() {
+        Some("PASS") | Some("FAIL") => Ok(()),
+        _ => bail!("verdict must be PASS or FAIL"),
+    });
     let auditor = cfg.auditor.as_ref().unwrap_or(&cfg.control);
     let c = run_control(
         cfg,
@@ -975,16 +1025,34 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
         let body = body(cfg, &rt, &mut report, &mut journal);
         tokio::pin!(body);
         let n = cfg.cancel.as_ref().map(|(n, _)| n.clone());
-        tokio::select! {
-            r = &mut body => r,
-            _ = tokio::signal::ctrl_c() => {
-                cancelled = true;
-                Ok(Flow::Failed("cancelled".into()))
+        // catch_unwind: a panic inside body() must still reach the
+        // terminal-evidence path below (journal Failed + RunDone) rather
+        // than unwinding past it and leaving outcome stuck at "running"
+        let guarded = std::panic::AssertUnwindSafe(async {
+            tokio::select! {
+                r = &mut body => r.map(|f| (f, false)),
+                _ = tokio::signal::ctrl_c() => {
+                    Ok((Flow::Failed("cancelled".into()), true))
+                }
+                _ = async move { if let Some(n) = n { n.notified().await } else { std::future::pending().await } } => {
+                    if let Some((_, f)) = &cfg.cancel { f.store(true, Ordering::Relaxed); }
+                    Ok((Flow::Failed("cancelled".into()), true))
+                }
             }
-            _ = async move { if let Some(n) = n { n.notified().await } else { std::future::pending().await } } => {
-                if let Some((_, f)) = &cfg.cancel { f.store(true, Ordering::Relaxed); }
-                cancelled = true;
-                Ok(Flow::Failed("cancelled".into()))
+        });
+        match futures_util::FutureExt::catch_unwind(guarded).await {
+            Ok(Ok((f, was_cancel))) => {
+                cancelled = was_cancel;
+                Ok(f)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(p) => {
+                let msg = p
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".into());
+                Ok(Flow::Failed(format!("panic: {msg}")))
             }
         }
     };
@@ -1060,8 +1128,10 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
     if report.outcome == "accepted" && !cfg.keep_worktrees {
         let wt_dir = worktree::worktrees_dir(&cfg.run_dir);
         for f in std::fs::read_dir(&wt_dir)? {
-            worktree::remove(&cfg.repo, &f?.path());
+            worktree::remove(&cfg.repo, &f?.path()).await;
         }
+        // the control scratch branch holds no deliverable — drop it
+        worktree::branch_delete(&cfg.repo, &format!("sui-control-{}", cfg.session)).await;
     }
     Ok(report)
 }
@@ -1097,12 +1167,28 @@ async fn body(
 
     // ── PLANNING ────────────────────────────────────────────────────
     state!(S::Planning);
-    let base = worktree::head(&cfg.repo)?;
-    let repo = cfg.repo.clone();
-    let check_plan: Arc<dyn Fn(&Value) -> Result<()> + Send + Sync> = Arc::new(move |p| {
+    let base = match worktree::head(&cfg.repo).await {
+        Ok(b) => b,
+        Err(e) => fail!(format!("resolve repo HEAD: {e:#}")),
+    };
+    // Control roles (orchestrator, escalation) get a scratch worktree at
+    // the mission base — they can read the real tree for planning
+    // context but can never write into the user's checkout. It lives
+    // under worktrees_dir so accept-cleanup reclaims it like the rest.
+    let control_wt = worktree::worktrees_dir(&cfg.run_dir).join("control");
+    worktree::remove(&cfg.repo, &control_wt).await;
+    let _ = std::fs::remove_dir_all(&control_wt);
+    let control_branch = format!("sui-control-{}", cfg.session);
+    if let Err(e) = worktree::add(&cfg.repo, &control_wt, &control_branch, &base).await {
+        fail!(format!("control worktree: {e:#}"));
+    }
+    // Shape invariants only — pure + sync so a malformed plan reprompts
+    // inside run_control. base_commit resolution happens async right
+    // after capture, where it ALSO has to equal the real HEAD.
+    let check_plan: PayloadCheck = Arc::new(move |p| {
         let plan: MissionPlan =
             serde_json::from_value(p.clone()).context("payload is not a mission plan")?;
-        plan::validate(&plan, &repo)
+        plan::validate_shape(&plan)
     });
     let overview = {
         let out = spawn_bounded(
@@ -1121,7 +1207,7 @@ async fn body(
         rt,
         &cfg.control,
         "orchestrator",
-        &cfg.repo,
+        &control_wt,
         prompts::orchestrator_task(&cfg.objective, &base, &overview),
         "plan",
         check_plan,
@@ -1146,6 +1232,16 @@ async fn body(
             )),
         }
     };
+    // The plan declares which commit it branched from — validate()
+    // already proved it resolves; here it must BE the actual base or the
+    // merge window silently shifts. Reject drift instead of ignoring it.
+    match worktree::git_rev(&cfg.repo, &format!("{}^{{commit}}", plan.base_commit)).await {
+        Ok(pb) if pb == base => {}
+        Ok(pb) => fail!(format!(
+            "plan base_commit {pb} is not repo HEAD {base} — replan from the real base"
+        )),
+        Err(e) => fail!(format!("resolve plan base_commit: {e:#}")),
+    }
     journal.log("plan", serde_json::to_value(&plan).unwrap_or_default());
     if let Some(tx) = &cfg.events {
         let _ = tx.send(crate::events::UiEvent::TaskRows(
@@ -1158,7 +1254,9 @@ async fn body(
     let integ_branch = format!("sui-mission-{}", cfg.session);
     let wt_dir = worktree::worktrees_dir(&cfg.run_dir);
     let integ_wt = wt_dir.join("integration");
-    worktree::add(&cfg.repo, &integ_wt, &integ_branch, &base)?;
+    if let Err(e) = worktree::add(&cfg.repo, &integ_wt, &integ_branch, &base).await {
+        fail!(format!("integration worktree: {e:#}"));
+    }
     report.branch = Some(integ_branch.clone());
     let mut merged: Vec<String> = vec![];
     // spawn-time base per task — repair rounds must diff against the
@@ -1172,8 +1270,15 @@ async fn body(
         if cfg.max_workers >= 2 && wave.len() == 2 {
             let ta = &plan.tasks[wave[0]];
             let tb = &plan.tasks[wave[1]];
-            let ba = base_for(cfg, ta, &base, &integ_branch)?;
-            let bb = base_for(cfg, tb, &base, &integ_branch)?;
+            let (ba, bb) = match tokio::join!(
+                base_for(cfg, ta, &base, &integ_branch),
+                base_for(cfg, tb, &base, &integ_branch),
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => {
+                    fail!(format!("task base resolution: {e:#}"))
+                }
+            };
             let (ra, rb) = tokio::join!(
                 spawn_task(cfg, rt, ta, &base, &integ_branch),
                 spawn_task(cfg, rt, tb, &base, &integ_branch),
@@ -1183,7 +1288,10 @@ async fn body(
         } else {
             for &i in &wave {
                 let t = &plan.tasks[i];
-                let tb = base_for(cfg, t, &base, &integ_branch)?;
+                let tb = match base_for(cfg, t, &base, &integ_branch).await {
+                    Ok(b) => b,
+                    Err(e) => fail!(format!("task base resolution: {e:#}")),
+                };
                 let r = spawn_task(cfg, rt, t, &base, &integ_branch)
                     .await
                     .map_err(|e| e.to_string());
@@ -1234,6 +1342,7 @@ async fn body(
                     cfg,
                     rt,
                     report,
+                    &plan,
                     &contract,
                     &out,
                     &mut escalations_left,
@@ -1275,7 +1384,7 @@ async fn body(
             );
             // serialize integration: merge each passing task immediately
             state!(S::Integrating);
-            if let Err(e) = worktree::merge(&integ_wt, &out.branch) {
+            if let Err(e) = worktree::merge(&integ_wt, &out.branch).await {
                 let conflict_out = TaskOut {
                     capsule: capsule("merge_conflict", &format!("{e:#}")),
                     ..out
@@ -1285,6 +1394,7 @@ async fn body(
                         cfg,
                         rt,
                         report,
+                        &plan,
                         &contract,
                         &conflict_out,
                         &mut escalations_left,
@@ -1294,8 +1404,9 @@ async fn body(
                     .await
                     {
                         Ok(Esc::Recovered(o4)) => {
-                            worktree::merge(&integ_wt, &o4.branch)
-                                .map_err(|e2| anyhow::anyhow!("merge after escalation: {e2:#}"))?;
+                            if let Err(e2) = worktree::merge(&integ_wt, &o4.branch).await {
+                                fail!(format!("merge after escalation: {e2:#}"));
+                            }
                             merged.push(o4.branch.clone());
                         }
                         Ok(Esc::Aborted) => {
@@ -1325,23 +1436,45 @@ async fn body(
     // ── AUDIT (one repair round on failure) ─────────────────────────
     loop {
         state!(S::Auditing);
-        let diff = worktree::diff(&integ_wt, &base).unwrap_or_default();
+        let diff = match worktree::diff(&integ_wt, &base).await {
+            Ok(d) => d,
+            Err(e) => {
+                // a diff failure audited as "empty diff" would certify
+                // nothing — fail loudly instead of silently passing
+                fail!(format!("integration diff: {e:#}"));
+            }
+        };
         let diff = if diff.len() > 30_000 {
             let i = crate::context::floor_char_boundary(&diff, 30_000);
             format!("{}…<truncated>", &diff[..i])
         } else {
             diff
         };
-        let gates = gate_summary(&plan, &integ_wt, &integ_lines).await;
+        let gates = gate_summary(&plan, &integ_wt, &integ_lines, journal).await;
         let risks = format!(
             "repairs used: {}; escalations used: {}",
             report.repairs, report.escalations
         );
+        // The auditor runs inside the integration worktree — pin its tip
+        // so a model-side `git commit` can't land ungated, un-audited
+        // changes in the accepted candidate.
+        let pre_audit_tip = match worktree::git_rev(&integ_wt, "HEAD").await {
+            Ok(t) => t,
+            Err(e) => fail!(format!("pin integration tip: {e:#}")),
+        };
         let (verdict, payload) =
             match audit_once(cfg, rt, &integ_wt, &plan, &diff, &gates, &risks).await {
                 Ok(v) => v,
                 Err(e) => fail!(format!("audit error: {e:#}")),
             };
+        match worktree::git_rev(&integ_wt, "HEAD").await {
+            Ok(t) if t == pre_audit_tip => {}
+            Ok(t) => fail!(format!(
+                "auditor modified the integration candidate (tip moved to {t}) — \
+                 changes must come through task worktrees"
+            )),
+            Err(e) => fail!(format!("verify integration tip: {e:#}")),
+        }
         report.audit = Some(payload.clone());
         journal.log("audit", payload.clone());
         if let Some(tx) = &cfg.events {
@@ -1406,7 +1539,9 @@ async fn body(
         }
         // deterministic re-integration from base
         state!(S::Integrating);
-        worktree::reset_hard(&integ_wt, &base)?;
+        if let Err(e) = worktree::reset_hard(&integ_wt, &base).await {
+            fail!(format!("reset integration tree: {e:#}"));
+        }
         match integrate_all(&integ_wt, &merged, &plan, journal).await {
             Ok(l) => integ_lines = l,
             Err(e) => fail!(format!("re-integration after audit repair: {e:#}")),
@@ -1416,7 +1551,13 @@ async fn body(
     state!(S::Accepted);
     // bind the validation+audit record to the exact accepted candidate:
     // the branch ref survives worktree cleanup and identifies the code.
-    let sha = worktree::git_rev(&cfg.repo, &integ_branch).unwrap_or_default();
+    // An unresolvable sha is a failure, not Some("") — the acceptance
+    // evidence must bind to a real commit.
+    let sha = match worktree::git_rev(&cfg.repo, &integ_branch).await {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => fail!("accepted branch resolved to an empty revision"),
+        Err(e) => fail!(format!("resolve accepted branch: {e:#}")),
+    };
     report.accepted_sha = Some(sha.clone());
     if let Some(tx) = &cfg.events {
         let files: Vec<String> = report

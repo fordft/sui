@@ -32,9 +32,21 @@ impl Buf {
     }
     pub fn insert_str(&mut self, s: &str) {
         // one splice — per-char insert would memmove the tail for every
-        // pasted character (O(paste × buffer) on a mid-buffer paste)
-        let n = s.chars().count();
-        self.chars.splice(self.cursor..self.cursor, s.chars());
+        // pasted character (O(paste × buffer) on a mid-buffer paste).
+        // Strip C0 controls/ESC first: pasted text renders verbatim into
+        // the terminal, so a hostile clipboard payload could inject
+        // escape sequences (screen clear, OSC clipboard writes).
+        let cleaned: Vec<char> = s
+            .chars()
+            .flat_map(|c| match c {
+                '\n' | '\r' => vec!['\n'],
+                '\t' => vec![' ', ' ', ' ', ' '],
+                c if (c as u32) < 0x20 || c == '\u{7f}' => vec![],
+                c => vec![c],
+            })
+            .collect();
+        let n = cleaned.len();
+        self.chars.splice(self.cursor..self.cursor, cleaned);
         self.cursor += n;
     }
     pub fn backspace(&mut self) {

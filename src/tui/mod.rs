@@ -299,8 +299,11 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                     // raw mode: Ctrl+C arrives as a key event. App::key owns
                     // the Press/Release policy — permission shortcuts honor
                     // Release-only transports, text input ignores them.
+                    // Press-only here: on Press+Release transports the
+                    // Release would otherwise quit after the Press stopped.
                     if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                         && matches!(k.code, crossterm::event::KeyCode::Char('c'))
+                        && k.kind != crossterm::event::KeyEventKind::Release
                     {
                         if app.running { app.stop(); } else { quit = true; }
                         dirty = true;
@@ -444,7 +447,12 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                                     auditor,
                                     objective: task,
                                     max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
-                                    session: format!("tui-{}", std::process::id()),
+                                    // Unique per mission — a constant
+                                    // session would reuse branch names and
+                                    // `worktree add`'s `branch -D` would
+                                    // force-delete the PREVIOUS mission's
+                                    // accepted integration branch.
+                                    session: format!("tui-{}-{}", std::process::id(), run),
                                     keep_worktrees: false, // accepted branch survives cleanup
                                     request_timeout: Duration::from_millis(al.request_timeout_ms),
                                     task_timeout: Duration::from_secs(900),

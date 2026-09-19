@@ -109,3 +109,20 @@ bash_timeout_max_ms = 600000
 # endpoint = "https://mcp.exa.ai/mcp"
 #
 # Headless overrides: SUI_WEB_ACCESS=ask|auto, SUI_EXA_API_KEY=…
+
+# ── Persisted UI settings (GLOBAL config only — written by Settings → Save) ──
+# The TUI persists these under [ui]; you can also set them by hand.
+#
+# [ui]
+# workspace = "~/workspaces"         # default workspace dir
+# mode = "solo"                      # "solo" | "mission"
+# solo_profile = "cheap"
+# orchestrator_profile = "strong"
+# worker_profile = "cheap"
+# auditor_profile = "strong"         # unset = reuse orchestrator
+# worker_count = 1                   # 1–2
+# reasoning = "auto"                 # "auto" | "hidden" | "expanded"
+# mouse = true                       # false = native terminal selection
+# acceptance = ["cargo test"]        # extra gates on the merged candidate
+# web_access = "ask"                 # "off" | "ask" | "auto"
+# web_key_env = "EXA_API_KEY"

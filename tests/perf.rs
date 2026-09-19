@@ -168,6 +168,7 @@ fn transcript_rows_cost() {
                 run,
                 agent: "solo".into(),
                 call: format!("c{i}"),
+                summary: format!("bash: cmd {i}"),
                 name: "bash".into(),
                 ms: 12,
                 status: sui::events::ToolStatus::Ok,

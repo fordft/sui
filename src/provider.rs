@@ -149,7 +149,11 @@ impl Provider {
         }
 
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        // Byte buffer: '\n' can never appear inside a UTF-8 multibyte
+        // char, so byte-scanning for newlines and decoding complete LINES
+        // is corruption-free — unlike lossy-decoding each raw chunk,
+        // which splits a multibyte char at a boundary into two U+FFFDs.
+        let mut buf: Vec<u8> = Vec::new();
         let mut content = String::new();
         let mut reasoning: Option<String> = None;
         let mut calls: BTreeMap<u32, CallAcc> = BTreeMap::new();
@@ -158,84 +162,108 @@ impl Provider {
         let mut returned_model: Option<String> = None;
         let mut first_delta_ms: Option<u128> = None;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("stream read failed (interrupted)")?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+        let mut handle_line = |line: &str| -> Result<()> {
+            if line.is_empty() || line.starts_with(':') {
+                return Ok(()); // blank line / comment keep-alive
+            }
+            let Some(data) = line.strip_prefix("data:") else {
+                return Ok(());
+            };
+            let data = data.trim();
+            if data == "[DONE]" {
+                return Ok(());
+            }
+            let Ok(ev) = serde_json::from_str::<Value>(data) else {
+                return Ok(()); // tolerate non-JSON keep-alive lines
+            };
 
-            // scan by index — drain once per chunk, no per-line alloc
-            let mut pos = 0usize;
-            while let Some(nl) = buf[pos..].find('\n') {
-                let end = pos + nl;
-                let line = buf[pos..end].trim_end_matches('\r');
-                pos = end + 1;
-                if line.is_empty() || line.starts_with(':') {
-                    continue; // blank line / comment keep-alive
+            // In-stream error events (e.g. OpenRouter emits these after
+            // 200). `error` must be an object — some providers send an
+            // explicit `"error": null` on normal chunks.
+            if let Some(err) = ev.get("error").filter(|e| e.is_object()) {
+                let msg = err["message"].as_str().unwrap_or("unknown stream error");
+                bail!("provider stream error: {}", truncate(msg, 300));
+            }
+            if let Some(m) = ev["model"].as_str() {
+                returned_model = Some(m.to_string());
+            }
+            // `"usage": null` is a placeholder, not telemetry — keep
+            // `usage` None so callers don't mistake it for complete data.
+            if let Some(u) = ev.get("usage").filter(|u| u.is_object()) {
+                usage = Some(parse_usage(u));
+            }
+            for ch in ev["choices"].as_array().into_iter().flatten() {
+                if let Some(fr) = ch["finish_reason"].as_str() {
+                    finish_reason = Some(fr.to_string());
                 }
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data == "[DONE]" {
-                    continue;
-                }
-                let Ok(ev) = serde_json::from_str::<Value>(data) else {
-                    continue; // tolerate non-JSON keep-alive lines
-                };
-
-                // In-stream error events (e.g. OpenRouter emits these after 200)
-                if let Some(err) = ev.get("error") {
-                    let msg = err["message"].as_str().unwrap_or("unknown stream error");
-                    bail!("provider stream error: {}", truncate(msg, 300));
-                }
-                if let Some(m) = ev["model"].as_str() {
-                    returned_model = Some(m.to_string());
-                }
-                if let Some(u) = ev.get("usage") {
-                    usage = Some(parse_usage(u));
-                }
-                for ch in ev["choices"].as_array().into_iter().flatten() {
-                    if let Some(fr) = ch["finish_reason"].as_str() {
-                        finish_reason = Some(fr.to_string());
+                let d = &ch["delta"];
+                if let Some(t) = d["content"].as_str() {
+                    if first_delta_ms.is_none() {
+                        first_delta_ms = Some(start.elapsed().as_millis());
                     }
-                    let d = &ch["delta"];
-                    if let Some(t) = d["content"].as_str() {
-                        if first_delta_ms.is_none() {
-                            first_delta_ms = Some(start.elapsed().as_millis());
-                        }
-                        content.push_str(t);
-                        on_delta(t);
+                    content.push_str(t);
+                    on_delta(t);
+                }
+                // Normalize reasoning fields: prefer reasoning_content,
+                // fall back to `reasoning` (OpenRouter). Equivalent
+                // fields are never both emitted for one delta.
+                if let Some(r) = d["reasoning_content"]
+                    .as_str()
+                    .or_else(|| d["reasoning"].as_str())
+                {
+                    if first_delta_ms.is_none() {
+                        first_delta_ms = Some(start.elapsed().as_millis());
                     }
-                    // Normalize reasoning fields: prefer reasoning_content,
-                    // fall back to `reasoning` (OpenRouter). Equivalent
-                    // fields are never both emitted for one delta.
-                    if let Some(r) = d["reasoning_content"]
-                        .as_str()
-                        .or_else(|| d["reasoning"].as_str())
-                    {
-                        reasoning.get_or_insert_with(String::new).push_str(r);
-                        on_reasoning(r);
+                    reasoning.get_or_insert_with(String::new).push_str(r);
+                    on_reasoning(r);
+                }
+                for tc in d["tool_calls"].as_array().into_iter().flatten() {
+                    if first_delta_ms.is_none() {
+                        first_delta_ms = Some(start.elapsed().as_millis());
                     }
-                    for tc in d["tool_calls"].as_array().into_iter().flatten() {
-                        if first_delta_ms.is_none() {
-                            first_delta_ms = Some(start.elapsed().as_millis());
-                        }
-                        let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                        let acc = calls.entry(idx).or_default();
-                        if let Some(id) = tc["id"].as_str() {
-                            acc.id.push_str(id);
-                        }
-                        if let Some(n) = tc["function"]["name"].as_str() {
-                            acc.name.push_str(n);
-                        }
-                        if let Some(a) = tc["function"]["arguments"].as_str() {
-                            acc.args.push_str(a);
-                        }
+                    let idx = tc["index"].as_u64().unwrap_or(0) as u32;
+                    let acc = calls.entry(idx).or_default();
+                    if let Some(id) = tc["id"].as_str() {
+                        acc.id.push_str(id);
+                    }
+                    if let Some(n) = tc["function"]["name"].as_str() {
+                        acc.name.push_str(n);
+                    }
+                    if let Some(a) = tc["function"]["arguments"].as_str() {
+                        acc.args.push_str(a);
                     }
                 }
             }
+            Ok(())
+        };
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("stream read failed (interrupted)")?;
+            buf.extend_from_slice(&chunk);
+
+            // scan by index — drain once per chunk, no per-line alloc
+            let mut pos = 0usize;
+            while let Some(nl) = buf[pos..].iter().position(|&b| b == b'\n') {
+                let end = pos + nl;
+                let line = String::from_utf8_lossy(&buf[pos..end]);
+                pos = end + 1;
+                handle_line(line.trim_end_matches('\r'))?;
+            }
             buf.drain(..pos);
         }
+        // A truncated stream can end mid-line — still parse what arrived
+        // (a complete final event without its newline still counts).
+        if !buf.is_empty() {
+            let line = String::from_utf8_lossy(&buf);
+            handle_line(line.trim_end_matches('\r'))?;
+        }
 
+        // A usage chunk on a truncated stream is partial telemetry, not
+        // a completed response — mark it complete only when the stream
+        // actually finished.
+        if let Some(u) = &mut usage {
+            u.complete = finish_reason.is_some();
+        }
         let tool_calls = calls
             .into_values()
             .map(|a| ToolCall {
@@ -385,7 +413,9 @@ fn parse_usage(u: &Value) -> Usage {
         cache_write_tokens: g(&u["cache_write_tokens"])
             .or_else(|| g(&u["prompt_tokens_details"]["cache_write_tokens"])),
         output_tokens: g(&u["completion_tokens"]),
-        complete: true,
+        // The stream proved the response complete only if a finish_reason
+        // arrived — stream_chat stamps this after the loop.
+        complete: false,
     }
 }
 

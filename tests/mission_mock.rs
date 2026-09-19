@@ -6,17 +6,16 @@ mod common;
 
 use common::{sse_text, sse_tool_calls, submit, tc};
 use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use sui::config::Profile;
 use sui::mission::{self, MissionCfg};
 
-static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-fn lock() -> &'static Mutex<()> {
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// tests serialize through this so fixture repos/env/ports can't interleave
+// — tokio Mutex because the guard is held across every await in the test
+static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ── scriptable SSE mock ────────────────────────────────────────────────
 
@@ -165,7 +164,7 @@ fn head(repo: &PathBuf) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
-fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
+fn cfg(port: u16, repo: &Path) -> MissionCfg {
     let prof = |name: &str| Profile {
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),
@@ -179,7 +178,7 @@ fn cfg(port: u16, repo: &PathBuf) -> MissionCfg {
         .unwrap()
         .as_nanos();
     MissionCfg {
-        repo: repo.clone(),
+        repo: repo.to_path_buf(),
         run_dir: std::env::temp_dir().join(format!("sui-mrun-{ts}")),
         control: sui::backend::Backend::Native(prof("strong")),
         worker: sui::backend::Backend::Native(prof("cheap")),
@@ -230,7 +229,7 @@ fn worker_writes(file: &str, content: &str) -> Value {
 
 #[tokio::test]
 async fn mission_success() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let port = mock(Script {
@@ -269,7 +268,7 @@ async fn mission_success() {
 
 #[tokio::test]
 async fn mission_malformed_plan() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let port = mock(Script {
         plan_payload: json!({"not": "a plan"}),
@@ -287,7 +286,7 @@ async fn mission_malformed_plan() {
 
 #[tokio::test]
 async fn mission_overlapping_ownership() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let mut plan = good_plan(&base);
@@ -310,7 +309,7 @@ async fn mission_overlapping_ownership() {
 
 #[tokio::test]
 async fn mission_out_of_scope() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let port = mock(Script {
@@ -347,7 +346,7 @@ async fn mission_out_of_scope() {
 
 #[tokio::test]
 async fn mission_acceptance_failure_then_escalation_abort() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let mut plan = good_plan(&base);
@@ -367,7 +366,7 @@ async fn mission_acceptance_failure_then_escalation_abort() {
 
 #[tokio::test]
 async fn mission_audit_fail_then_repair_then_pass() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let port = mock(Script {
@@ -387,7 +386,7 @@ async fn mission_audit_fail_then_repair_then_pass() {
 
 #[tokio::test]
 async fn mission_repair_budget_exhausted() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let mut plan = good_plan(&base);
@@ -417,7 +416,7 @@ async fn mission_repair_budget_exhausted() {
 
 #[tokio::test]
 async fn mission_cancelled_midtask() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let port = mock(Script {
@@ -445,21 +444,30 @@ async fn mission_cancelled_midtask() {
         r.outcome
     );
     assert!(repo_clean(&repo));
-    // no orphaned sleep
-    let orphans = std::process::Command::new("pgrep")
-        .args(["-x", "sleep"])
-        .output()
-        .unwrap();
+    // no orphaned sleep — match the full cmdline (`-x sleep` prints PIDs,
+    // so a "contains sleep" check is vacuous), with a short grace for the
+    // process-group kill to land
+    let mut orphans = String::new();
+    for _ in 0..20 {
+        let out = std::process::Command::new("pgrep")
+            .args(["-f", "^sleep 30$"])
+            .output()
+            .unwrap();
+        orphans = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if orphans.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(
-        !String::from_utf8_lossy(&orphans.stdout).contains("sleep")
-            || String::from_utf8_lossy(&orphans.stdout).trim().is_empty(),
-        "orphaned sleep survived cancel"
+        orphans.is_empty(),
+        "orphaned sleep survived cancel: {orphans}"
     );
 }
 
 #[tokio::test]
 async fn mission_out_of_scope_after_commit() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     // worker writes the owned file, then STAGES AND COMMITS an
@@ -484,7 +492,7 @@ async fn mission_out_of_scope_after_commit() {
 
 #[tokio::test]
 async fn mission_two_workers_parallel_wave() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let mut plan = good_plan(&base);
@@ -517,7 +525,7 @@ async fn mission_two_workers_parallel_wave() {
 /// directory — the same code path the TUI Export action uses.
 #[tokio::test]
 async fn mission_export_report() {
-    let _g = lock().lock().unwrap();
+    let _g = LOCK.lock().await;
     let repo = fixture_repo();
     let base = head(&repo);
     let port = mock(Script {

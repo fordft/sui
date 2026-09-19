@@ -411,7 +411,8 @@ impl Norm {
             run: self.run,
             agent: self.agent.clone(),
             call: id.to_string(),
-            name: m.name,
+            name: m.name.clone(),
+            summary: m.name, // "kind: title" — doubles as the one-line what
             ms: m.started.elapsed().as_millis(),
             status: ts,
             exit: None,

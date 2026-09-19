@@ -420,7 +420,12 @@ async fn teardown(mut child: async_process::Child, stderr_rx: oneshot::Receiver<
         let _ = child.kill();
         let _ = child.status().await;
     }
-    stderr_rx.await.unwrap_or_default()
+    // stderr EOF needs the LAST holder gone — a surviving grandchild that
+    // inherited the fd keeps it open; bound the wait or teardown hangs
+    match tokio::time::timeout(KILL_GRACE, stderr_rx).await {
+        Ok(Ok(s)) => s,
+        _ => String::new(),
+    }
 }
 
 struct ConnArgs {

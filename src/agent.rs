@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -203,10 +203,29 @@ impl Agent {
     /// Stamp subsequent UI events with this activity-run id.
     pub fn set_run_id(&mut self, run: u64) {
         self.run_id = run;
+        // Route journal-failure diagnostics into the UI event stream —
+        // a raw eprintln would corrupt the TUI alt-screen. Headless
+        // agents keep the stderr default inside Journal.
+        if let Some(tx) = &self.events {
+            let tx = tx.clone();
+            let agent = self.ident.agent_id.clone();
+            self.journal.set_notice(Box::new(move |msg| {
+                let _ = tx.send(UiEvent::Error {
+                    run,
+                    agent: agent.clone(),
+                    msg: format!("journal: {msg}"),
+                });
+            }));
+        }
     }
 
     /// Rehydrate history (e.g. rebuilt from a journal for restart/replay).
+    /// A restored history already carries the guidance block in its first
+    /// user message — restoring `guided` too is what makes a restarted
+    /// session serialize the SAME request the original would (the certify
+    /// replay check depends on this byte-identity).
     pub fn restore_history(&mut self, msgs: Vec<Message>) {
+        self.guided = !msgs.is_empty();
         self.history = msgs;
     }
 
@@ -458,6 +477,17 @@ impl Agent {
             });
 
             if outcome.tool_calls.is_empty() {
+                if outcome.finish_reason.is_none() {
+                    // No terminal signal — the stream ended without
+                    // finish_reason (truncated/interrupted). The text
+                    // we got stays in history, but the turn did NOT
+                    // provably complete: say so in the journal.
+                    self.journal.log(
+                        "warn",
+                        json!({ "request_id": req_id,
+                                "msg": "stream ended without finish_reason — response may be truncated" }),
+                    );
+                }
                 return Ok(());
             }
 
@@ -643,6 +673,7 @@ impl Agent {
                     agent: self.ident.agent_id.clone(),
                     call: call_id,
                     name: name.to_string(),
+                    summary: summary.clone(),
                     ms: t_tool.elapsed().as_millis(),
                     status: disp.status,
                     exit: disp.exit,
@@ -681,33 +712,41 @@ impl Agent {
                         "interrupted",
                         json!({ "request_id": req_id, "phase": "tool" }),
                     );
+                    // Sibling calls never ran — they still need paired
+                    // tool messages or the NEXT request sends an
+                    // assistant message with unanswered tool_calls.
+                    self.skip_tail(
+                        req_id,
+                        &outcome.tool_calls,
+                        i + 1,
+                        "status: skipped\nerror: turn interrupted",
+                    );
                     return Ok(());
                 }
                 if finish_after {
                     // every remaining call still needs a paired tool response
-                    for (j, rest) in outcome.tool_calls[i + 1..].iter().enumerate() {
-                        let rest_id = if rest.id.is_empty() {
-                            format!("r{req_id}.{}", i + 1 + j)
-                        } else {
-                            rest.id.clone()
-                        };
-                        self.emit(UiEvent::ToolDone {
-                            run: run_id,
-                            agent: self.ident.agent_id.clone(),
-                            call: rest_id,
-                            name: rest.function.name.clone(),
-                            ms: 0,
-                            status: crate::events::ToolStatus::Skipped,
-                            exit: None,
-                            result: "status: skipped\nerror: turn ended by submission".into(),
-                            truncated: false,
-                            dropped: 0,
-                        });
-                        self.history.push(Message::Tool {
-                            tool_call_id: rest.id.clone(),
-                            content: "status: skipped\nerror: turn ended by submission".into(),
-                        });
-                    }
+                    self.skip_tail(
+                        req_id,
+                        &outcome.tool_calls,
+                        i + 1,
+                        "status: skipped\nerror: turn ended by submission",
+                    );
+                    return Ok(());
+                }
+                // The stop flag can be set while a batch of UNcancellable
+                // calls is mid-flight — check between calls so the next
+                // one doesn't fire a command the user already stopped.
+                if self.stop.load(Ordering::Relaxed) {
+                    self.journal.log(
+                        "interrupted",
+                        json!({ "request_id": req_id, "phase": "tool_batch" }),
+                    );
+                    self.skip_tail(
+                        req_id,
+                        &outcome.tool_calls,
+                        i + 1,
+                        "status: skipped\nerror: run stopped",
+                    );
                     return Ok(());
                 }
             }
@@ -716,6 +755,60 @@ impl Agent {
             eprintln!("· max_turns reached; stopping");
         }
         Ok(())
+    }
+
+    /// Give every not-yet-executed call from `calls[from..]` a terminal
+    /// disposition — ToolDone for the UI, a paired Tool message for
+    /// history, a journal record for replay. Without this a cancelled or
+    /// early-finished batch leaves dangling tool_calls that make the
+    /// next request malformed, and replay loses the tool rows.
+    fn skip_tail(
+        &mut self,
+        req_id: u64,
+        calls: &[crate::types::ToolCall],
+        from: usize,
+        text: &str,
+    ) {
+        for (j, rest) in calls[from..].iter().enumerate() {
+            let idx = from + j;
+            let rest_id = if rest.id.is_empty() {
+                format!("r{req_id}.{idx}")
+            } else {
+                rest.id.clone()
+            };
+            let args_str = rest.function.arguments.as_str();
+            let parsed = serde_json::from_str::<Value>(args_str).unwrap_or(Value::Null);
+            self.emit(UiEvent::ToolDone {
+                run: self.run_id,
+                agent: self.ident.agent_id.clone(),
+                call: rest_id,
+                name: rest.function.name.clone(),
+                summary: summarize(&rest.function.name, args_str, &parsed),
+                ms: 0,
+                status: crate::events::ToolStatus::Skipped,
+                exit: None,
+                result: text.to_string(),
+                truncated: false,
+                dropped: 0,
+            });
+            self.journal.log(
+                "tool",
+                json!({
+                    "tool_call_id": rest.id,
+                    "name": rest.function.name,
+                    "args": rest.function.arguments,
+                    "executed": false,
+                    "status": crate::events::ToolStatus::Skipped.label(),
+                    "exit_code": null,
+                    "execution_ms": 0,
+                    "result": text,
+                }),
+            );
+            self.history.push(Message::Tool {
+                tool_call_id: rest.id.clone(),
+                content: text.to_string(),
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -839,6 +932,14 @@ fn is_web(name: &str) -> bool {
 }
 
 fn summarize(name: &str, args: &str, v: &Value) -> String {
+    if v.is_null() {
+        // args never parsed — show the raw payload (bounded) rather
+        // than a bare "bash:" that hides why the call was rejected
+        return format!(
+            "{name}: <malformed args: {}>",
+            crate::provider::truncate(args, 120)
+        );
+    }
     match name {
         "bash" => format!("bash: {}", v["command"].as_str().unwrap_or("")),
         "read_file" => format!("read {}", v["path"].as_str().unwrap_or("")),
@@ -859,9 +960,9 @@ fn error_class(e: &anyhow::Error) -> &'static str {
     let m = format!("{e:#}");
     if m.contains("deadline") {
         "deadline_exceeded"
-    } else if m.contains("provider http") {
+    } else if m.contains("provider http") || m.contains("codex http") {
         "http_error"
-    } else if m.contains("stream error") {
+    } else if m.contains("stream error") || m.contains("response incomplete") {
         "stream_error"
     } else if m.contains("interrupted") {
         "stream_interrupted"

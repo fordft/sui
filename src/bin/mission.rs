@@ -118,13 +118,14 @@ struct TrialRow {
 /// Fresh disposable env: a real clone at the committed base. Linked
 /// worktrees share objects/refs, so strategies never share a repo —
 /// neither can inspect another's solution branches or history.
-fn fresh_env(orig: &Path, dir: &Path) -> Result<PathBuf> {
-    let out = std::process::Command::new("git")
+async fn fresh_env(orig: &Path, dir: &Path) -> Result<PathBuf> {
+    let out = tokio::process::Command::new("git")
         .arg("clone")
         .arg("--quiet")
         .arg(orig)
         .arg(dir)
-        .output()?;
+        .output()
+        .await?;
     if !out.status.success() {
         anyhow::bail!("env clone failed: {}", String::from_utf8_lossy(&out.stderr));
     }
@@ -134,18 +135,18 @@ fn fresh_env(orig: &Path, dir: &Path) -> Result<PathBuf> {
 /// Single-agent strategy (strong-only or cheap-only): one agent in its own
 /// worktree on the env clone, generic worker contract, no orchestration.
 async fn solo(
-    env: &PathBuf,
-    run_dir: &PathBuf,
+    env: &Path,
+    run_dir: &Path,
     journal_name: &str,
     session: &str,
     prof: &Profile,
     task: &str,
 ) -> Result<TrialRow> {
     let t0 = Instant::now();
-    let base = worktree::head(env)?;
+    let base = worktree::head(env).await?;
     let wt = worktree::worktrees_dir(run_dir).join(journal_name);
     let branch = format!("sui-{journal_name}-{session}");
-    worktree::add(env, &wt, &branch, &base)?;
+    worktree::add(env, &wt, &branch, &base).await?;
     let al = sui::config::agent_limits(env);
     let mut a = Agent::new(
         Provider::new(
@@ -189,8 +190,12 @@ async fn solo(
     .await?;
     // git failures propagate — a failed diff/commit is an infrastructure
     // error, not "the model changed nothing" (same contract as run_turn)
-    let changed = worktree::changed_files(&wt, &base).context("inspect worktree changes")?;
-    let sha = worktree::commit_all(&wt, journal_name).context("commit candidate changes")?;
+    let changed = worktree::changed_files(&wt, &base)
+        .await
+        .context("inspect worktree changes")?;
+    let sha = worktree::commit_all(&wt, journal_name)
+        .await
+        .context("commit candidate changes")?;
     let mut usage = mission::UsageAgg::default();
     for line in std::fs::read_to_string(run_dir.join(format!("{journal_name}.jsonl")))
         .unwrap_or_default()
@@ -234,11 +239,12 @@ async fn external_acceptance(
 ) -> (Vec<String>, Option<bool>) {
     let mut rows = vec![];
     for p in trusted {
-        let o = std::process::Command::new("git")
+        let o = tokio::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args(["checkout", base, "--", p])
-            .output();
+            .output()
+            .await;
         match o {
             Ok(o) if o.status.success() => {}
             Ok(o) => rows.push(format!(
@@ -410,8 +416,8 @@ async fn main() -> Result<()> {
                 };
                 eprintln!("· trial {trial} strategy {name}");
                 let env = run_dir.join("envs").join(format!("{name}-t{trial}"));
-                let env = fresh_env(&repo, &env)?;
-                let env_base = worktree::head(&env)?;
+                let env = fresh_env(&repo, &env).await?;
+                let env_base = worktree::head(&env).await?;
                 let mrd = run_dir.join(format!("m{trial}-{name}"));
                 std::fs::create_dir_all(&mrd)?;
 
@@ -456,7 +462,6 @@ async fn main() -> Result<()> {
                             elapsed_ms: r.elapsed_ms,
                             repairs: r.repairs,
                             escalations: r.escalations,
-                            ..Default::default()
                         };
                         // external acceptance on the integrated candidate
                         let integ = mrd.join("worktrees/integration");
@@ -495,7 +500,7 @@ async fn main() -> Result<()> {
             keep_worktrees: cli.keep_worktrees || !cli.acceptance.is_empty(),
             ..mission_cfg(&repo, &run_dir, &session)
         };
-        let repo_base = worktree::head(&repo)?;
+        let repo_base = worktree::head(&repo).await?;
         let r = mission::run(cfg).await?;
         let mut row = TrialRow {
             strategy: "mission".into(),
@@ -508,7 +513,6 @@ async fn main() -> Result<()> {
             elapsed_ms: r.elapsed_ms,
             repairs: r.repairs,
             escalations: r.escalations,
-            ..Default::default()
         };
         if let (Some(b), Some(sha)) = (&r.branch, &r.accepted_sha) {
             eprintln!("· accepted candidate: {b} @ {sha}");

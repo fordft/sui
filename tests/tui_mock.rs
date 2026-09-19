@@ -7,7 +7,7 @@ mod common;
 use common::{sse_text, sse_tool_calls, tc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -177,7 +177,7 @@ fn jdir() -> PathBuf {
     d
 }
 
-fn app_with_mock(repo: &PathBuf, port: u16) -> App {
+fn app_with_mock(repo: &Path, port: u16) -> App {
     let mut profiles = BTreeMap::new();
     let pc = |model: &str| ProfileCfg {
         base_url: Some(format!("http://127.0.0.1:{port}/v1")),
@@ -204,7 +204,7 @@ fn app_with_mock(repo: &PathBuf, port: u16) -> App {
         web_access: None,
         web_key_env: None,
     };
-    App::with_state(repo.clone(), profiles, ui)
+    App::with_state(repo.to_path_buf(), profiles, ui)
 }
 
 /// Drain core events into the app until RunDone (or timeout).
@@ -594,13 +594,13 @@ fn tui_paste_targets_modal_field() {
     )));
     cf.auth = AuthMode::ApiKey;
     let fs = cf.fields();
-    assert!(fs.iter().any(|x| *x == Field::ApiKey));
-    assert!(fs.iter().any(|x| *x == Field::Store));
+    assert!(fs.contains(&Field::ApiKey));
+    assert!(fs.contains(&Field::Store));
     assert!(fs.iter().all(|x| *x != Field::KeyEnv));
     cf.auth = AuthMode::Advanced;
     let fs = cf.fields();
-    assert!(fs.iter().any(|x| *x == Field::CredSrc));
-    assert!(fs.iter().any(|x| *x == Field::KeyEnv));
+    assert!(fs.contains(&Field::CredSrc));
+    assert!(fs.contains(&Field::KeyEnv));
     assert!(fs.iter().all(|x| *x != Field::ApiKey));
     assert!(fs.iter().all(|x| *x != Field::Store));
 
@@ -622,7 +622,7 @@ fn tui_paste_targets_modal_field() {
 // ── permission modal key semantics ────────────────────────────────────
 
 fn perm_app(
-    repo: &PathBuf,
+    repo: &Path,
 ) -> (
     App,
     tokio::sync::mpsc::UnboundedReceiver<sui::events::GateChoice>,
@@ -1287,6 +1287,7 @@ fn tool_done(
         agent: agent.into(),
         call: call.into(),
         name: "bash".into(),
+        summary: format!("bash: {call}"),
         ms: 12,
         status,
         exit,
@@ -1896,7 +1897,7 @@ async fn transcript_display_never_changes_requests() {
         })
     }
 
-    async fn one_run(repo: &PathBuf, rec: PathBuf, fiddle: bool) {
+    async fn one_run(repo: &Path, rec: PathBuf, fiddle: bool) {
         let port = mock_rec(rec);
         let mut app = app_with_mock(repo, port);
         let run = send_task(&mut app, "WRITEME");
@@ -1904,7 +1905,7 @@ async fn transcript_display_never_changes_requests() {
         let prof = sui::tui::resolve_to_profile(&app, "mock-worker").unwrap();
         let solo = sui::tui::spawn_solo(
             prof,
-            repo.clone(),
+            repo.to_path_buf(),
             jdir(),
             ev_tx,
             app.cancel.clone(),
@@ -2085,8 +2086,9 @@ fn transcript_groups_repeated_calls() {
         app.apply_event(UiEvent::ToolDone {
             run,
             agent: "solo".into(),
-            call,
+            call: call.clone(),
             name: "read_file".into(),
+            summary: format!("read {call}"),
             ms: 3,
             status: ToolStatus::Ok,
             exit: None,
@@ -2153,13 +2155,12 @@ fn click(app: &mut App, col: u16, row: u16) {
     app.mouse(mev(MouseEventKind::Up(MouseButton::Left), col, row));
 }
 fn zone(app: &App, pred: impl Fn(&Hit) -> bool) -> (u16, u16) {
-    let z = app
+    let z = *app
         .hits
         .borrow()
         .iter()
         .find(|z| pred(&z.hit))
-        .expect("hit zone present")
-        .clone();
+        .expect("hit zone present");
     (z.x + z.w / 2, z.y)
 }
 
@@ -2228,7 +2229,7 @@ fn mouse_perm_buttons_decide() {
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let (cx, cy) = zone(&app, |h| {
-        matches!(h, Hit::Perm(sui::events::GateChoice::Once))
+        matches!(h, Hit::Perm(sui::events::GateChoice::Once, _))
     });
     click(&mut app, cx, cy);
     assert_eq!(
@@ -2249,7 +2250,7 @@ fn mouse_perm_buttons_decide() {
     });
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let (cx, cy) = zone(&app, |h| {
-        matches!(h, Hit::Perm(sui::events::GateChoice::Session))
+        matches!(h, Hit::Perm(sui::events::GateChoice::Session, _))
     });
     click(&mut app, cx, cy);
     assert_eq!(rx2.try_recv().unwrap(), sui::events::GateChoice::Session);
@@ -2397,7 +2398,7 @@ fn mouse_stale_perm_zone_cannot_close_other_modal() {
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let (cx, cy) = zone(&app, |h| {
-        matches!(h, Hit::Perm(sui::events::GateChoice::Once))
+        matches!(h, Hit::Perm(sui::events::GateChoice::Once, _))
     });
     // modal swapped before the next draw — the zone is now stale
     app.modal = Some(sui::tui::app::Modal::Help);
