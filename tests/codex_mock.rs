@@ -62,7 +62,7 @@ async fn codex_oauth_smoke() {
     ];
 
     let out1 = p
-        .stream_chat(&msgs, &tools, |_| {}, |_| {})
+        .stream_chat(&sui::context::Compiled::view(&msgs), &tools, |_| {}, |_| {})
         .await
         .expect("turn 1");
     eprintln!(
@@ -100,7 +100,7 @@ async fn codex_oauth_smoke() {
     });
 
     let out2 = p
-        .stream_chat(&msgs, &tools, |_| {}, |_| {})
+        .stream_chat(&sui::context::Compiled::view(&msgs), &tools, |_| {}, |_| {})
         .await
         .expect("turn 2");
     eprintln!("t2: content={:?} usage={:?}", out2.content, out2.usage);

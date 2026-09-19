@@ -159,6 +159,7 @@ async fn solo(
             bash_timeout: Duration::from_millis(al.bash_timeout_ms),
             bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
             web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
+            canon_root: std::sync::OnceLock::new(),
         },
         Gate::new(true),
         Journal::open_named(run_dir, journal_name)?,

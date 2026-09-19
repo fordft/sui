@@ -15,10 +15,29 @@ const READ_MAX: usize = 400;
 /// NOTE: this is a validation guard, not a sandbox. There remains a
 /// TOCTOU window between validation and open; true containment needs
 /// openat2/RESOLVE_BENEATH or an OS sandbox. bash is NOT covered at all.
+/// resolve() against a ToolContext — canonicalizes the workspace root
+/// once per context, not once per call.
+pub fn resolve_ctx(ctx: &ToolContext, rel: &str) -> Result<PathBuf> {
+    let root = ctx
+        .canon_root
+        .get_or_init(|| {
+            ctx.workspace
+                .canonicalize()
+                .unwrap_or_else(|_| ctx.workspace.clone())
+        })
+        .clone();
+    resolve_in(&root, rel)
+}
+
 pub fn resolve(workspace: &Path, rel: &str) -> Result<PathBuf> {
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
+    resolve_in(&root, rel)
+}
+
+fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
+    let root = root.to_path_buf();
     let joined = if Path::new(rel).is_absolute() {
         PathBuf::from(rel)
     } else {
@@ -61,13 +80,31 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let path = args["path"].as_str().unwrap_or("");
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = (args["limit"].as_u64().unwrap_or(READ_DEFAULT as u64) as usize).min(READ_MAX);
-    let p = resolve(&ctx.workspace, path)?;
+    let p = resolve_ctx(ctx, path)?;
 
-    let text =
-        std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
+    use std::fmt::Write;
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(&p).with_context(|| format!("cannot read {}", p.display()))?;
+    let mut r = BufReader::new(f);
     let start = offset.saturating_sub(1);
+    let mut total = 0usize;
+    let mut window = String::new();
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if r.read_line(&mut buf)? == 0 {
+            break;
+        }
+        total += 1;
+        if total > start && total <= start + limit {
+            let _ = write!(
+                window,
+                "{:>5}  {}\n",
+                total,
+                buf.trim_end_matches(['\n', '\r'])
+            );
+        }
+    }
     if start >= total {
         return Ok(format!(
             "status: success\npath: {path}\nlines: {total}\ncontent: <empty — offset past end>"
@@ -78,11 +115,9 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
         "status: success\npath: {path}\nlines: {total}\nshowing: {}-{end}\n",
         start + 1
     );
-    for (i, l) in lines[start..end].iter().enumerate() {
-        out.push_str(&format!("{:>5}  {}\n", start + i + 1, l));
-    }
+    out.push_str(&window);
     if end < total {
-        out.push_str(&format!("truncated: true ({} lines remain)\n", total - end));
+        let _ = write!(out, "truncated: true ({} lines remain)\n", total - end);
     }
     Ok(out)
 }
@@ -90,7 +125,7 @@ pub fn read_file(ctx: &ToolContext, args: &Value) -> Result<String> {
 pub fn write_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     let path = args["path"].as_str().unwrap_or("");
     let content = args["content"].as_str().unwrap_or("");
-    let p = resolve(&ctx.workspace, path)?;
+    let p = resolve_ctx(ctx, path)?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -111,7 +146,7 @@ pub fn edit_file(ctx: &ToolContext, args: &Value) -> Result<String> {
     if old == new {
         return Ok("status: error\nerror: old_str equals new_str".into());
     }
-    let p = resolve(&ctx.workspace, path)?;
+    let p = resolve_ctx(ctx, path)?;
     let text =
         std::fs::read_to_string(&p).with_context(|| format!("cannot read {}", p.display()))?;
 

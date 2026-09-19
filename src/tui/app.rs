@@ -831,13 +831,35 @@ impl App {
         let ui_web_access = ui.web_access.clone();
         let ui_web_key_env = ui.web_key_env.clone();
         let mut session_keys = BTreeMap::new();
+        let mut web_key = None;
         if keyring_ok {
-            for name in profiles.keys() {
-                match keyring::Entry::new("sui", name).and_then(|e| e.get_password()) {
-                    Ok(k) => {
-                        session_keys.insert(name.clone(), k);
+            // Bounded batch: a keyring that probed OK can still stall
+            // per-entry reads (locked vault, re-auth prompt). One worker
+            // thread reads every entry sequentially; we collect whatever
+            // arrives inside a shared deadline — missing entries behave
+            // exactly like NoEntry (session-only), never a startup hang.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut names: Vec<String> = profiles.keys().cloned().collect();
+            names.push("web".into());
+            std::thread::spawn(move || {
+                for name in names {
+                    let r = keyring::Entry::new("sui", &name)
+                        .and_then(|e| e.get_password())
+                        .ok();
+                    if tx.send((name, r)).is_err() {
+                        return;
                     }
-                    Err(_) => {}
+                }
+            });
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while let Some(rem) = deadline.checked_duration_since(Instant::now()) {
+                match rx.recv_timeout(rem) {
+                    Ok((n, Some(k))) if n == "web" => web_key = Some(k),
+                    Ok((n, Some(k))) => {
+                        session_keys.insert(n, k);
+                    }
+                    Ok(_) => {}      // entry absent — same as NoEntry
+                    Err(_) => break, // deadline hit or worker finished
                 }
             }
         }
@@ -946,13 +968,7 @@ impl App {
                 _ => crate::web::load_cfg(None).access,
             },
             web_key_env: ui_web_key_env,
-            web_key: if keyring_ok {
-                keyring::Entry::new("sui", "web")
-                    .and_then(|e| e.get_password())
-                    .ok()
-            } else {
-                None
-            },
+            web_key,
             run_dir: None,
             pending_perms: Default::default(),
             history: Vec::new(),
@@ -1521,10 +1537,9 @@ impl App {
 
     /// Scroll by `d` rows (positive = up). Entering scrolled state
     /// captures the anchor so later appends don't shift the viewport.
+    /// One projection per tick — the anchor always refers to the
+    /// post-scroll top row.
     pub fn scroll_by(&mut self, d: isize) {
-        if d > 0 && self.scroll == 0 {
-            self.capture_anchor();
-        }
         self.scroll = if d > 0 {
             self.scroll.saturating_add(d as usize)
         } else {

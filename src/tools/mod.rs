@@ -12,6 +12,9 @@ pub struct ToolContext {
     pub bash_timeout_max: Duration,
     /// Per-run web research service (None = tools report "not configured").
     pub web: Option<std::sync::Arc<crate::web::WebService>>,
+    /// Lazily canonicalized workspace root — fs::resolve() realpath()s
+    /// the root once per context instead of once per tool call.
+    pub canon_root: std::sync::OnceLock<PathBuf>,
 }
 
 /// Frozen tool schemas. Changing names/descriptions/order invalidates
@@ -234,6 +237,7 @@ mod tests {
             bash_timeout: std::time::Duration::from_secs(1),
             bash_timeout_max: std::time::Duration::from_secs(2),
             web: None,
+            canon_root: std::sync::OnceLock::new(),
         };
         let ok = super::execute(
             &ctx,

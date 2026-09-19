@@ -2673,6 +2673,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "keyring",
+ "libc",
  "portable-pty",
  "rand",
  "ratatui",

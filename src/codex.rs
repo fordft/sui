@@ -338,10 +338,10 @@ impl CodexAuth {
 /// Chat-completions `Message` list → Responses-API `input` items +
 /// `instructions`. Reasoning items captured on prior turns replay verbatim
 /// (store:false requires it); ids/status are stripped.
-fn build_input(messages: &[Message]) -> (String, Vec<Value>) {
+fn build_input(messages: &crate::context::Compiled<'_>) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
-    for m in messages {
+    for m in messages.iter() {
         match m {
             Message::System { content } => {
                 if !instructions.is_empty() {
@@ -361,14 +361,16 @@ fn build_input(messages: &[Message]) -> (String, Vec<Value>) {
                 ..
             } => {
                 // Replay raw items (encrypted reasoning) first so the
-                // model's chain-of-thought context stays intact.
+                // model's chain-of-thought context stays intact. Strip
+                // id/status on the clone already required for the replay —
+                // provider-assigned ids must not be resent while store:false.
                 for item in response_items {
-                    let mut item = item.clone();
-                    if let Some(o) = item.as_object_mut() {
+                    let mut it = item.clone();
+                    if let Some(o) = it.as_object_mut() {
                         o.remove("id");
                         o.remove("status");
                     }
-                    input.push(item);
+                    input.push(it);
                 }
                 if let Some(c) = content {
                     if !c.is_empty() {
@@ -433,7 +435,7 @@ pub struct CodexReq<'a> {
 /// One streaming Responses-API request against the Codex backend.
 pub async fn stream_responses(
     req: CodexReq<'_>,
-    messages: &[Message],
+    messages: &crate::context::Compiled<'_>,
     tools: &[Value],
     mut on_delta: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
@@ -499,9 +501,12 @@ pub async fn stream_responses(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("codex stream read failed (interrupted)")?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(nl) = buf.find('\n') {
-            let line = buf[..nl].trim_end_matches('\r').to_string();
-            buf.drain(..nl + 1);
+        // scan by index — drain once per chunk, no per-line alloc
+        let mut pos = 0usize;
+        while let Some(nl) = buf[pos..].find('\n') {
+            let end = pos + nl;
+            let line = buf[pos..end].trim_end_matches('\r');
+            pos = end + 1;
             let Some(data) = line.strip_prefix("data:") else {
                 continue;
             };
@@ -556,8 +561,17 @@ pub async fn stream_responses(
                             );
                             call_ord += 1;
                         }
-                        // Replay verbatim next turn (store:false stateless mode).
-                        "reasoning" => replay_items.push(item.clone()),
+                        // Replay verbatim next turn (store:false stateless
+                        // mode) — strip id/status once here so replay is a
+                        // clone, not a mutate, on every later request.
+                        "reasoning" => {
+                            let mut item = item.clone();
+                            if let Some(o) = item.as_object_mut() {
+                                o.remove("id");
+                                o.remove("status");
+                            }
+                            replay_items.push(item);
+                        }
                         _ => {}
                     }
                 }
@@ -600,21 +614,23 @@ pub async fn stream_responses(
                 break;
             }
         }
+        buf.drain(..pos);
         if terminal {
             break;
         }
     }
 
     let tool_calls: Vec<ToolCall> = calls.into_values().collect();
+    let finish = if tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
     Ok(StreamOutcome {
         content,
         reasoning_content: reasoning,
-        tool_calls: tool_calls.clone(),
-        finish_reason: Some(if tool_calls.is_empty() {
-            "stop".into()
-        } else {
-            "tool_calls".into()
-        }),
+        tool_calls,
+        finish_reason: Some(finish.into()),
         returned_model,
         usage,
         first_delta_ms: first_delta_ms.unwrap_or(0),
@@ -833,14 +849,14 @@ mod tests {
 
     #[test]
     fn system_becomes_instructions() {
-        let (inst, input) = build_input(&[
+        let (inst, input) = build_input(&crate::context::Compiled::view(&[
             Message::System {
                 content: "sys".into(),
             },
             Message::User {
                 content: "hi".into(),
             },
-        ]);
+        ]));
         assert_eq!(inst, "sys");
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["content"][0]["type"], "input_text");
@@ -848,7 +864,7 @@ mod tests {
 
     #[test]
     fn assistant_replays_items_then_calls() {
-        let (inst, input) = build_input(&[
+        let (inst, input) = build_input(&crate::context::Compiled::view(&[
             Message::User {
                 content: "u".into(),
             },
@@ -871,7 +887,7 @@ mod tests {
                 tool_call_id: "c1".into(),
                 content: "out".into(),
             },
-        ]);
+        ]));
         assert_eq!(inst, "You are a coding assistant.");
         assert_eq!(input.len(), 5); // user, reasoning, assistant text, function_call, tool
                                     // reasoning item replayed with id/status stripped

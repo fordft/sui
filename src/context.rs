@@ -52,27 +52,71 @@ pub fn epoch_segment() -> Option<String> {
     None
 }
 
+/// Borrowed request view: freshly-built head messages (system/epoch/
+/// guidance) plus the append-only history slice. Serializes to the exact
+/// JSON array `Vec<Message>` would produce, without deep-cloning history
+/// every turn.
+pub struct Compiled<'a> {
+    head: Vec<Message>,
+    tail: &'a [Message],
+}
+
+impl<'a> Compiled<'a> {
+    /// View over a bare history slice — no head messages. Test/debug use.
+    pub fn view(tail: &'a [Message]) -> Self {
+        Compiled {
+            head: Vec::new(),
+            tail,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head.is_empty() && self.tail.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Message> {
+        self.head.iter().chain(self.tail)
+    }
+}
+
+impl serde::Serialize for Compiled<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.len()))?;
+        for m in self.iter() {
+            seq.serialize_element(m)?;
+        }
+        seq.end()
+    }
+}
+
 /// Assemble model-visible context in stable-to-volatile order.
 /// [static system] + [epoch?] + [project guidance?] + [append-only
 /// history]. `system` is normally `system()`; certification may inject
 /// a variant to deliberately invalidate the static layer. Guidance is
 /// per-workspace but stable within it — its own segment keeps the
 /// shared prefix identical across repos.
-pub fn compile(history: &[Message], system: &str, guidance: Option<&str>) -> Vec<Message> {
-    let mut out = Vec::with_capacity(history.len() + 3);
-    out.push(Message::System {
+pub fn compile<'a>(history: &'a [Message], system: &str, guidance: Option<&str>) -> Compiled<'a> {
+    let mut head = Vec::with_capacity(3);
+    head.push(Message::System {
         content: system.to_string(),
     });
     if let Some(seg) = epoch_segment() {
-        out.push(Message::System { content: seg });
+        head.push(Message::System { content: seg });
     }
     if let Some(g) = guidance {
-        out.push(Message::System {
+        head.push(Message::System {
             content: g.to_string(),
         });
     }
-    out.extend(history.iter().cloned());
-    out
+    Compiled {
+        head,
+        tail: history,
+    }
 }
 
 /// Per-layer fingerprints: local determinism diagnostics. A changed hash
@@ -92,13 +136,23 @@ pub fn layer_hashes(tools: &[Value], system: &str) -> LayerHashes {
 }
 
 /// Hash of the fully-serialized request — changes every turn as history
-/// grows (normal); drift in EARLY layers is what matters.
-pub fn request_fingerprint(messages: &[Message]) -> String {
-    sha256_hex(
-        serde_json::to_string(messages)
-            .unwrap_or_default()
-            .as_bytes(),
-    )
+/// grows (normal); drift in EARLY layers is what matters. Serialization
+/// streams straight into the hasher — same digest as hashing the
+/// to_string bytes, without materializing the full request body twice.
+pub fn request_fingerprint(messages: &Compiled<'_>) -> String {
+    struct Sink(Sha256);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.update(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut h = Sink(Sha256::new());
+    let _ = serde_json::to_writer(&mut h, messages);
+    format!("{:x}", h.0.finalize())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -109,10 +163,43 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Rough input estimate (~4 chars/token). Estimate only — providers
 /// tokenize differently; used for the context budget guard, never billing.
-pub fn estimate_tokens(messages: &[Message]) -> usize {
+/// Sums field lengths directly — equivalent to the serialized size within
+/// a few percent, without a JSON pass per turn.
+pub fn estimate_tokens(messages: &Compiled<'_>) -> usize {
+    const OVERHEAD: usize = 24; // role tag, keys, escapes — per-message JSON envelope
     messages
         .iter()
-        .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+        .map(|m| {
+            OVERHEAD
+                + match m {
+                    Message::System { content } | Message::User { content } => content.len(),
+                    Message::Assistant {
+                        content,
+                        tool_calls,
+                        reasoning_content,
+                        response_items,
+                    } => {
+                        content.as_deref().unwrap_or("").len()
+                            + reasoning_content.as_deref().unwrap_or("").len()
+                            + tool_calls
+                                .as_deref()
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|t| {
+                                    t.id.len() + t.function.name.len() + t.function.arguments.len()
+                                })
+                                .sum::<usize>()
+                            + response_items
+                                .iter()
+                                .map(|v| v.to_string().len())
+                                .sum::<usize>()
+                    }
+                    Message::Tool {
+                        tool_call_id,
+                        content,
+                    } => tool_call_id.len() + content.len(),
+                }
+        })
         .sum::<usize>()
         / 4
 }

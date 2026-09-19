@@ -50,14 +50,51 @@ pub fn clean(s: &str) -> String {
         .unwrap()
     });
     let s = ANSI.replace_all(s, "");
-    s.chars()
-        .map(|c| match c {
-            '\t' => "    ".to_string(),
-            c if (c as u32) < 0x20 && c != '\n' => String::new(),
-            c if (0x7f..=0x9f).contains(&(c as u32)) => String::new(),
-            c => c.to_string(),
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\t' => out.push_str("    "),
+            c if (c as u32) < 0x20 && c != '\n' => {}
+            c if (0x7f..=0x9f).contains(&(c as u32)) => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Clean `text` once, then lazily wrap its lines to width `w` — `take(n)`
+/// stops the wrap work early. Cleaning the whole text first (not per
+/// raw line) keeps escape-stripping identical to the eager path: an OSC
+/// sequence containing '\n' is removed whole rather than split apart.
+fn wrapped(text: &str, w: usize) -> impl Iterator<Item = String> {
+    clean(text)
+        .split('\n')
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flat_map(move |l| wrap(&l, w))
+}
+
+/// Last `n` display rows of `text` wrapped to `w` — cleaning is once
+/// over the (bounded) buffer; wrap work happens only on tail lines.
+fn tail_rows(text: &str, w: usize, n: usize) -> Vec<String> {
+    let cleaned = clean(text);
+    let mut out: Vec<String> = Vec::new();
+    for l in cleaned.rsplit('\n') {
+        if out.len() >= n {
+            break;
+        }
+        let mut rows = wrap(l, w);
+        // append this source line's display rows bottom-up
+        while let Some(r) = rows.pop() {
+            out.push(r);
+            if out.len() >= n {
+                break;
+            }
+        }
+    }
+    out.reverse();
+    out
 }
 
 /// Wrap `s` to display width — grapheme-cluster aware: a Thai vowel or
@@ -213,11 +250,7 @@ fn emit_group(
                 Span::styled(format!("  {}", g.at), dim()),
             ],
         );
-        let task_lines: Vec<String> = clean(&g.task)
-            .split('\n')
-            .flat_map(|l| wrap(l, width.saturating_sub(2)))
-            .map(|s| s.to_string())
-            .collect();
+        let task_lines: Vec<String> = wrapped(&g.task, width.saturating_sub(2)).collect();
         let show = if g.folded() {
             TASK_CAP
         } else {
@@ -433,11 +466,7 @@ fn emit_item(
                     Span::styled(format!("  {at}{}", if *done { "" } else { "  ⠋" }), dim()),
                 ],
             );
-            for l in clean(text)
-                .split('\n')
-                .flat_map(|l| wrap(l, body_w))
-                .take(TEXT_CAP)
-            {
+            for l in wrapped(text, body_w).take(TEXT_CAP) {
                 push(
                     out,
                     owner,
@@ -474,11 +503,7 @@ fn emit_item(
                 ],
             );
             if full {
-                for l in clean(text)
-                    .split('\n')
-                    .flat_map(|l| wrap(l, body_w))
-                    .take(TEXT_CAP)
-                {
+                for l in wrapped(text, body_w).take(TEXT_CAP) {
                     push(
                         out,
                         owner,
@@ -487,12 +512,7 @@ fn emit_item(
                 }
             } else if !*done {
                 // live tail preview only while streaming
-                let tail: Vec<String> = clean(text)
-                    .split('\n')
-                    .flat_map(|l| wrap(l, body_w.saturating_sub(4)))
-                    .map(|s| s.to_string())
-                    .collect();
-                for l in tail.iter().rev().take(REASON_PREVIEW).rev() {
+                for l in tail_rows(text, body_w.saturating_sub(4), REASON_PREVIEW) {
                     push(
                         out,
                         owner,
@@ -560,12 +580,7 @@ fn emit_item(
             match status {
                 None => {
                     // genuine live output — bounded tail preview
-                    let tail: Vec<String> = clean(live)
-                        .split('\n')
-                        .flat_map(|l| wrap(l, body_w.saturating_sub(4)))
-                        .map(|s| s.to_string())
-                        .collect();
-                    for l in tail.iter().rev().take(LIVE_PREVIEW).rev() {
+                    for l in tail_rows(live, body_w.saturating_sub(4), LIVE_PREVIEW) {
                         push(
                             out,
                             owner,
@@ -577,14 +592,29 @@ fn emit_item(
                     if !s.ok() && *s != ToolStatus::Skipped && *s != ToolStatus::Intercepted =>
                 {
                     // failure keeps a diagnostic excerpt visible
-                    let lines: Vec<String> = clean(result)
-                        .split('\n')
-                        .filter(|l| !l.starts_with("status:") && !l.is_empty())
-                        .flat_map(|l| wrap(l, body_w.saturating_sub(4)))
-                        .map(|s| s.to_string())
-                        .collect();
                     let show = if *expanded { TEXT_CAP } else { FAIL_EXCERPT };
-                    for l in lines.iter().rev().take(show).rev() {
+                    let cleaned = clean(result);
+                    let mut lines: Vec<String> = Vec::new();
+                    let mut capped = false;
+                    for l in cleaned.rsplit('\n') {
+                        if l.starts_with("status:") || l.is_empty() {
+                            continue;
+                        }
+                        if lines.len() >= show {
+                            capped = true;
+                            break;
+                        }
+                        let mut rows = wrap(l, body_w.saturating_sub(4));
+                        while let Some(r) = rows.pop() {
+                            lines.push(r);
+                            if lines.len() >= show {
+                                capped = !rows.is_empty();
+                                break;
+                            }
+                        }
+                    }
+                    lines.reverse();
+                    for l in &lines {
                         push(
                             out,
                             owner,
@@ -594,7 +624,7 @@ fn emit_item(
                             )],
                         );
                     }
-                    if *expanded && lines.len() > TEXT_CAP {
+                    if *expanded && capped {
                         push(
                             out,
                             owner,

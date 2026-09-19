@@ -119,6 +119,7 @@ pub fn spawn_solo(
                 bash_timeout: Duration::from_millis(al.bash_timeout_ms),
                 bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
                 web,
+                canon_root: std::sync::OnceLock::new(),
             },
             Gate::new(false), // approvals via modal; session flag is live
             match Journal::open_named(&jdir, "solo") {

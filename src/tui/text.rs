@@ -31,9 +31,11 @@ impl Buf {
         self.cursor += 1;
     }
     pub fn insert_str(&mut self, s: &str) {
-        for c in s.chars() {
-            self.insert(c);
-        }
+        // one splice — per-char insert would memmove the tail for every
+        // pasted character (O(paste × buffer) on a mid-buffer paste)
+        let n = s.chars().count();
+        self.chars.splice(self.cursor..self.cursor, s.chars());
+        self.cursor += n;
     }
     pub fn backspace(&mut self) {
         if self.cursor > 0 {

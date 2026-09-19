@@ -489,7 +489,12 @@ impl Agent {
 
             for (i, (call, plan)) in outcome.tool_calls.iter().zip(plans.iter()).enumerate() {
                 let name = call.function.name.as_str();
-                let summary = summarize(name, &call.function.arguments);
+                static NULL: Value = Value::Null;
+                let summary = summarize(
+                    name,
+                    &call.function.arguments,
+                    plan.as_ref().unwrap_or(&NULL),
+                );
                 // stable display identity: provider id, else positional
                 let call_id = if call.id.is_empty() {
                     format!("r{req_id}.{i}")
@@ -833,8 +838,7 @@ fn is_web(name: &str) -> bool {
     matches!(name, "web_search" | "web_fetch")
 }
 
-fn summarize(name: &str, args: &str) -> String {
-    let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+fn summarize(name: &str, args: &str, v: &Value) -> String {
     match name {
         "bash" => format!("bash: {}", v["command"].as_str().unwrap_or("")),
         "read_file" => format!("read {}", v["path"].as_str().unwrap_or("")),

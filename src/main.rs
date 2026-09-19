@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
         bash_timeout: Duration::from_millis(cfg.bash_timeout_ms),
         bash_timeout_max: Duration::from_millis(cfg.bash_timeout_max_ms),
         web: Some(web::WebService::new(web::load_cfg(None))),
+        canon_root: std::sync::OnceLock::new(),
     };
     let mut agent = agent::Agent::new(
         provider,

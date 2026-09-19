@@ -92,7 +92,7 @@ impl Provider {
     /// never pushed through `on_reasoning` — they aren't displayable text.
     pub async fn stream_chat(
         &self,
-        messages: &[Message],
+        messages: &crate::context::Compiled<'_>,
         tools: &[Value],
         mut on_delta: impl FnMut(&str),
         mut on_reasoning: impl FnMut(&str),
@@ -162,9 +162,12 @@ impl Provider {
             let chunk = chunk.context("stream read failed (interrupted)")?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            while let Some(nl) = buf.find('\n') {
-                let line = buf[..nl].trim_end_matches('\r').to_string();
-                buf.drain(..nl + 1);
+            // scan by index — drain once per chunk, no per-line alloc
+            let mut pos = 0usize;
+            while let Some(nl) = buf[pos..].find('\n') {
+                let end = pos + nl;
+                let line = buf[pos..end].trim_end_matches('\r');
+                pos = end + 1;
                 if line.is_empty() || line.starts_with(':') {
                     continue; // blank line / comment keep-alive
                 }
@@ -230,6 +233,7 @@ impl Provider {
                     }
                 }
             }
+            buf.drain(..pos);
         }
 
         let tool_calls = calls
@@ -332,7 +336,7 @@ pub async fn probe(base_url: &str, api_key: Option<&str>, model: &str) -> Result
     let mut streamed = false;
     let out = p
         .stream_chat(
-            &msgs,
+            &crate::context::Compiled::view(&msgs),
             &tools,
             |_| {
                 streamed = true;

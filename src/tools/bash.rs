@@ -209,7 +209,8 @@ pub async fn spawn_bounded(
     let pid = child.id();
     // If this future is dropped mid-await (e.g. mission-level cancel),
     // kill_on_drop kills bash but NOT its group — the guard covers that.
-    let _guard = PgGuard(pid);
+    // It also kills background jobs the command leaves in its group.
+    let mut guard = PgGuard(pid);
 
     // Stream outputs on reader tasks so `child` stays alive in scope —
     // required to kill the process group and reap on timeout/cancel.
@@ -242,6 +243,7 @@ pub async fn spawn_bounded(
         End::Done(s) => Some(s),
         End::TimedOut | End::Cancelled => {
             kill_tree(pid);
+            guard.disarm();
             // reap so no zombie/orphan survives the harness
             let _ = child.wait().await;
             None
@@ -334,8 +336,15 @@ pub async fn run(
 }
 
 /// Kills the spawned process group when dropped — the backstop for
-/// future-drop cancellation where no cancel path ever runs.
+/// future-drop cancellation where no cancel path ever runs. Also fires
+/// after a normal exit, reaping background jobs the command left behind
+/// in its group (a plain `kill(-pgid)` syscall — no helper process).
 struct PgGuard(Option<u32>);
+impl PgGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 impl Drop for PgGuard {
     fn drop(&mut self) {
         kill_tree(self.0);
@@ -343,12 +352,10 @@ impl Drop for PgGuard {
 }
 
 /// SIGKILL the child's whole process group (process_group(0) made it the
-/// group leader). Single cleanup path shared by timeout and cancel.
+/// group leader). ESRCH on an already-dead group is harmless.
 fn kill_tree(pid: Option<u32>) {
     if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
-            .status();
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     }
 }
 
@@ -364,6 +371,7 @@ mod tests {
             bash_timeout: Duration::from_secs(30),
             bash_timeout_max: Duration::from_secs(60),
             web: None,
+            canon_root: std::sync::OnceLock::new(),
         }
     }
 

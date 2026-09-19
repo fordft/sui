@@ -151,7 +151,7 @@ struct Cached {
 
 enum CacheEntry {
     Ready(Cached),
-    InFlight(Arc<tokio::sync::Notify>),
+    InFlight(tokio::sync::broadcast::Sender<()>),
 }
 
 struct State {
@@ -307,20 +307,19 @@ impl WebService {
         enum Action {
             Hit(String, Instant),
             Miss,
-            Wait(Arc<tokio::sync::Notify>),
+            Wait(tokio::sync::broadcast::Receiver<()>),
         }
         let action = {
             let mut st = self.st.lock().unwrap();
             match st.cache.get(key) {
                 Some(CacheEntry::Ready(c)) => Action::Hit(c.text.clone(), c.fetched_at),
-                Some(CacheEntry::InFlight(n)) => Action::Wait(n.clone()),
+                Some(CacheEntry::InFlight(tx)) => Action::Wait(tx.subscribe()),
                 None => {
                     if st.cache.len() >= CACHE_CAP {
                         Action::Miss
                     } else {
-                        let n = Arc::new(tokio::sync::Notify::new());
-                        st.cache
-                            .insert(key.to_string(), CacheEntry::InFlight(n.clone()));
+                        let (tx, _rx) = tokio::sync::broadcast::channel(1);
+                        st.cache.insert(key.to_string(), CacheEntry::InFlight(tx));
                         Action::Miss
                     }
                 }
@@ -334,11 +333,12 @@ impl WebService {
                 ),
                 crate::tools::ExecKind::Success,
             ),
-            Action::Wait(notify) => {
+            Action::Wait(mut rx) => {
                 // Wait for the in-flight twin, then read the ready entry.
+                // The receiver was registered under the lock, so a send
+                // racing our recv() is buffered — never missed.
                 let _ =
-                    tokio::time::timeout(CALL_TIMEOUT + Duration::from_secs(10), notify.notified())
-                        .await;
+                    tokio::time::timeout(CALL_TIMEOUT + Duration::from_secs(10), rx.recv()).await;
                 let text = {
                     let st = self.st.lock().unwrap();
                     match st.cache.get(key) {
@@ -357,8 +357,8 @@ impl WebService {
             Action::Miss => {
                 let result = f(Arc::clone(self)).await;
                 let mut st = self.st.lock().unwrap();
-                let notify = match st.cache.remove(key) {
-                    Some(CacheEntry::InFlight(n)) => Some(n),
+                let finisher = match st.cache.remove(key) {
+                    Some(CacheEntry::InFlight(tx)) => Some(tx),
                     _ => None,
                 };
                 match result {
@@ -377,15 +377,15 @@ impl WebService {
                                 fetched_at: Instant::now(),
                             }),
                         );
-                        if let Some(n) = notify {
-                            n.notify_waiters();
+                        if let Some(tx) = finisher {
+                            let _ = tx.send(());
                         }
                         ExecOut::plain(text, crate::tools::ExecKind::Success)
                     }
                     Err(e) => {
                         // Failures are not cached — a retry is a fresh ask.
-                        if let Some(n) = notify {
-                            n.notify_waiters();
+                        if let Some(tx) = finisher {
+                            let _ = tx.send(());
                         }
                         err_out(&format!("web request failed: {e:#}"))
                     }

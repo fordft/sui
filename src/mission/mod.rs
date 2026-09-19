@@ -161,10 +161,11 @@ fn mk_agent(
     req_timeout: Duration,
     budget: usize,
     reserve: usize,
+    al: &crate::config::AgentLimits,
 ) -> Result<Agent> {
     // [agent] bash timeouts resolve against the source repo, not the
-    // worktree — sui.toml precedence still applies via cfg.repo.
-    let bash_ms = crate::config::agent_limits(&cfg.repo);
+    // worktree — sui.toml precedence still applies via cfg.repo. Parsed
+    // once per mission in MissionRt, not per spawn.
     let mut a = Agent::new(
         Provider::new(
             &prof.base_url,
@@ -174,9 +175,10 @@ fn mk_agent(
         ),
         ToolContext {
             workspace: workspace.to_path_buf(),
-            bash_timeout: Duration::from_millis(bash_ms.bash_timeout_ms),
-            bash_timeout_max: Duration::from_millis(bash_ms.bash_timeout_max_ms),
+            bash_timeout: Duration::from_millis(al.bash_timeout_ms),
+            bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
             web: cfg.web.clone(),
+            canon_root: std::sync::OnceLock::new(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply
         journal,
@@ -216,9 +218,11 @@ fn mk_agent(
 /// (task id for workers so repair follow-ups reuse the session; role name
 /// for control). Drivers are spawned lazily and all shut down — protocol
 /// close first, bounded process-tree kill second — when the mission ends.
-#[derive(Default)]
 pub struct MissionRt {
     pool: std::sync::Mutex<std::collections::HashMap<String, driver::AcpSession>>,
+    /// Resolved `[agent]` limits — parsed once per mission instead of
+    /// re-reading global + project TOML on every agent spawn.
+    limits: crate::config::AgentLimits,
 }
 
 impl MissionRt {
@@ -324,6 +328,7 @@ async fn drive_task(
                 cfg.request_timeout,
                 cfg.context_budget,
                 cfg.context_reserve,
+                &rt.limits,
             )?;
             tokio::time::timeout(cfg.task_timeout, agent.run_turn(&prompt))
                 .await
@@ -372,7 +377,7 @@ async fn run_control(
 ) -> Result<Cap> {
     match backend {
         Backend::Native(prof) => {
-            let (mut a, cap) = control_agent(cfg, prof, workspace, agent_id, check)?;
+            let (mut a, cap) = control_agent(cfg, rt, prof, workspace, agent_id, check)?;
             a.run_turn(&prompt).await?;
             let c = cap.lock().unwrap();
             Ok(Cap {
@@ -427,6 +432,7 @@ async fn run_control(
 /// payloads get one resubmission before the turn is ended.
 fn control_agent(
     cfg: &MissionCfg,
+    rt: &MissionRt,
     prof: &Profile,
     workspace: &Path,
     agent_id: &str,
@@ -445,6 +451,7 @@ fn control_agent(
         cfg.request_timeout,
         cfg.context_budget,
         cfg.context_reserve,
+        &rt.limits,
     )?;
     a.add_tool_schema(prompts::submit_result_schema());
     let cap = Arc::new(Mutex::new(Cap {
@@ -787,10 +794,16 @@ async fn escalate_and_respawn(
 }
 
 /// Merge all task branches into integration, run integration checks.
-async fn integrate_all(integ_wt: &Path, branches: &[String], plan: &MissionPlan) -> Result<()> {
-    for b in branches {
-        worktree::merge(integ_wt, b)?;
-    }
+/// Run each integration check once on the integrated worktree:
+/// journal a gate record per command, bail on the first failure, and
+/// return the auditor-formatted lines so later stages reuse the same
+/// results instead of re-running identical commands on identical state.
+async fn run_integration_checks(
+    integ_wt: &Path,
+    plan: &MissionPlan,
+    journal: &mut Journal,
+) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
     for cmd in &plan.integration_checks {
         let r = spawn_bounded(
             integ_wt,
@@ -801,6 +814,8 @@ async fn integrate_all(integ_wt: &Path, branches: &[String], plan: &MissionPlan)
             None,
         )
         .await?;
+        journal.log("gate", gate_rec("integration", cmd, integ_wt, &r));
+        lines.push(format!("integration [{cmd}]: exit {:?}\n", r.code));
         if r.code != Some(0) {
             bail!(
                 "integration check failed: {cmd}\nexit: {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -810,12 +825,28 @@ async fn integrate_all(integ_wt: &Path, branches: &[String], plan: &MissionPlan)
             );
         }
     }
-    Ok(())
+    Ok(lines)
+}
+
+async fn integrate_all(
+    integ_wt: &Path,
+    branches: &[String],
+    plan: &MissionPlan,
+    journal: &mut Journal,
+) -> Result<Vec<String>> {
+    for b in branches {
+        worktree::merge(integ_wt, b)?;
+    }
+    run_integration_checks(integ_wt, plan, journal).await
 }
 
 /// Re-run every gate on the integrated candidate; the auditor sees
-/// trusted results, not model claims.
-async fn gate_summary(plan: &MissionPlan, integ_wt: &Path) -> String {
+/// trusted results, not model claims. Task acceptance commands run
+/// here because the merged tree differs from each task's worktree;
+/// integration checks come pre-run — they already executed on this
+/// exact state and re-running would duplicate the most expensive
+/// commands in the system verbatim.
+async fn gate_summary(plan: &MissionPlan, integ_wt: &Path, integ_lines: &[String]) -> String {
     let mut s = String::new();
     for t in &plan.tasks {
         for cmd in &t.acceptance {
@@ -834,20 +865,8 @@ async fn gate_summary(plan: &MissionPlan, integ_wt: &Path) -> String {
             }
         }
     }
-    for cmd in &plan.integration_checks {
-        let r = spawn_bounded(
-            integ_wt,
-            cmd,
-            Duration::from_secs(120),
-            Duration::from_secs(300),
-            std::future::pending(),
-            None,
-        )
-        .await;
-        match r {
-            Ok(o) => s.push_str(&format!("integration [{cmd}]: exit {:?}\n", o.code)),
-            Err(e) => s.push_str(&format!("integration [{cmd}]: error {e:#}\n")),
-        }
+    for l in integ_lines {
+        s.push_str(l);
     }
     s
 }
@@ -946,7 +965,10 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
     };
 
     // external-agent session pool; scoped so drivers die with the mission
-    let rt = MissionRt::default();
+    let rt = MissionRt {
+        pool: Default::default(),
+        limits: crate::config::agent_limits(&cfg.repo),
+    };
     // scoped so the body's borrows release before report finalization
     let mut cancelled = false;
     let flow = {
@@ -999,6 +1021,12 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
             continue;
         }
         for line in std::fs::read_to_string(&p).unwrap_or_default().lines() {
+            // cheap prefilter — most lines aren't request events; the
+            // parsed check below stays authoritative (a payload could
+            // legitimately contain this substring)
+            if !line.contains("\"type\":\"request\"") {
+                continue;
+            }
             let e: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -1289,24 +1317,10 @@ async fn body(
 
     // deterministic gate on the combined candidate — once, after all merges
     state!(S::Integrating);
-    for cmd in &plan.integration_checks {
-        let r = spawn_bounded(
-            &integ_wt,
-            cmd,
-            Duration::from_secs(120),
-            Duration::from_secs(300),
-            std::future::pending(),
-            None,
-        )
-        .await?;
-        journal.log("gate", gate_rec("integration", cmd, &integ_wt, &r));
-        if r.code != Some(0) {
-            fail!(format!(
-                "integration check '{cmd}' failed (exit {:?})\n{}\n{}",
-                r.code, r.stdout, r.stderr
-            ));
-        }
-    }
+    let mut integ_lines = match run_integration_checks(&integ_wt, &plan, journal).await {
+        Ok(l) => l,
+        Err(e) => fail!(format!("{e:#}")),
+    };
 
     // ── AUDIT (one repair round on failure) ─────────────────────────
     loop {
@@ -1318,7 +1332,7 @@ async fn body(
         } else {
             diff
         };
-        let gates = gate_summary(&plan, &integ_wt).await;
+        let gates = gate_summary(&plan, &integ_wt, &integ_lines).await;
         let risks = format!(
             "repairs used: {}; escalations used: {}",
             report.repairs, report.escalations
@@ -1393,8 +1407,9 @@ async fn body(
         // deterministic re-integration from base
         state!(S::Integrating);
         worktree::reset_hard(&integ_wt, &base)?;
-        if let Err(e) = integrate_all(&integ_wt, &merged, &plan).await {
-            fail!(format!("re-integration after audit repair: {e:#}"));
+        match integrate_all(&integ_wt, &merged, &plan, journal).await {
+            Ok(l) => integ_lines = l,
+            Err(e) => fail!(format!("re-integration after audit repair: {e:#}")),
         }
     }
 
