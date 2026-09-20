@@ -94,7 +94,14 @@ with no keyring, the config-file store is the default.
 
 ### ChatGPT sign-in (codex-oauth)
 
-Already ran `codex login`? Sui reuses the session — no API key:
+Already ran `codex login`? That's all you need — Sui detects
+`~/.codex/auth.json` and auto-registers a `codex` profile (model follows
+your Codex CLI config). Pick it in Settings → any role, or pass
+`--control-profile codex` / `--worker-profile codex` to sui-mission. No
+API key, no TOML.
+
+To customize, an explicit profile wins over the auto-registered one —
+or use Settings → "+ add provider" → "ChatGPT (Codex OAuth)":
 
 ```toml
 [profiles.codex]
@@ -102,11 +109,11 @@ kind = "codex-oauth"
 model = "gpt-5.5"
 ```
 
-Or sign in directly: `sui auth codex` (browser flow; `--manual` pastes
-the callback URL for headless/SSH). This calls the Codex backend's
-Responses API — subscription access, not API billing, so cost fields
-report unknown rather than zero. Tokens refresh transparently and never
-touch journals or prompts.
+No Codex CLI login? Sign in directly: `sui auth` (browser flow;
+`--manual` pastes the callback URL for headless/SSH). This calls the
+Codex backend's Responses API — subscription access, not API billing,
+so cost fields report unknown rather than zero. Tokens refresh
+transparently and never touch journals or prompts.
 
 ### External coding agents (ACP)
 

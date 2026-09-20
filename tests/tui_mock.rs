@@ -1015,6 +1015,7 @@ fn provider_save_config_file_persists() {
         key_env,
         key,
         store,
+        ..
     }) = app.effects.pop()
     else {
         panic!("no SaveProfile effect");
@@ -1035,6 +1036,7 @@ fn provider_save_config_file_persists() {
         &model,
         key_env.as_deref(),
         inline.as_deref(),
+        None,
     )
     .unwrap();
     let text = std::fs::read_to_string(&cfg).unwrap();
@@ -1046,6 +1048,64 @@ fn provider_save_config_file_persists() {
     let doc: toml::Value = text.parse().unwrap();
     let p = &doc["profiles"]["mine"];
     assert_eq!(p["api_key"].as_str(), Some("sk-persist"));
+}
+
+/// The Codex OAuth form: no endpoint/key fields, save persists kind
+/// (never a base_url or api_key) — `codex login` is the credential.
+#[test]
+fn codex_form_saves_oauth_kind() {
+    use sui::tui::app::ProvType;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let f = ProvForm::new(ProvType::Codex);
+    // fields: Name, Model, Test, Save, Cancel — no BaseUrl/Auth/Key/Store
+    assert_eq!(
+        f.fields(),
+        vec![
+            Field::Name,
+            Field::Model,
+            Field::Test,
+            Field::Save,
+            Field::Cancel
+        ]
+    );
+    assert_eq!(f.endpoint_url(), "codex://oauth");
+    app.modal = Some(Modal::Provider(f));
+    for _ in 0..3 {
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Some(Effect::SaveProfile {
+        name,
+        base_url,
+        key_env,
+        key,
+        kind,
+        ..
+    }) = app.effects.pop()
+    else {
+        panic!("no SaveProfile effect");
+    };
+    assert_eq!(name, "codex");
+    assert_eq!(kind.as_deref(), Some("codex-oauth"));
+    assert!(key_env.is_none() && key.is_none());
+    // persist via the same path the event loop uses
+    let cfg = repo.join("codex-config.toml");
+    sui::config::save_profile_at(
+        &cfg,
+        &name,
+        &base_url,
+        "gpt-6-x",
+        None,
+        None,
+        kind.as_deref(),
+    )
+    .unwrap();
+    let doc: toml::Value = std::fs::read_to_string(&cfg).unwrap().parse().unwrap();
+    let p = &doc["profiles"]["codex"];
+    assert_eq!(p["kind"].as_str(), Some("codex-oauth"));
+    assert_eq!(p["model"].as_str(), Some("gpt-6-x"));
+    assert!(p.get("base_url").is_none() && p.get("api_key").is_none());
 }
 
 /// Mission mode must be reachable without Ctrl+M — that chord is byte

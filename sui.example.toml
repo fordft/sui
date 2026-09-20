@@ -61,7 +61,9 @@ bash_timeout_max_ms = 600000
 # Certify with: sui-certify --profile cheap --profile strong
 
 # ChatGPT-sign-in profile: uses your `codex login` session (or
-# `sui auth codex`) to call the Codex backend — no API key, no base_url.
+# `sui auth`) to call the Codex backend — no API key, no base_url.
+# With a discoverable session this profile is auto-registered — writing
+# it explicitly only matters to pin a different model.
 # This is subscription access, not API billing: token usage is reported
 # but cost stays unknown. Runs the Responses API, not chat-completions.
 #

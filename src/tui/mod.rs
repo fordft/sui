@@ -494,6 +494,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                     key_env,
                     key,
                     store,
+                    kind,
                 } => {
                     // Store::ConfigFile persists the key inline; other
                     // stores keep it out of the file
@@ -508,6 +509,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                         &model,
                         key_env.as_deref(),
                         inline.as_deref(),
+                        kind.as_deref(),
                     ) {
                         Ok(()) => {
                             let note = match (&key, store) {

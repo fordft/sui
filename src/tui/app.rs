@@ -101,17 +101,29 @@ pub struct ChatGeom {
 pub enum ProvType {
     DeepSeek,
     OpenRouter,
+    Codex,
     Custom,
 }
 impl ProvType {
-    pub const ALL: [ProvType; 3] = [ProvType::DeepSeek, ProvType::OpenRouter, ProvType::Custom];
+    pub const ALL: [ProvType; 4] = [
+        ProvType::DeepSeek,
+        ProvType::OpenRouter,
+        ProvType::Codex,
+        ProvType::Custom,
+    ];
     pub fn name(self) -> &'static str {
-        ["DeepSeek", "OpenRouter", "Custom OpenAI-compatible"][self as usize]
+        [
+            "DeepSeek",
+            "OpenRouter",
+            "ChatGPT (Codex OAuth)",
+            "Custom OpenAI-compatible",
+        ][self as usize]
     }
     pub fn default_url(self) -> &'static str {
         match self {
             ProvType::DeepSeek => "https://api.deepseek.com",
             ProvType::OpenRouter => "https://openrouter.ai/api/v1",
+            ProvType::Codex => "codex://oauth",
             ProvType::Custom => "",
         }
     }
@@ -119,7 +131,7 @@ impl ProvType {
         match self {
             ProvType::DeepSeek => "DEEPSEEK_API_KEY",
             ProvType::OpenRouter => "OPENROUTER_API_KEY",
-            ProvType::Custom => "",
+            ProvType::Codex | ProvType::Custom => "",
         }
     }
 }
@@ -221,6 +233,20 @@ impl ProvForm {
             endpoint: String::new(),
             status: String::new(),
         };
+        if ptype == ProvType::Codex {
+            // The OAuth session owns the name/endpoint; the only real
+            // choice is the model — default to what `codex` itself runs.
+            f.name.set("codex");
+            f.model.set(
+                &crate::codex::CodexAuth::cli_default_model()
+                    .unwrap_or_else(|| "gpt-5.3-codex".into()),
+            );
+            f.status = if crate::codex::CodexAuth::session_exists() {
+                "chatgpt session detected — no sign-in needed".into()
+            } else {
+                "no session — run `codex login` or `sui auth`".into()
+            };
+        }
         f.refresh_endpoint();
         f
     }
@@ -228,7 +254,9 @@ impl ProvForm {
     /// form whether a keyring/session key exists for it.
     pub fn from_existing(name: &str, p: &ProfileCfg, has_stored_key: bool) -> Self {
         let base = p.base_url.as_deref().unwrap_or("");
-        let ptype = if base == ProvType::DeepSeek.default_url() {
+        let ptype = if p.kind.as_deref() == Some("codex-oauth") {
+            ProvType::Codex
+        } else if base == ProvType::DeepSeek.default_url() {
             ProvType::DeepSeek
         } else if base == ProvType::OpenRouter.default_url() {
             ProvType::OpenRouter
@@ -254,10 +282,14 @@ impl ProvForm {
         f
     }
     pub fn refresh_endpoint(&mut self) {
-        self.endpoint = format!(
-            "{}/chat/completions",
-            self.base_url.text().trim_end_matches('/')
-        );
+        self.endpoint = if self.ptype == ProvType::Codex {
+            "codex://oauth — reuses `codex login` or `sui auth`".into()
+        } else {
+            format!(
+                "{}/chat/completions",
+                self.base_url.text().trim_end_matches('/')
+            )
+        };
     }
 
     /// The visible row set for the current provider type + auth mode.
@@ -266,6 +298,11 @@ impl ProvForm {
         match self.ptype {
             ProvType::DeepSeek | ProvType::OpenRouter => {
                 v.extend([Field::ApiKey, Field::Store, Field::Model]);
+            }
+            ProvType::Codex => {
+                // No endpoint/key fields — the OAuth session IS the
+                // credential. Model is the only real choice.
+                v.extend([Field::Model]);
             }
             ProvType::Custom => {
                 v.extend([Field::BaseUrl, Field::Model, Field::Auth]);
@@ -293,6 +330,15 @@ impl ProvForm {
             _ => None,
         }
     }
+    /// The base URL effects should use — the Codex form has no URL field;
+    /// its endpoint is fixed by the OAuth backend.
+    pub fn endpoint_url(&self) -> String {
+        if self.ptype == ProvType::Codex {
+            ProvType::Codex.default_url().to_string()
+        } else {
+            self.base_url.text()
+        }
+    }
     /// Selector rows cycle on ←/→/Space/Enter.
     fn cycle(&mut self, dir: isize) {
         match self.cur_field() {
@@ -318,6 +364,7 @@ impl ProvForm {
             return Some(typed);
         }
         match self.ptype {
+            ProvType::Codex => None, // OAuth session, no API key
             ProvType::Custom => match self.auth {
                 AuthMode::Advanced => std::env::var(self.key_env.text()).ok(),
                 _ => None,
@@ -333,6 +380,7 @@ impl ProvForm {
         let key = self.key.text();
         let key = if key.is_empty() { None } else { Some(key) };
         match self.ptype {
+            ProvType::Codex => (None, None, self.store), // OAuth, nothing to persist
             ProvType::DeepSeek | ProvType::OpenRouter => {
                 (Some(self.ptype.default_env().to_string()), key, self.store)
             }
@@ -654,6 +702,9 @@ pub enum Effect {
         key_env: Option<String>,
         key: Option<String>,
         store: Store,
+        /// Some("codex-oauth") = OAuth-backed profile (no base_url/key);
+        /// None = standard chat-completions profile.
+        kind: Option<String>,
     },
     SaveUi,
     /// Export this session's journals to a sanitized report file.
@@ -1036,7 +1087,16 @@ impl App {
                 .clone()
                 .or_else(|| self.ui.orchestrator_profile.clone()),
         }
-        .or_else(|| self.profiles.keys().next().cloned())
+        // Fallback prefers an explicitly configured profile: the
+        // auto-registered `codex` entry (injected when an OAuth session is
+        // merely detected) must not silently take over the default role.
+        .or_else(|| {
+            self.profiles
+                .keys()
+                .find(|n| self.profiles[*n].kind.as_deref() != Some("codex-oauth"))
+                .or_else(|| self.profiles.keys().next())
+                .cloned()
+        })
     }
 
     // ── event application ───────────────────────────────────────────
@@ -2518,7 +2578,7 @@ impl App {
                         self.status = "test sends one small live request".into();
                         self.effects.push(Effect::Probe {
                             name,
-                            base_url: f.base_url.text(),
+                            base_url: f.endpoint_url(),
                             model: f.model.text(),
                             key: f.effective_key(),
                         });
@@ -2531,11 +2591,12 @@ impl App {
                         let (key_env, key, store) = f.save_inputs();
                         self.effects.push(Effect::SaveProfile {
                             name: f.name.text(),
-                            base_url: f.base_url.text(),
+                            base_url: f.endpoint_url(),
                             model: f.model.text(),
                             key_env,
                             key,
                             store,
+                            kind: (f.ptype == ProvType::Codex).then(|| "codex-oauth".to_string()),
                         });
                         self.screen = Screen::Main;
                         return None;
@@ -2545,7 +2606,7 @@ impl App {
                 Field::Model => {
                     // catalog picker; filter text doubles as manual entry
                     self.effects.push(Effect::FetchModels {
-                        base_url: f.base_url.text(),
+                        base_url: f.endpoint_url(),
                         key: f.effective_key(),
                         target: PickTarget::ProvModel,
                     });
@@ -2698,7 +2759,7 @@ impl App {
                 // the rewrite can't strip the credential or an inherited
                 // endpoint.
                 if let Some(p) = self.profiles.get(&prof) {
-                    if p.base_url.is_some() {
+                    if p.base_url.is_some() || p.kind.is_some() {
                         self.effects.push(Effect::SaveProfile {
                             name: prof.clone(),
                             base_url: p.base_url.clone().unwrap_or_default(),
@@ -2710,6 +2771,7 @@ impl App {
                             } else {
                                 Store::Keychain // key=None → no keyring write
                             },
+                            kind: p.kind.clone(),
                         });
                     }
                 }

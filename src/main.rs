@@ -61,6 +61,11 @@ struct Cli {
     /// Model name passed verbatim to the endpoint
     #[arg(long)]
     model: Option<String>,
+    /// Named profile from config (e.g. `codex` — auto-registered when a
+    /// Codex OAuth session exists). Explicit --base-url/--model/--api-key
+    /// flags override the profile's values.
+    #[arg(long)]
+    profile: Option<String>,
     /// API key (prefer SUI_API_KEY / OPENAI_API_KEY env vars)
     #[arg(long)]
     api_key: Option<String>,
@@ -96,7 +101,11 @@ async fn main() -> Result<()> {
         let path = sui::codex::login(*manual).await?;
         println!("Signed in. Token store: {}", path.display());
         println!(
-            "Use it via a profile:\n\n  [profiles.codex]\n  kind = \"codex-oauth\"\n  model = \"gpt-5.3-codex\""
+            "The `codex` profile is now registered automatically — pick it \
+             in Settings → Solo/Orchestrator role, or pass \
+             --control-profile codex / --worker-profile codex to sui-mission.\n\
+             To override the default model, add [profiles.codex] model = \"…\" \
+             to ~/.config/sui/config.toml."
         );
         return Ok(());
     }
@@ -137,15 +146,27 @@ async fn main() -> Result<()> {
         return sui::tui::run(cli.mission, cli.yes || cli.yolo).await;
     }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
-    let cfg = config::load(config::Overrides {
+    // Explicit flags beat a --profile choice — capture before they move.
+    let flag_base = cli.base_url.clone();
+    let flag_model = cli.model.clone();
+    let flag_key = cli.api_key.clone();
+    let mut cfg = config::load(config::Overrides {
         base_url: cli.base_url,
         api_key: cli.api_key,
         model: cli.model,
         auto_approve: cli.yes || cli.yolo,
-        workspace: cli.workspace,
-        config_path: cli.config,
+        workspace: cli.workspace.clone(),
+        config_path: cli.config.clone(),
         non_interactive,
     })?;
+    if let Some(pname) = &cli.profile {
+        let p = config::resolve_profile(pname, cli.config.as_deref())
+            .map_err(|e| anyhow::anyhow!("--profile {pname}: {e:#}"))?;
+        cfg.base_url = flag_base.clone().unwrap_or(p.base_url);
+        cfg.model = flag_model.clone().unwrap_or(p.model);
+        cfg.api_key = flag_key.or(p.api_key);
+        cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
+    }
 
     eprintln!(
         "sui v0 · model={} · base={} · ws={} · log={}",
@@ -154,7 +175,7 @@ async fn main() -> Result<()> {
         cfg.workspace.display(),
         cfg.run_dir.display()
     );
-    if cfg.api_key.is_none() {
+    if cfg.api_key.is_none() && !cfg.base_url.starts_with("codex://") {
         eprintln!("warning: no API key set (SUI_API_KEY / OPENAI_API_KEY)");
     }
 

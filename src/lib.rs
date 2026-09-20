@@ -16,3 +16,8 @@ pub mod tools;
 pub mod tui;
 pub mod types;
 pub mod web;
+
+/// Serializes unit tests that mutate process env (SUI_HOME / CODEX_HOME /
+/// API keys) — env is process-global, so every such test must hold this.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

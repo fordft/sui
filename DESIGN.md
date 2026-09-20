@@ -232,9 +232,13 @@ agents are never modeled as provider URLs. Select per role:
 
 A profile with `kind = "codex-oauth"` rides the user's ChatGPT sign-in —
 reusing `~/.codex/auth.json` (or Sui's own store written by
-`sui auth codex`, which keeps an independent refresh chain) — and calls
+`sui auth`, which keeps an independent refresh chain) — and calls
 `chatgpt.com/backend-api/codex/responses`, the Responses-API backend the
 Codex CLI itself uses.
+
+When a session is discoverable, `config::profiles` auto-registers `codex`
+(model defaulting to the Codex CLI's own configured model) — `codex login`
+alone makes the profile selectable everywhere; explicit TOML wins.
 
 - **Transport**: Responses API over SSE, `store:false` — assistant items
   (incl. encrypted reasoning) replay verbatim across turns via
@@ -247,7 +251,7 @@ Codex CLI itself uses.
   token is sent only to `chatgpt.com`/`auth.openai.com`, never to
   journals or prompts.
 - **Honesty**: usage counts are real tokens but subscription-billed —
-  cost fields stay unknown, not zero. `sui auth codex` does PKCE on
+  cost fields stay unknown, not zero. `sui auth` does PKCE on
   localhost:1455 or `--manual` paste for headless/SSH.
 
 `--compare` is a pilot harness, not a verdict. It runs three strategies —

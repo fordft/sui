@@ -307,6 +307,26 @@ pub struct ModelInfo {
 /// GET {base}/models. Auth header when a key is present. No path munging —
 /// whatever the user configured is where we go.
 pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
+    if base_url.starts_with("codex://") {
+        // The ChatGPT-OAuth Responses backend has no anonymous /models
+        // catalog — offer the known Codex family. The picker's filter
+        // box still accepts free-form names for newly released models.
+        return Ok([
+            "gpt-5.3-codex",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex",
+            "codex-mini-latest",
+        ]
+        .iter()
+        .map(|id| ModelInfo {
+            id: (*id).to_string(),
+            context_length: None,
+            price_in: None,
+            price_out: None,
+            tools_claimed: None,
+        })
+        .collect());
+    }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;

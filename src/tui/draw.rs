@@ -375,19 +375,43 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
             SettingsRow::AddProfile => ("+ add provider…".into(), acc()),
             SettingsRow::EditProfile(n) => {
                 let p = &app.profiles[n];
-                let has_key = app.session_keys.contains_key(n)
-                    || p.key_env.as_deref().map(|e| std::env::var(e).is_ok()).unwrap_or(false)
-                    || p.api_key.is_some();
-                (
-                    format!(
-                        "  {:<14} {} · model={} · key={}",
-                        n,
-                        p.base_url.as_deref().unwrap_or("?"),
-                        p.model.as_deref().unwrap_or("—"),
-                        if has_key { "set" } else { "MISSING" }
-                    ),
-                    Style::default(),
-                )
+                if p.kind.as_deref() == Some("codex-oauth") {
+                    // OAuth session IS the credential — a codex profile
+                    // must never render as a keyless API-key profile.
+                    let session = crate::codex::CodexAuth::session_exists();
+                    (
+                        format!(
+                            "  {:<14} {} · model={} · {}",
+                            n,
+                            "codex://oauth",
+                            p.model.as_deref().unwrap_or("—"),
+                            if session {
+                                "chatgpt session ✓".to_string()
+                            } else {
+                                "no session — run `codex login` or `sui auth`".to_string()
+                            }
+                        ),
+                        Style::default(),
+                    )
+                } else {
+                    let has_key = app.session_keys.contains_key(n)
+                        || p
+                            .key_env
+                            .as_deref()
+                            .map(|e| std::env::var(e).is_ok())
+                            .unwrap_or(false)
+                        || p.api_key.is_some();
+                    (
+                        format!(
+                            "  {:<14} {} · model={} · key={}",
+                            n,
+                            p.base_url.as_deref().unwrap_or("?"),
+                            p.model.as_deref().unwrap_or("—"),
+                            if has_key { "set" } else { "MISSING" }
+                        ),
+                        Style::default(),
+                    )
+                }
             }
             SettingsRow::Role(r) => (
                 format!("  {:<14} → {}", r.name(), app.role_profile(*r).unwrap_or("—".into())),
@@ -741,7 +765,11 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 }
             }
             lines.push(Line::from(Span::styled(
-                format!("→ POST {}", pf.endpoint),
+                if pf.endpoint.starts_with("codex://") {
+                    format!("→ {}", pf.endpoint)
+                } else {
+                    format!("→ POST {}", pf.endpoint)
+                },
                 dim(),
             )));
             lines.push(Line::from(""));

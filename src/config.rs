@@ -33,7 +33,7 @@ pub struct ProfileCfg {
     pub base_url: Option<String>,
     pub model: Option<String>,
     /// "codex-oauth" = ChatGPT-sign-in Responses backend (no API key —
-    /// reuses `codex login` or `sui auth codex`). Anything else = the
+    /// reuses `codex login` or `sui auth`). Anything else = the
     /// standard OpenAI-compatible chat-completions transport.
     pub kind: Option<String>,
     /// Name of the env var holding this profile's API key.
@@ -237,7 +237,27 @@ pub fn profiles(config_path: Option<&Path>) -> Result<BTreeMap<String, ProfileCf
             out.extend(ps); // explicit file wins
         }
     }
+    inject_detected_profiles(&mut out);
     Ok(out)
+}
+
+/// A discoverable Codex OAuth session (Sui's own store or the Codex
+/// CLI's ~/.codex/auth.json) IS a usable profile — registering it
+/// automatically means `codex login` alone makes the `codex` profile
+/// selectable everywhere (TUI pickers, --worker-profile, missions)
+/// with zero TOML. An explicit [profiles.codex] always wins.
+fn inject_detected_profiles(out: &mut BTreeMap<String, ProfileCfg>) {
+    if crate::codex::CodexAuth::session_exists() {
+        // Match what `codex` itself would run before falling back to a
+        // generic default — the CLI's config.toml carries the model.
+        let model = crate::codex::CodexAuth::cli_default_model()
+            .unwrap_or_else(|| "gpt-5.3-codex".to_string());
+        out.entry("codex".to_string()).or_insert(ProfileCfg {
+            kind: Some("codex-oauth".to_string()),
+            model: Some(model),
+            ..Default::default()
+        });
+    }
 }
 
 /// The global `[provider]` credential (api_key inline or via key_env) —
@@ -649,8 +669,17 @@ pub fn save_profile(
     model: &str,
     key_env: Option<&str>,
     api_key: Option<&str>,
+    kind: Option<&str>,
 ) -> Result<()> {
-    save_profile_at(&global_path()?, name, base_url, model, key_env, api_key)
+    save_profile_at(
+        &global_path()?,
+        name,
+        base_url,
+        model,
+        key_env,
+        api_key,
+        kind,
+    )
 }
 
 /// save_profile against an explicit path — testable without touching the
@@ -662,6 +691,7 @@ pub fn save_profile_at(
     model: &str,
     key_env: Option<&str>,
     api_key: Option<&str>,
+    kind: Option<&str>,
 ) -> Result<()> {
     let mut doc = load_doc_for_write(p)?;
     let root = doc.as_table_mut().context("config root not a table")?;
@@ -674,6 +704,21 @@ pub fn save_profile_at(
         .entry(name)
         .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
     let t = entry.as_table_mut().context("profile not a table")?;
+    // OAuth-backed kinds (codex-oauth) have no base_url or API key —
+    // write the kind and strip the chat-completions fields entirely so
+    // a stale endpoint can't shadow the OAuth backend.
+    if let Some(k) = kind {
+        t.insert("kind".into(), toml::Value::String(k.to_string()));
+        t.insert("model".into(), toml::Value::String(model.to_string()));
+        t.remove("base_url");
+        t.remove("key_env");
+        t.remove("api_key");
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        return write_private(p, &toml::to_string_pretty(&doc)?);
+    }
+    t.remove("kind");
     t.insert("base_url".into(), toml::Value::String(base_url.to_string()));
     t.insert("model".into(), toml::Value::String(model.to_string()));
     match key_env {
@@ -719,7 +764,7 @@ mod tests {
         let garbage = "[profiles.x\napi_key = \"sk-keepme\"";
         std::fs::write(&p, garbage).unwrap();
 
-        let r = save_profile_at(&p, "y", "http://x", "m", None, None);
+        let r = save_profile_at(&p, "y", "http://x", "m", None, None, None);
         assert!(r.is_err());
         assert!(format!("{:#}", r.unwrap_err()).contains("refusing to overwrite"));
         // file untouched — the typo'd content survives for manual repair
@@ -727,11 +772,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Point the Codex discovery env at a temp pair; restores on drop.
+    struct CodexHomes;
+    impl CodexHomes {
+        fn with_session(session: bool) -> (Self, PathBuf, PathBuf) {
+            let sui = std::env::temp_dir().join(format!("sui-cfgenv-s-{}", std::process::id()));
+            let codex = std::env::temp_dir().join(format!("sui-cfgenv-c-{}", std::process::id()));
+            // Same pid → same paths across tests in this binary: wipe
+            // leftovers so a prior test's auth.json can't leak in.
+            let _ = std::fs::remove_dir_all(&sui);
+            let _ = std::fs::remove_dir_all(&codex);
+            std::fs::create_dir_all(&sui).unwrap();
+            std::fs::create_dir_all(&codex).unwrap();
+            if session {
+                std::fs::write(
+                    codex.join("auth.json"),
+                    r#"{"tokens":{"access_token":"a","refresh_token":"r"}}"#,
+                )
+                .unwrap();
+            }
+            unsafe {
+                std::env::set_var("SUI_HOME", &sui);
+                std::env::set_var("CODEX_HOME", &codex);
+            }
+            (Self, sui, codex)
+        }
+    }
+    impl Drop for CodexHomes {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("SUI_HOME");
+                std::env::remove_var("CODEX_HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_session_registers_profile() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let (_h, _s, _c) = CodexHomes::with_session(true);
+        let mut out = BTreeMap::new();
+        inject_detected_profiles(&mut out);
+        let codex = out.get("codex").expect("session registers a profile");
+        assert_eq!(codex.kind.as_deref(), Some("codex-oauth"));
+        assert!(codex.model.is_some());
+    }
+
+    #[test]
+    fn explicit_codex_profile_beats_detected() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let (_h, _s, _c) = CodexHomes::with_session(true);
+        let mut out = BTreeMap::new();
+        out.insert(
+            "codex".to_string(),
+            ProfileCfg {
+                kind: Some("codex-oauth".into()),
+                model: Some("gpt-5.5".into()),
+                ..Default::default()
+            },
+        );
+        inject_detected_profiles(&mut out);
+        assert_eq!(out["codex"].model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn no_session_no_injection() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let (_h, _s, _c) = CodexHomes::with_session(false);
+        let mut out = BTreeMap::new();
+        inject_detected_profiles(&mut out);
+        assert!(out.is_empty());
+    }
+
     #[test]
     fn save_writes_when_file_missing() {
         let dir = std::env::temp_dir().join(format!("sui-cfgtest2-{}", std::process::id()));
         let p = dir.join("config.toml");
-        save_profile_at(&p, "y", "http://x", "m", None, None).unwrap();
+        save_profile_at(&p, "y", "http://x", "m", None, None, None).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("profiles"));
         let _ = std::fs::remove_dir_all(&dir);
     }

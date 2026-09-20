@@ -139,12 +139,19 @@ fn codex_home() -> PathBuf {
         })
 }
 
-/// Sui's own token store — a login performed by `sui auth codex` writes
+/// Sui's own token store — a login performed by `sui auth` writes
 /// here so its refresh chain is independent of the Codex CLI's file.
+/// `SUI_HOME` relocates the whole Sui config dir (parallel to
+/// `CODEX_HOME`) — portable installs and test isolation.
 fn own_store_path() -> PathBuf {
-    std::env::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".config/sui/codex-auth.json")
+    std::env::var("SUI_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config/sui")
+        })
+        .join("codex-auth.json")
 }
 
 fn discover_path() -> Option<PathBuf> {
@@ -177,15 +184,44 @@ struct TokenSet {
 }
 
 impl CodexAuth {
+    /// The model the Codex CLI itself is configured to run
+    /// (`$CODEX_HOME/config.toml` `model = "…"`) — the right default for
+    /// the auto-registered profile: `codex login` + Sui then behaves
+    /// like the CLI the user already set up. None when unset/unreadable.
+    pub fn cli_default_model() -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct CodexCfg {
+            model: Option<String>,
+        }
+        let s = std::fs::read_to_string(codex_home().join("config.toml")).ok()?;
+        toml::from_str::<CodexCfg>(&s).ok()?.model
+    }
+
+    /// Is a discoverable OAuth session present (Sui's store or the Codex
+    /// CLI's `~/.codex/auth.json`)? Cheap file-existence check for profile
+    /// listing — token validity is proven at use time.
+    pub fn session_exists() -> bool {
+        discover_path().is_some()
+    }
+
     /// Locate credentials: Sui's own store first, then `~/.codex/auth.json`.
     pub fn discover() -> Result<Arc<Self>> {
         let path = discover_path().ok_or_else(|| {
             anyhow::anyhow!(
                 "no codex oauth session — run `codex login` (ChatGPT sign-in) \
-                 or `sui auth codex`"
+                 or `sui auth`"
             )
         })?;
-        Self::from_file(&path)
+        match Self::from_file(&path) {
+            Ok(a) => Ok(a),
+            // A corrupt or outdated Sui-owned store must not shadow a
+            // valid Codex CLI login — try the other store before failing.
+            Err(e) if path != codex_home().join("auth.json") => {
+                let codex = codex_home().join("auth.json");
+                Self::from_file(&codex).map_err(|_| e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Arc<Self>> {
@@ -746,6 +782,13 @@ async fn exchange_code(client: &reqwest::Client, code: &str, verifier: &str) -> 
 /// the final callback URL (headless/SSH path — the browser's localhost is
 /// a different machine than Sui's).
 pub async fn login(manual: bool) -> Result<PathBuf> {
+    if let Ok(existing) = CodexAuth::discover() {
+        println!(
+            "Note: a Codex session already exists ({}) — Sui reuses it \
+             automatically; continuing anyway to re-authenticate.",
+            existing.path.display()
+        );
+    }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
@@ -839,7 +882,7 @@ fn wait_for_callback(expect_state: &str) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(300);
     loop {
         if Instant::now() > deadline {
-            bail!("callback timed out — retry with `sui auth codex --manual`");
+            bail!("callback timed out — retry with `sui auth --manual`");
         }
         listener.set_nonblocking(true)?;
         match listener.accept() {
@@ -967,5 +1010,105 @@ mod tests {
     fn date_encoding() {
         assert_eq!(days_to_ymd(0), (1970, 1, 1));
         assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
+
+    // ── session discovery (env-isolated via SUI_HOME / CODEX_HOME) ────
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sui-codextest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_auth(dir: &std::path::Path, access: &str) {
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": "rt",
+                    "id_token": null,
+                    "account_id": "acc",
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Point SUI_HOME and CODEX_HOME at the given dirs; restores on drop.
+    struct Homes;
+    impl Homes {
+        fn set(sui: &std::path::Path, codex: &std::path::Path) -> Self {
+            unsafe {
+                std::env::set_var("SUI_HOME", sui);
+                std::env::set_var("CODEX_HOME", codex);
+            }
+            Self
+        }
+    }
+    impl Drop for Homes {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("SUI_HOME");
+                std::env::remove_var("CODEX_HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn discovers_codex_cli_store_without_sui_login() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let sui = tmp("sui-none");
+        let codex = tmp("codex-yes");
+        write_auth(&codex, "at-codex-cli");
+        let _h = Homes::set(&sui, &codex);
+        // The reported UX bug: `codex login` alone must be enough.
+        assert!(CodexAuth::session_exists());
+        let a = CodexAuth::discover().unwrap();
+        assert_eq!(a.inner.lock().unwrap().access, "at-codex-cli");
+        // And the CLI's own configured model becomes the profile default.
+        std::fs::write(codex.join("config.toml"), "model = \"gpt-6-x\"\n").unwrap();
+        assert_eq!(CodexAuth::cli_default_model().as_deref(), Some("gpt-6-x"));
+    }
+
+    #[test]
+    fn sui_store_wins_then_corrupt_falls_back() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let sui = tmp("sui-yes");
+        let codex = tmp("codex-yes2");
+        // Sui's store is SUI_HOME/codex-auth.json; the Codex CLI's is
+        // CODEX_HOME/auth.json — different filenames on purpose.
+        std::fs::write(
+            sui.join("codex-auth.json"),
+            r#"{"tokens":{"access_token":"at-sui","refresh_token":"rt"}}"#,
+        )
+        .unwrap();
+        write_auth(&codex, "at-codex-cli");
+        let _h = Homes::set(&sui, &codex);
+        assert_eq!(
+            CodexAuth::discover().unwrap().inner.lock().unwrap().access,
+            "at-sui"
+        );
+        // Corrupt the Sui store — a stale/broken own-store must not
+        // shadow a perfectly good Codex CLI login.
+        std::fs::write(sui.join("codex-auth.json"), "{not json").unwrap();
+        assert_eq!(
+            CodexAuth::discover().unwrap().inner.lock().unwrap().access,
+            "at-codex-cli"
+        );
+    }
+
+    #[test]
+    fn no_session_reports_login_hint() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let sui = tmp("sui-none2");
+        let codex = tmp("codex-none");
+        let _h = Homes::set(&sui, &codex);
+        assert!(!CodexAuth::session_exists());
+        let e = CodexAuth::discover().err().unwrap().to_string();
+        assert!(e.contains("codex login"), "hint names the fix: {e}");
     }
 }
