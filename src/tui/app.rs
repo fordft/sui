@@ -1669,14 +1669,7 @@ impl App {
                 match self.tab {
                     Tab::Chat => self.scroll_by(if up { 3 } else { -3 }),
                     // settings rows don't scroll — the wheel moves selection
-                    Tab::Settings => {
-                        let n = self.settings_rows().len();
-                        if up {
-                            self.settings_sel = self.settings_sel.saturating_sub(1);
-                        } else {
-                            self.settings_sel = (self.settings_sel + 1).min(n.saturating_sub(1));
-                        }
-                    }
+                    Tab::Settings => self.settings_move(if up { -1 } else { 1 }),
                     _ => {}
                 }
             }
@@ -2200,7 +2193,7 @@ impl App {
             }
             (_, KeyCode::Up) => {
                 if self.tab == Tab::Settings {
-                    self.settings_sel = self.settings_sel.saturating_sub(1);
+                    self.settings_move(-1);
                 } else if self.tab == Tab::Chat
                     && (self.input.is_empty() || self.hist_i.is_some())
                     && !self.history.is_empty()
@@ -2217,10 +2210,7 @@ impl App {
             }
             (_, KeyCode::Down) => {
                 if self.tab == Tab::Settings {
-                    let n = self.settings_rows().len();
-                    if self.settings_sel + 1 < n {
-                        self.settings_sel += 1;
-                    }
+                    self.settings_move(1);
                 } else if self.tab == Tab::Chat && self.hist_i.is_some() {
                     let i = self.hist_i.unwrap() + 1;
                     if i >= self.history.len() {
@@ -2852,28 +2842,70 @@ impl App {
         }
     }
 
-    /// Settings rows (computed each draw so they stay in sync):
-    /// providers first, then roles, then run options.
+    /// Settings rows (computed each draw so they stay in sync), grouped
+    /// under non-selectable Header rows. Navigation skips headers.
     pub fn settings_rows(&self) -> Vec<SettingsRow> {
-        let mut v = vec![SettingsRow::AddProfile];
+        let mut v = vec![SettingsRow::Header("providers")];
         for n in self.profiles.keys() {
             v.push(SettingsRow::EditProfile(n.clone()));
         }
+        v.push(SettingsRow::AddProfile);
+        v.push(SettingsRow::Header("roles"));
         for r in Role::ALL {
             v.push(SettingsRow::Role(r));
         }
-        v.push(SettingsRow::Mode);
-        v.push(SettingsRow::Export);
-        v.push(SettingsRow::Workers);
-        v.push(SettingsRow::Reasoning);
-        v.push(SettingsRow::Mouse);
-        v.push(SettingsRow::Auto);
-        v.push(SettingsRow::WebAccess);
-        v.push(SettingsRow::WebKey);
-        v.push(SettingsRow::WebTest);
-        v.push(SettingsRow::Workspace);
-        v.push(SettingsRow::Acceptance);
+        v.extend([
+            SettingsRow::Header("execution"),
+            SettingsRow::Mode,
+            SettingsRow::Workers,
+            SettingsRow::Auto,
+            SettingsRow::Acceptance,
+            SettingsRow::Export,
+            SettingsRow::Header("appearance"),
+            SettingsRow::Reasoning,
+            SettingsRow::Mouse,
+            SettingsRow::Header("web research"),
+            SettingsRow::WebAccess,
+            SettingsRow::WebKey,
+            SettingsRow::WebTest,
+            SettingsRow::Header("workspace"),
+            SettingsRow::Workspace,
+        ]);
         v
+    }
+
+    /// Move the settings selection, skipping section headers. Saturates
+    /// at both ends; a selection parked on a header (fresh state, or a
+    /// layout change after adding/removing a profile) normalizes first.
+    pub fn settings_move(&mut self, dir: isize) {
+        let rows = self.settings_rows();
+        if rows.is_empty() {
+            return;
+        }
+        // normalize: bounds-check, then step off any header row
+        let mut i = self.settings_sel.min(rows.len() - 1);
+        while i < rows.len() && rows[i].is_header() {
+            i += 1;
+        }
+        let i = i.min(rows.len() - 1);
+        let mut j = i as isize;
+        loop {
+            let k = j + dir;
+            if k < 0 || k >= rows.len() as isize {
+                break;
+            }
+            j = k;
+            if !rows[j as usize].is_header() {
+                break;
+            }
+        }
+        // if the step landed on a header (e.g. section above i), keep the
+        // normalized position rather than parking on a non-row
+        self.settings_sel = if rows[j as usize].is_header() {
+            i
+        } else {
+            j as usize
+        };
     }
 
     /// Settings-tab row activation.
@@ -2978,13 +3010,15 @@ impl App {
                     target: TextTarget::Acceptance,
                 });
             }
-            None => {}
+            Some(SettingsRow::Header(_)) | None => {}
         }
     }
 }
 
 #[derive(Clone)]
 pub enum SettingsRow {
+    /// Section divider — rendered as a header, never selectable.
+    Header(&'static str),
     AddProfile,
     EditProfile(String),
     Role(Role),
@@ -2999,4 +3033,33 @@ pub enum SettingsRow {
     WebTest,
     Workspace,
     Acceptance,
+}
+
+impl SettingsRow {
+    pub fn is_header(&self) -> bool {
+        matches!(self, SettingsRow::Header(_))
+    }
+    /// One-line explanation of the row — shown as the pane's bottom hint
+    /// when the row is selected.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            SettingsRow::Header(_) => "",
+            SettingsRow::AddProfile => {
+                "connect a provider — DeepSeek, OpenRouter, ChatGPT sign-in, or a custom endpoint"
+            }
+            SettingsRow::EditProfile(_) => "Enter to edit — name, model, credentials, test",
+            SettingsRow::Role(_) => "which profile runs this role — Enter to pick",
+            SettingsRow::Mode => "mission = orchestrator→workers→auditor · solo = single agent",
+            SettingsRow::Export => "write a sanitized report of this run to exports/<run>/",
+            SettingsRow::Workers => "parallel task slots in mission mode",
+            SettingsRow::Reasoning => "reasoning display — view-only, never sent to the model",
+            SettingsRow::Mouse => "wheel scrolls · click expands · drag copies",
+            SettingsRow::Auto => "skip permission prompts — session only, resets on restart",
+            SettingsRow::WebAccess => "web search/fetch policy — queries leave this machine",
+            SettingsRow::WebKey => "optional Exa key — basic access is rate-limited",
+            SettingsRow::WebTest => "fire one search to verify connectivity",
+            SettingsRow::Workspace => "directory Sui works in — applies on next launch",
+            SettingsRow::Acceptance => "commands a mission runs to validate its own output",
+        }
+    }
 }

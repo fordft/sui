@@ -2083,6 +2083,63 @@ fn snapshot_live_then_folded() {
     );
 }
 
+/// Snapshot: settings tab — grouped sections, labeled rows, bottom hint.
+#[test]
+fn snapshot_settings_sections() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    // a codex-oauth profile renders as a session row, not a keyless profile
+    app.profiles.insert(
+        "codex".into(),
+        ProfileCfg {
+            kind: Some("codex-oauth".into()),
+            model: Some("gpt-5.5".into()),
+            ..Default::default()
+        },
+    );
+    app.tab = Tab::Settings;
+    app.settings_sel = 1; // first real row under the providers header
+    let mut t = Terminal::new(TestBackend::new(110, 32)).unwrap();
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let s = format!("{}", t.backend());
+    println!("\n{s}");
+    for section in [
+        "providers",
+        "roles",
+        "execution",
+        "appearance",
+        "web research",
+        "workspace",
+    ] {
+        assert!(s.contains(section), "missing section {section}:\n{s}");
+    }
+    assert!(s.contains("mock-ctrl"), "profile row visible:\n{s}");
+    assert!(s.contains("codex"), "codex profile row visible:\n{s}");
+    assert!(s.contains("ChatGPT OAuth"), "codex renders as oauth:\n{s}");
+    assert!(
+        s.contains("(via orchestrator)"),
+        "auditor fallback marked:\n{s}"
+    );
+    // a header is never selectable: nav from row 0 lands on a real row
+    app.settings_sel = 0;
+    app.settings_move(1);
+    assert!(!app.settings_rows()[app.settings_sel].is_header());
+    app.settings_move(-1); // saturates — can't leave the list top
+    assert!(!app.settings_rows()[app.settings_sel].is_header());
+    // Down through every row never parks on a header
+    for _ in 0..40 {
+        app.settings_move(1);
+        assert!(!app.settings_rows()[app.settings_sel].is_header());
+    }
+    // and the list scrolls to keep the last row in view
+    t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
+    let s = format!("{}", t.backend());
+    assert!(s.contains("directory"), "bottom row scrolled into view:\n{s}");
+    assert!(s.contains(&repo.display().to_string()), "workspace path:\n{s}");
+}
+
 /// Snapshot: a failed step paints its excerpt inside the folded group.
 #[test]
 fn snapshot_failure_in_folded_group() {

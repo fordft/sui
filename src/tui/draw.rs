@@ -368,158 +368,226 @@ fn draw_usage(f: &mut Frame, app: &App, a: Rect) {
 }
 
 fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
+    let ok = Style::default().fg(Color::Green);
+    let warn = Style::default().fg(Color::Yellow);
+    let on = Style::default().fg(Color::Magenta);
+    const LABEL_W: usize = 16;
+    fn strip_scheme(u: &str) -> &str {
+        u.trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+    }
+
+    let rows = app.settings_rows();
+    // a selection parked on a header renders as the next real row —
+    // settings_move normalizes it on the next keypress
+    let sel = (app.settings_sel..rows.len())
+        .find(|&i| !rows[i].is_header())
+        .unwrap_or(app.settings_sel);
+
+    // keep the selection visible: rows above `offset` scroll out of view
+    let visible = (a.height as usize).saturating_sub(2).max(1);
+    let offset = if sel >= visible { sel + 1 - visible } else { 0 };
+
     let mut items: Vec<ListItem> = vec![];
-    for (i, row) in app.settings_rows().iter().enumerate() {
-        let sel = i == app.settings_sel;
-        let (text, sty) = match row {
-            SettingsRow::AddProfile => ("+ add provider…".into(), acc()),
+    for (i, row) in rows.iter().enumerate().skip(offset) {
+        if items.len() >= visible {
+            break;
+        }
+        // section headers: accent name + rule, never selectable/clickable
+        if let SettingsRow::Header(name) = row {
+            let rule = (a.width as usize).saturating_sub(name.len() + 6);
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!(" {name} "), acc().add_modifier(Modifier::BOLD)),
+                Span::styled("─".repeat(rule), dim()),
+            ])));
+            continue;
+        }
+
+        // (label, [value spans]) — label column is fixed so values align
+        let label: String;
+        let mut spans: Vec<Span> = vec![];
+        match row {
+            SettingsRow::AddProfile => {
+                label = "+ add provider".into();
+                spans.push(Span::styled(
+                    "api-key or ChatGPT sign-in".to_string(),
+                    dim(),
+                ));
+            }
             SettingsRow::EditProfile(n) => {
                 let p = &app.profiles[n];
+                label = n.clone();
                 if p.kind.as_deref() == Some("codex-oauth") {
-                    // OAuth session IS the credential — a codex profile
-                    // must never render as a keyless API-key profile.
-                    let session = crate::codex::CodexAuth::session_exists();
-                    (
-                        format!(
-                            "  {:<14} {} · model={} · {}",
-                            n,
-                            "codex://oauth",
-                            p.model.as_deref().unwrap_or("—"),
-                            if session {
-                                "chatgpt session ✓".to_string()
-                            } else {
-                                "no session — run `codex login` or `sui auth`".to_string()
-                            }
-                        ),
+                    // OAuth session IS the credential — never render as a
+                    // keyless API-key profile.
+                    spans.push(Span::styled(
+                        format!("ChatGPT OAuth · {}", p.model.as_deref().unwrap_or("—")),
                         Style::default(),
-                    )
+                    ));
+                    let session = crate::codex::CodexAuth::session_exists();
+                    spans.push(Span::styled(
+                        if session {
+                            "   session ✓".to_string()
+                        } else {
+                            "   no session — `codex login` or `sui auth`".to_string()
+                        },
+                        if session { ok } else { warn },
+                    ));
                 } else {
                     let has_key = app.session_keys.contains_key(n)
-                        || p
-                            .key_env
+                        || p.key_env
                             .as_deref()
                             .map(|e| std::env::var(e).is_ok())
                             .unwrap_or(false)
                         || p.api_key.is_some();
-                    (
+                    spans.push(Span::styled(
                         format!(
-                            "  {:<14} {} · model={} · key={}",
-                            n,
-                            p.base_url.as_deref().unwrap_or("?"),
-                            p.model.as_deref().unwrap_or("—"),
-                            if has_key { "set" } else { "MISSING" }
+                            "{} · {}",
+                            p.base_url.as_deref().map(strip_scheme).unwrap_or("?"),
+                            p.model.as_deref().unwrap_or("—")
                         ),
                         Style::default(),
-                    )
+                    ));
+                    spans.push(Span::styled(
+                        if has_key {
+                            "   key ✓"
+                        } else {
+                            "   key MISSING"
+                        },
+                        if has_key { ok } else { warn },
+                    ));
                 }
             }
-            SettingsRow::Role(r) => (
-                format!("  {:<14} → {}", r.name(), app.role_profile(*r).unwrap_or("—".into())),
-                Style::default(),
-            ),
-            SettingsRow::Mode => {
-                let mission = app.mode == crate::tui::app::Mode::Mission;
-                (
-                    format!(
-                        "  run mode: {} (Enter toggles · Ctrl+O · /mission · /solo · sui tui --mission)",
-                        if mission { "mission" } else { "solo" }
-                    ),
-                    if mission { Style::default().fg(Color::Magenta) } else { Style::default() },
-                )
-            }
-            SettingsRow::Export => (
-                "  export run report → exports/<run>/report.md (or /export)".into(),
-                Style::default(),
-            ),
-            SettingsRow::Workers => (
-                format!("  worker concurrency: {} (max 2)", app.ui.worker_count.unwrap_or(1)),
-                Style::default(),
-            ),
-            SettingsRow::Reasoning => (
-                format!(
-                    "  reasoning display: {} (auto hides after streaming · Ctrl+R cycles · view-only)",
-                    app.reasoning.name()
-                ),
-                Style::default(),
-            ),
-            SettingsRow::Mouse => (
-                format!(
-                    "  mouse: {} (wheel scrolls · click expands · drag copies · shift+drag selects natively)",
-                    if app.mouse { "on" } else { "off" }
-                ),
-                if app.mouse {
-                    Style::default()
-                } else {
-                    dim()
-                },
-            ),
-            SettingsRow::WebAccess => (
-                format!(
-                    "  web research: {} (queries and URLs leave this machine — Exa)",
-                    app.web_access.name()
-                ),
-                match app.web_access {
-                    crate::web::WebAccess::Off => dim(),
-                    _ => Style::default(),
-                },
-            ),
-            SettingsRow::WebKey => (
-                format!(
-                    "    exa api key: {} (optional — basic access is rate-limited)",
-                    if app.web_key.is_some() {
-                        "set".to_string()
-                    } else if app.web_key_env.is_some() {
-                        format!("env {}", app.web_key_env.as_deref().unwrap_or(""))
-                    } else {
-                        "none".into()
+            SettingsRow::Role(r) => {
+                label = r.name().to_lowercase();
+                let resolved = app.role_profile(*r);
+                let explicit = match r {
+                    Role::Solo => &app.ui.solo_profile,
+                    Role::Orchestrator => &app.ui.orchestrator_profile,
+                    Role::Worker => &app.ui.worker_profile,
+                    Role::Auditor => &app.ui.auditor_profile,
+                };
+                match resolved {
+                    Some(p) => {
+                        spans.push(Span::styled(p, Style::default()));
+                        if explicit.is_none() {
+                            spans.push(Span::styled(
+                                if *r == Role::Auditor {
+                                    "  (via orchestrator)"
+                                } else {
+                                    "  (auto)"
+                                },
+                                dim(),
+                            ));
+                        }
                     }
-                ),
-                Style::default(),
-            ),
-            SettingsRow::WebTest => ("    test search".into(), Style::default()),
-            SettingsRow::Auto => {
-                let on = app.auto.load(std::sync::atomic::Ordering::Relaxed);
-                (
-                    format!(
-                        "  auto-approve this session: {} (YOLO — resets on restart/workspace change)",
-                        if on { "on" } else { "off" }
-                    ),
-                    if on { Style::default().fg(Color::Magenta) } else { Style::default() },
-                )
+                    None => spans.push(Span::styled("—".to_string(), dim())),
+                }
             }
-            SettingsRow::Workspace => (
-                format!("  workspace (applies on next launch): {}", app.workspace.display()),
-                Style::default(),
-            ),
-            SettingsRow::Acceptance => (
-                format!("  acceptance cmds: {}", app.ui.acceptance.len()),
-                Style::default(),
-            ),
-        };
-        items.push(ListItem::new(Line::from(Span::styled(
-            text,
-            if sel {
-                Style::default().bg(Color::DarkGray)
-            } else {
-                sty
-            },
-        ))));
-        // click zone per visible settings row (list renders top-down, 1 row each)
-        if (i as u16) + 1 < a.height {
+            SettingsRow::Mode => {
+                label = "run mode".into();
+                let mission = app.mode == crate::tui::app::Mode::Mission;
+                spans.push(Span::styled(
+                    if mission { "mission" } else { "solo" },
+                    if mission { on } else { Style::default() },
+                ));
+                spans.push(Span::styled("   Enter toggles".to_string(), dim()));
+            }
+            SettingsRow::Workers => {
+                label = "worker slots".into();
+                spans.push(Span::raw(app.ui.worker_count.unwrap_or(1).to_string()));
+            }
+            SettingsRow::Auto => {
+                label = "auto-approve".into();
+                let yolo = app.auto.load(std::sync::atomic::Ordering::Relaxed);
+                spans.push(Span::styled(
+                    if yolo { "on" } else { "off" },
+                    if yolo { on } else { Style::default() },
+                ));
+            }
+            SettingsRow::Acceptance => {
+                label = "acceptance cmds".into();
+                spans.push(Span::raw(app.ui.acceptance.len().to_string()));
+            }
+            SettingsRow::Export => {
+                label = "export run".into();
+                spans.push(Span::styled("→ exports/<run>/report.md".to_string(), dim()));
+            }
+            SettingsRow::Reasoning => {
+                label = "reasoning".into();
+                spans.push(Span::raw(app.reasoning.name()));
+            }
+            SettingsRow::Mouse => {
+                label = "mouse".into();
+                spans.push(Span::styled(
+                    if app.mouse { "on" } else { "off" },
+                    if app.mouse { Style::default() } else { dim() },
+                ));
+            }
+            SettingsRow::WebAccess => {
+                label = "access".into();
+                spans.push(Span::styled(
+                    app.web_access.name(),
+                    match app.web_access {
+                        crate::web::WebAccess::Off => dim(),
+                        crate::web::WebAccess::Auto => on,
+                        _ => Style::default(),
+                    },
+                ));
+            }
+            SettingsRow::WebKey => {
+                label = "exa api key".into();
+                if app.web_key.is_some() {
+                    spans.push(Span::styled("set".to_string(), ok));
+                } else if let Some(e) = &app.web_key_env {
+                    spans.push(Span::styled(format!("env {e}"), ok));
+                } else {
+                    spans.push(Span::styled("none".to_string(), dim()));
+                }
+            }
+            SettingsRow::WebTest => {
+                label = "test search".into();
+                spans.push(Span::styled("run one query".to_string(), dim()));
+            }
+            SettingsRow::Workspace => {
+                label = "directory".into();
+                spans.push(Span::raw(app.workspace.display().to_string()));
+            }
+            SettingsRow::Header(_) => unreachable!(),
+        }
+
+        let mut line = vec![Span::styled(
+            format!("  {label:<LABEL_W$} "),
+            Style::default(),
+        )];
+        line.extend(spans);
+        items.push(ListItem::new(Line::from(line)).style(if i == sel {
+            Style::default().bg(Color::DarkGray)
+        } else {
+            Style::default()
+        }));
+        // click zone per visible row — y accounts for the scroll offset
+        let row_y = (i - offset) as u16;
+        if row_y + 1 < a.height {
             app.hits.borrow_mut().push(HitZone {
                 x: a.x + 1,
-                y: a.y + 1 + i as u16,
+                y: a.y + 1 + row_y,
                 w: a.width.saturating_sub(2),
                 h: 1,
                 hit: Hit::Setting(i),
             });
         }
     }
+
+    // selected row explains itself in the bottom border
+    let hint = rows.get(sel).map(|r| r.hint()).unwrap_or("");
     f.render_widget(
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("settings — Enter to edit · shell exec is NOT a sandbox"),
+                .title(" settings ")
+                .title_bottom(Line::from(Span::styled(format!(" {hint} "), dim())).right_aligned()),
         ),
         a,
     );
