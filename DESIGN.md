@@ -276,7 +276,7 @@ deliberately; repair cost/success is measured before any second strategy.
 
 Deferred: auto mode-selection, pools >2, indexing, compaction.
 
-## TUI (v0.3)
+## TUI
 
 `sui tui` — Ratatui/Crossterm shell over the frozen core. The UI renders
 typed events and emits user commands; it never re-implements the agent
@@ -298,10 +298,38 @@ prefixes are unchanged).
   Keys never hit journals, chat, or TOML.
 - **Screens**: Chat (streaming, multiline, paste, scroll, unicode-safe) /
   Tasks (plan + per-task status) / Changes (files, audit, accepted SHA) /
-  Usage (per-agent requests + provider-reported cache tokens; unknown
-  costs render `—`, never 0) / Settings (providers, roles, workspace,
+  Usage (per-agent/model requests + provider-reported cache tokens; each
+  token field tracks measurement coverage independently, with `—` for
+  unknown and an explicit partial marker; unknown costs never render 0) /
+  Settings (providers, roles, workspace,
   worker count, acceptance commands). Sidebar lists agents + run state;
-  collapses under ~90 cols.
+  is hidden by default in Solo and shown in Mission at ≥110 columns
+  (30-column allocation with a one-column gutter); Ctrl+B toggles it.
+- **Presentation**: dark semantic palette by default; `[ui].theme =
+  "terminal"` uses the terminal's foreground for essential text and ANSI
+  borders; selection also uses attributes that survive `NO_COLOR`. Missing
+  or unknown theme names resolve to dark. Transcript heading/fence/quote
+  styling preserves literal text and row ownership; capped previews expose
+  a truncation marker and retain captured details. Dialogs subdue the
+  background, and palette/permission heights follow their content.
+  Preferences use the existing
+  `UiSettings` persistence path and never affect model requests.
+- **Layout**: `tui::layout::regions` owns header, content, sidebar,
+  composer, metadata, and footer geometry. Drawing and resize/input
+  anchoring share it. Chat has an unboxed transcript; the composer grows
+  from one to six text rows and scrolls internally. `Buf::view` shares
+  grapheme/display-width calculations between input painting and caret
+  placement; editing moves and deletes whole graphemes.
+- **Navigation**: Ctrl+P or the header opens a searchable command palette,
+  backed by a bounded command registry and the existing App/Effect paths.
+  Ctrl+T cycles the five views; Esc returns to Chat. Opening or dismissing
+  the palette retains draft text and transcript focus. Disabled palette
+  actions explain why they are unavailable. Permission requests queue
+  while a dialog is open, so ordinary typing cannot become approval;
+  the palette displays a pending-permission notice.
+  Tasks, Changes, and Usage maintain independent bounded offsets over
+  wrapped rows. Activity navigation uses the same visibility/grouping
+  rules as transcript rendering and reveals its selected target.
 - **Control**: permission prompts are in-TUI modals (y/a/n) wired through
   the same Gate; Stop and Ctrl-C fire a shared `Notify` + flag consumed by
   the existing cancellation path (process-group cleanup intact). Terminal

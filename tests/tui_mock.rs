@@ -191,6 +191,7 @@ fn app_with_mock(repo: &Path, port: u16) -> App {
     profiles.insert("mock-ctrl".into(), pc("ctrl-model"));
     profiles.insert("mock-worker".into(), pc("work-model"));
     let ui = UiSettings {
+        theme: None,
         workspace: Some(repo.to_string_lossy().into()),
         mode: Some("solo".into()),
         solo_profile: Some("mock-worker".into()),
@@ -299,7 +300,7 @@ async fn tui_solo_write_with_permission_modal() {
             )),
         "a finished tool record landed in the transcript"
     );
-    assert!(app.usage.values().any(|(_, u)| u.requests > 0));
+    assert!(app.usage.values().any(|u| u.requests > 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1166,6 +1167,7 @@ fn mission_mode_alternate_paths() {
 fn export_run_triggers() {
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
+    app.run_dir = Some(jdir());
     app.tab = Tab::Settings;
     let i = app
         .settings_rows()
@@ -1266,10 +1268,10 @@ fn input_history_recall() {
     app.input.clear();
     app.hist_i = None;
     app.history.clear();
-    // no history → Up scrolls the conversation instead
+    // No history and no overflow: Up cannot accumulate invisible scroll debt.
     app.scroll = 0;
     app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(app.scroll, 1);
+    assert_eq!(app.scroll, 0);
 }
 
 /// Esc in Settings returns to Chat.
@@ -1690,8 +1692,8 @@ fn transcript_workers_attributed_by_id() {
 fn transcript_scroll_anchors_across_folds() {
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
-    app.view_w.set(80);
-    app.view_h.set(5);
+    app.on_resize(82, 13); // shared layout: 80 columns × 5 transcript rows
+    assert_eq!((app.view_w.get(), app.view_h.get()), (80, 5));
     // three runs; first two done+folded, third still running
     for t in ["t1", "t2"] {
         let run = send_task(&mut app, t);
@@ -1984,6 +1986,13 @@ async fn transcript_display_never_changes_requests() {
                 .unwrap();
             app.apply_event(ev);
             n += 1;
+            if fiddle && n == 1 {
+                app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+                app.paste("theme");
+                app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                app.on_resize(120, 36);
+                app.on_resize(80, 24);
+            }
             if fiddle && n == 2 {
                 app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // nav mode
                 app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // expand
@@ -2072,10 +2081,7 @@ fn snapshot_live_then_folded() {
     });
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let s = format!("{}", t.backend());
-    assert!(
-        s.contains("Enter/Space expands"),
-        "folded summary row:\n{s}"
-    );
+    assert!(s.contains("▸ Activity"), "folded summary row:\n{s}");
     assert!(s.contains("shipped"), "final answer stays visible:\n{s}");
     assert!(
         !s.contains("compiling crate A"),
@@ -2136,8 +2142,14 @@ fn snapshot_settings_sections() {
     // and the list scrolls to keep the last row in view
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let s = format!("{}", t.backend());
-    assert!(s.contains("directory"), "bottom row scrolled into view:\n{s}");
-    assert!(s.contains(&repo.display().to_string()), "workspace path:\n{s}");
+    assert!(
+        s.contains("directory"),
+        "bottom row scrolled into view:\n{s}"
+    );
+    assert!(
+        s.contains(&repo.display().to_string()),
+        "workspace path:\n{s}"
+    );
 }
 
 /// Snapshot: a failed step paints its excerpt inside the folded group.
@@ -2288,7 +2300,14 @@ fn mouse_wheel_scrolls_transcript() {
     use ratatui::Terminal;
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
-    send_task(&mut app, "x");
+    let run = send_task(&mut app, "x");
+    req_cycle(
+        &mut app,
+        run,
+        "solo",
+        0,
+        &"visible conversation\n".repeat(80),
+    );
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let g = app.chat_geom.get();
@@ -2385,6 +2404,7 @@ fn mouse_drag_selects_and_copies() {
     use ratatui::Terminal;
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
+    send_task(&mut app, "Inspect the workspace");
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let g = app.chat_geom.get();
@@ -2409,7 +2429,7 @@ fn mouse_drag_selects_and_copies() {
             _ => None,
         })
         .expect("release emitted a clip effect");
-    assert!(clip.contains("welcome"), "selection text: {clip:?}");
+    assert!(clip.contains("Inspect"), "selection text: {clip:?}");
     assert!(app.status.contains("copied"), "status reports the copy");
 
     // a fresh press clears the highlight; Esc clears it too
@@ -2424,6 +2444,7 @@ fn mouse_click_without_drag_is_not_a_copy() {
     use ratatui::Terminal;
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
+    send_task(&mut app, "Inspect the workspace");
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
     let g = app.chat_geom.get();
@@ -2534,6 +2555,7 @@ fn mouse_click_input_focuses_not_nav() {
     use ratatui::Terminal;
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
+    send_task(&mut app, "Inspect the workspace");
     app.nav = true;
     let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
     t.draw(|f| sui::tui::draw::draw(f, &app)).unwrap();
@@ -2568,4 +2590,578 @@ fn web_key_save_reports_keyring_outcome() {
         "no-keyring save must say the key won't persist: {:?}",
         app.status
     );
+}
+
+// Redesign regressions: interaction and cell geometry, not just text presence.
+fn frame(app: &App, w: u16, h: u16) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    terminal.draw(|f| sui::tui::draw::draw(f, app)).unwrap();
+    terminal
+}
+fn ctrl(app: &mut App, c: char) {
+    app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+}
+
+#[test]
+fn redesign_theme_config_roundtrip_and_fallback() {
+    use sui::tui::theme::Theme;
+    for value in [None, Some("dark"), Some("terminal"), Some("future-theme")] {
+        let ui = UiSettings {
+            theme: value.map(str::to_string),
+            worker_count: Some(2),
+            ..Default::default()
+        };
+        let encoded = toml::to_string(&ui).unwrap();
+        let decoded: UiSettings = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.worker_count, Some(2));
+        assert_eq!(decoded.theme.as_deref(), value);
+        assert_eq!(
+            Theme::name(decoded.theme.as_deref()),
+            if value == Some("terminal") {
+                "terminal"
+            } else {
+                "dark"
+            }
+        );
+    }
+    let legacy: UiSettings = toml::from_str("mode = 'mission'\nmouse = false").unwrap();
+    assert_eq!(Theme::name(legacy.theme.as_deref()), "dark");
+    assert_eq!(legacy.mouse, Some(false));
+}
+
+#[test]
+fn redesign_palette_filter_keyboard_mouse_and_draft() {
+    use sui::tui::commands::Command;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.input.set("keep this draft");
+    app.nav = true;
+    ctrl(&mut app, 'p');
+    app.paste("NO SUCH COMMAND");
+    assert!(format!("{}", frame(&app, 80, 24).backend()).contains("No matching commands"));
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Some(Modal::Commands { .. })));
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.nav, "cancel restores transcript focus");
+    assert_eq!(app.input.text(), "keep this draft");
+    ctrl(&mut app, 'p');
+    app.paste("THEME");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.ui.theme.as_deref(), Some("terminal"));
+    assert!(app.effects.iter().any(|e| matches!(e, Fx::SaveUi)));
+    assert!(app.modal.is_none());
+    ctrl(&mut app, 'p');
+    app.paste("settings");
+    frame(&app, 80, 24);
+    let (x, y) = zone(&app, |h| {
+        matches!(h, Hit::Command(Command::View(Tab::Settings)))
+    });
+    click(&mut app, x, y);
+    assert_eq!(app.tab, Tab::Settings);
+    assert!(!app.nav);
+    frame(&app, 80, 24);
+    assert!(!app.hits.borrow().iter().any(|h| h.hit == Hit::Input));
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.tab, Tab::Chat);
+    assert_eq!(app.input.text(), "keep this draft");
+}
+
+#[test]
+fn redesign_palette_disabled_actions_and_permission_queue() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    ctrl(&mut app, 'p');
+    app.paste("stop");
+    assert!(format!("{}", frame(&app, 80, 24).backend()).contains("no task running"));
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Some(Modal::Commands { .. })));
+    assert!(!app.effects.iter().any(|e| matches!(e, Fx::Stop)));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        run: 1,
+        id: 301,
+        agent: "solo".into(),
+        summary: "write_file: review.txt".into(),
+        reply: tx,
+    });
+    app.key(key('a'));
+    assert!(
+        rx.try_recv().is_err(),
+        "palette typing must never approve a queued ask"
+    );
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(app.modal, Some(Modal::Permission { id: 301, .. })));
+    ctrl(&mut app, 'p');
+    assert!(
+        matches!(app.modal, Some(Modal::Permission { .. })),
+        "palette cannot replace a permission"
+    );
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(rx.try_recv().is_err());
+    app.key(key('n'));
+    assert_eq!(rx.try_recv().unwrap(), sui::events::GateChoice::Deny);
+}
+
+#[test]
+fn redesign_input_graphemes_and_caret_share_wrapping() {
+    use sui::tui::text::Buf;
+    let mut pasted = Buf::new();
+    pasted.insert_str("a\r\nb\rc");
+    assert_eq!(pasted.text(), "a\nb\nc");
+    let mut input = Buf::from("a界e\u{301}👩‍💻z");
+    let v = input.view(4);
+    assert_eq!(v.lines, ["a界e\u{301}", "👩‍💻z"]);
+    assert_eq!((v.cursor_row, v.cursor_col), (1, 3));
+    input.left();
+    input.backspace();
+    assert_eq!(
+        input.text(),
+        "a界e\u{301}z",
+        "backspace removes the entire emoji"
+    );
+    input.left();
+    input.delete();
+    assert_eq!(
+        input.text(),
+        "a界z",
+        "delete removes the base and combining mark together"
+    );
+    input.set("abcd\nx");
+    input.cursor = 4;
+    let v = input.view(4);
+    assert_eq!(v.lines, ["abcd", "x"]);
+    assert_eq!((v.cursor_row, v.cursor_col), (1, 0));
+    input.set("abcd");
+    let v = input.view(4);
+    assert_eq!((v.cursor_row, v.cursor_col), (1, 0));
+    assert_eq!(v.lines, ["abcd", ""]);
+}
+
+#[test]
+fn redesign_composer_scroll_resize_and_secondary_views() {
+    use sui::tui::layout::regions;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.paste("one\ntwo\nthree\nfour\nfive\nsix\nseven\nlast界👩‍💻");
+    app.on_resize(80, 24);
+    let mut t = frame(&app, 80, 24);
+    let layout = regions(t.backend().buffer().area, &app);
+    assert_eq!(layout.composer.height, 8);
+    let screen = format!("{}", t.backend());
+    assert!(screen.contains("last界👩‍💻"));
+    assert!(!screen.contains("one"), "earlier input scrolls out");
+    let cursor = t.get_cursor_position().unwrap();
+    assert!(cursor.y > layout.composer.y && cursor.y < layout.composer.bottom() - 1);
+    assert_eq!(
+        cursor.x,
+        layout.composer.x + 1 + layout.input.cursor_col as u16
+    );
+    app.input.home();
+    let screen = format!("{}", frame(&app, 80, 24).backend());
+    assert!(screen.contains("one"));
+    assert!(!screen.contains("last界"));
+    app.on_resize(40, 12);
+    let layout = regions(ratatui::layout::Rect::new(0, 0, 40, 12), &app);
+    frame(&app, 40, 12);
+    assert_eq!(app.view_w.get(), layout.content.width as usize);
+    assert_eq!(app.view_h.get(), layout.content.height as usize);
+    app.command(sui::tui::commands::Command::View(Tab::Usage));
+    frame(&app, 40, 12);
+    assert!(!app.hits.borrow().iter().any(|h| h.hit == Hit::Input));
+    assert_eq!(
+        app.input.text(),
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\nlast界👩‍💻"
+    );
+}
+
+#[test]
+fn redesign_permission_wrapping_keeps_visible_buttons_clickable() {
+    for (w, h) in [(40, 12), (80, 24), (120, 36)] {
+        let repo = fixture_repo();
+        let mut app = app_with_mock(&repo, 1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.apply_event(UiEvent::Permission {
+            run: 1,
+            id: 77,
+            agent: "worker-1".into(),
+            summary: format!("bash: {}\nFINAL COMMAND LINE", "long argument ".repeat(60)),
+            reply: tx,
+        });
+        let t = frame(&app, w, h);
+        for hit in app
+            .hits
+            .borrow()
+            .iter()
+            .filter(|h| matches!(h.hit, Hit::Perm(_, _)))
+        {
+            assert_eq!(t.backend().buffer()[(hit.x, hit.y)].symbol(), "[");
+        }
+        assert_eq!(
+            app.hits
+                .borrow()
+                .iter()
+                .filter(|h| matches!(h.hit, Hit::Perm(_, _)))
+                .count(),
+            3
+        );
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert!(format!("{}", frame(&app, w, h).backend()).contains("FINAL COMMAND LINE"));
+        let (x, y) = zone(&app, |h| {
+            matches!(h, Hit::Perm(sui::events::GateChoice::Deny, 77))
+        });
+        click(&mut app, x, y);
+        assert_eq!(rx.try_recv().unwrap(), sui::events::GateChoice::Deny);
+    }
+}
+
+#[test]
+fn redesign_screen_matrix_styles_geometry_and_small_terminals() {
+    use ratatui::{layout::Rect, style::Color};
+    use sui::tui::layout::regions;
+    let repo = fixture_repo();
+    for theme in ["dark", "terminal"] {
+        let mut app = app_with_mock(&repo, 1);
+        app.ui.theme = Some(theme.into());
+        let t = frame(&app, 80, 24);
+        let screen = format!("{}", t.backend());
+        assert!(screen.contains("What are we building?"));
+        assert_eq!(
+            t.backend().buffer()[(0, 0)].bg,
+            if theme == "dark" {
+                Color::Rgb(20, 23, 29)
+            } else {
+                Color::Reset
+            }
+        );
+        assert!(!app.sidebar, "solo starts without a sidebar");
+        app.set_mode(Mode::Mission);
+        assert!(app.sidebar);
+        assert!(regions(Rect::new(0, 0, 110, 24), &app).sidebar.is_some());
+        assert!(regions(Rect::new(0, 0, 109, 24), &app).sidebar.is_none());
+        app.auto.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(format!("{}", frame(&app, 40, 12).backend()).contains("AUTO"));
+        let run = send_task(&mut app, "Review the resize behavior");
+        req_cycle(
+            &mut app,
+            run,
+            "orchestrator",
+            0,
+            "Streaming answer with 界 and e\u{301}.",
+        );
+        app.apply_event(tool_done(
+            run,
+            "worker-1",
+            "failed",
+            ToolStatus::Failed,
+            Some(1),
+            "error: resize regression",
+        ));
+        app.apply_event(UiEvent::RunDone {
+            run,
+            outcome: "failed".into(),
+            accepted_sha: None,
+        });
+        for (w, h) in [(80, 24), (120, 36), (160, 48), (40, 12), (1, 1), (0, 0)] {
+            for tab in Tab::ALL {
+                app.tab = tab;
+                app.on_resize(w, h);
+                let t = frame(&app, w, h);
+                assert_eq!(t.backend().buffer().area, Rect::new(0, 0, w, h));
+                for hit in app.hits.borrow().iter() {
+                    assert!(hit.x + hit.w <= w && hit.y + hit.h <= h);
+                }
+            }
+            app.tab = Tab::Chat;
+            ctrl(&mut app, 'p');
+            frame(&app, w, h);
+            app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            app.modal = Some(Modal::Help);
+            frame(&app, w, h);
+            app.modal = None;
+        }
+    }
+}
+
+#[test]
+fn redesign_scroll_anchor_survives_input_growth_and_resize() {
+    fn top(app: &App) -> ((u64, Option<u64>), String) {
+        let rows = sui::tui::transcript::rows(app, app.view_w.get());
+        let index = rows
+            .len()
+            .saturating_sub(app.view_h.get())
+            .saturating_sub(app.scroll);
+        (rows[index].owner, rows[index].line.to_string())
+    }
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    app.on_resize(120, 36);
+    for i in 0..3 {
+        let run = send_task(&mut app, &format!("task {i}"));
+        let answer = (0..40)
+            .map(|line| format!("task {i} answer line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        req_cycle(&mut app, run, "solo", 0, &answer);
+        app.apply_event(UiEvent::RunDone {
+            run,
+            outcome: "done".into(),
+            accepted_sha: None,
+        });
+    }
+    app.scroll_by(25);
+    let anchor = top(&app);
+    app.paste("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+    assert_eq!(
+        top(&app),
+        anchor,
+        "growing input must not move the visible transcript"
+    );
+    app.on_resize(80, 24);
+    assert_eq!(
+        top(&app),
+        anchor,
+        "resizing preserves the same short text row"
+    );
+    ctrl(&mut app, 'p');
+    app.paste("theme");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(top(&app), anchor, "palette and theme are display-only");
+}
+
+#[test]
+fn redesign_short_setup_keeps_focused_buttons_visible() {
+    use sui::tui::app::{Field, ProvForm, ProvType};
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    for ptype in ProvType::ALL {
+        for button in [Field::Test, Field::Save, Field::Cancel] {
+            let mut form = ProvForm::new(ptype);
+            let Some(index) = form.fields().iter().position(|f| *f == button) else {
+                continue;
+            };
+            form.focus = index;
+            app.modal = Some(Modal::Provider(form));
+            let t = frame(&app, 40, 8);
+            let label = match button {
+                Field::Test => "Test conn.",
+                Field::Save => "Save",
+                _ => "Cancel",
+            };
+            let screen = format!("{}", t.backend());
+            assert!(
+                screen.contains(label),
+                "focused {label} must be visible:\n{screen}"
+            );
+            assert!(t
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.bg == app.theme().selection));
+        }
+    }
+}
+
+#[test]
+fn polish_assistant_styling_preserves_captured_text_and_selection() {
+    use ratatui::style::Modifier;
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let run = send_task(&mut app, "Explain the change");
+    let source = "## Summary\n\n```rust\n# not a heading\nlet value = \"界\";\n```\n> Review before shipping\n# Next steps\n";
+    req_cycle(&mut app, run, "solo", 0, source);
+    let rows = sui::tui::transcript::rows(&app, 80);
+    let heading = rows
+        .iter()
+        .find(|r| r.line.to_string().contains("## Summary"))
+        .unwrap();
+    assert!(heading.line.style.add_modifier.contains(Modifier::BOLD));
+    let code = rows
+        .iter()
+        .find(|r| r.line.to_string().contains("# not a heading"))
+        .unwrap();
+    assert_eq!(code.line.style.bg, Some(app.theme().surface));
+    assert!(!code.line.style.add_modifier.contains(Modifier::BOLD));
+    let selected = sui::tui::transcript::paint_sel(code.line.clone(), 3, 8, app.theme().selected());
+    assert_eq!(
+        selected.style, code.line.style,
+        "selection keeps code styling outside the selected span"
+    );
+    assert_eq!(selected.to_string(), code.line.to_string());
+    assert!(rows
+        .iter()
+        .any(|r| r.line.to_string().trim_start().starts_with("Sui")));
+    let answer = app.groups[1]
+        .items
+        .iter()
+        .find(|i| matches!(i, Act::Assistant { .. }))
+        .unwrap();
+    assert_eq!(
+        answer.detail(),
+        source,
+        "presentation never rewrites the captured answer"
+    );
+    let t = frame(&app, 80, 24);
+    let code_row = (0..24)
+        .find(|&y| {
+            let text: String = (0..80)
+                .map(|x| t.backend().buffer()[(x, y)].symbol())
+                .collect();
+            text.contains("# not a heading")
+        })
+        .unwrap();
+    assert_eq!(
+        t.backend().buffer()[(77, code_row)].bg,
+        app.theme().surface,
+        "code background extends across the row without adding text padding"
+    );
+}
+
+#[test]
+fn polish_answer_preview_marks_its_bound_and_keeps_details() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let run = send_task(&mut app, "Show a long answer");
+    let source = "retained line\n".repeat(250);
+    req_cycle(&mut app, run, "solo", 0, &source);
+    let rows = sui::tui::transcript::rows(&app, 80);
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.line.to_string().contains("retained line"))
+            .count(),
+        200
+    );
+    assert!(rows
+        .iter()
+        .any(|r| r.line.to_string().contains("display capped")));
+    let answer = app.groups[1]
+        .items
+        .iter()
+        .find(|i| matches!(i, Act::Assistant { .. }))
+        .unwrap();
+    assert_eq!(answer.detail(), source);
+}
+
+#[test]
+fn polish_dialogs_fit_contents_and_selected_rows_fill_width() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    ctrl(&mut app, 'p');
+    let t = frame(&app, 100, 30);
+    assert_eq!(t.backend().buffer()[(1, 0)].fg, app.theme().muted);
+    let expanded = app
+        .hits
+        .borrow()
+        .iter()
+        .find(|h| h.hit == Hit::ModalBody)
+        .unwrap()
+        .h;
+    app.paste("theme");
+    let mut t = frame(&app, 100, 30);
+    let hits = app.hits.borrow();
+    let compact = hits.iter().find(|h| h.hit == Hit::ModalBody).unwrap();
+    assert_eq!(compact.h, 5);
+    assert!(compact.h < expanded);
+    let command = hits
+        .iter()
+        .find(|h| matches!(h.hit, Hit::Command(_)))
+        .unwrap();
+    assert_eq!(
+        t.backend().buffer()[(command.x + command.w - 1, command.y)].bg,
+        app.theme().selection
+    );
+    let cursor = t.get_cursor_position().unwrap();
+    assert_eq!(cursor.y, compact.y + 1);
+    drop(hits);
+    app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    app.apply_event(UiEvent::Permission {
+        run: 1,
+        id: 99,
+        agent: "solo".into(),
+        summary: "write README.md".into(),
+        reply: tx,
+    });
+    let screen = format!("{}", frame(&app, 100, 30).backend());
+    assert!(screen.contains("APPROVAL"));
+    assert_eq!(
+        app.hits
+            .borrow()
+            .iter()
+            .find(|h| h.hit == Hit::ModalBody)
+            .unwrap()
+            .h,
+        5
+    );
+}
+
+#[test]
+fn polish_footer_fits_hints_and_marks_unicode_truncation() {
+    use sui::tui::text::ellipsize;
+    use unicode_width::UnicodeWidthStr;
+    for width in 0..20 {
+        let clipped = ellipsize("界e\u{301}👩‍💻long status", width);
+        assert!(UnicodeWidthStr::width(clipped.as_str()) <= width);
+        if width > 0 && width < UnicodeWidthStr::width("界e\u{301}👩‍💻long status") {
+            assert!(clipped.ends_with('…'));
+        }
+    }
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    let t = frame(&app, 80, 24);
+    let footer: String = (0..80)
+        .map(|x| t.backend().buffer()[(x, 23)].symbol())
+        .collect();
+    assert!(
+        footer.contains("^P commands"),
+        "80-column footer keeps all primary hints: {footer}"
+    );
+    assert!(!footer.contains('…'));
+    app.status = "界 very long status ".repeat(20);
+    let t = frame(&app, 80, 24);
+    let footer: String = (0..80)
+        .map(|x| t.backend().buffer()[(x, 23)].symbol())
+        .collect();
+    assert!(footer.contains('…'));
+    app.status.clear();
+    app.outcome = "done".into();
+    assert!(format!("{}", frame(&app, 80, 24).backend()).contains("Run ended · done"));
+}
+
+#[test]
+fn audit_usage_retains_unknown_fields_and_model_attribution() {
+    let repo = fixture_repo();
+    let mut app = app_with_mock(&repo, 1);
+    for (model, input, cached, written, output) in [
+        ("first-model", Some(100), None, None, Some(10)),
+        ("second-model", Some(200), Some(0), Some(0), Some(20)),
+        ("first-model", Some(50), Some(5), None, None),
+    ] {
+        app.apply_event(UiEvent::Usage {
+            run: 1,
+            agent: "solo".into(),
+            model: model.into(),
+            input,
+            cached,
+            written,
+            output,
+            // Completion does not imply that optional measurements exist.
+            complete: true,
+        });
+    }
+    assert_eq!(app.usage.len(), 2);
+    let first = &app.usage[&("solo".into(), "first-model".into())];
+    assert_eq!(first.requests, 2);
+    assert_eq!(first.input.display(first.requests), "150");
+    assert_eq!(first.cache_read.display(first.requests), "5+ (partial)");
+    assert_eq!(first.cache_write.display(first.requests), "—");
+    assert_eq!(first.output.display(first.requests), "10+ (partial)");
+    let second = &app.usage[&("solo".into(), "second-model".into())];
+    assert_eq!(second.input.display(second.requests), "200");
+    assert_eq!(second.cache_write.display(second.requests), "0");
+    app.tab = Tab::Usage;
+    let visible = format!("{}", frame(&app, 80, 24).backend());
+    for text in ["first-model", "second-model", "150", "200", "partial", "—"] {
+        assert!(visible.contains(text), "missing {text}: {visible}");
+    }
 }

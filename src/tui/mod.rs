@@ -5,9 +5,13 @@
 //! Rendering is capped at ~30fps and only happens when state is dirty.
 
 pub mod app;
+pub mod commands;
 pub mod draw;
+pub mod layout;
 pub mod text;
+pub mod theme;
 pub mod transcript;
+pub mod usage;
 
 use anyhow::{Context, Result};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
@@ -263,6 +267,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
     app.run_dir = Some(jdir.clone());
     if force_mission {
         app.mode = app::Mode::Mission;
+        app.sidebar = true;
         app.ui.mode = Some("mission".into());
     }
     if yolo {

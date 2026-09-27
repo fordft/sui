@@ -560,6 +560,8 @@ pub fn load(ov: Overrides) -> Result<Config> {
 #[derive(Debug, serde::Deserialize, serde::Serialize, Default, Clone)]
 #[serde(default)]
 pub struct UiSettings {
+    /// Appearance: "dark" (default) or terminal-native "terminal".
+    pub theme: Option<String>,
     pub workspace: Option<String>,
     /// "solo" | "mission"
     pub mode: Option<String>,

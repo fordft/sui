@@ -5,7 +5,7 @@
 //! Everything here is a VIEW. Folding changes only which rows exist;
 //! captured text on the items is never shortened or deleted.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::app::*;
@@ -30,11 +30,11 @@ const TEXT_CAP: usize = 200;
 /// User-task header lines when folded.
 const TASK_CAP: usize = 3;
 
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn dim(app: &App) -> Style {
+    Style::default().fg(app.theme().muted)
 }
-fn acc() -> Style {
-    Style::default().fg(Color::Cyan)
+fn acc(app: &App) -> Style {
+    Style::default().fg(app.theme().accent)
 }
 
 /// Strip terminal-control sequences from model/tool text: ANSI CSI/OSC
@@ -181,7 +181,7 @@ pub fn paint_sel(line: Line<'static>, c0: usize, c1: usize, sty: Style) -> Line<
             ));
         }
     }
-    Line::from(out)
+    Line::from(out).style(line.style)
 }
 
 /// Whole transcript as rows. `width` = inner body width.
@@ -196,9 +196,90 @@ pub fn rows(app: &App, width: usize) -> Vec<Row> {
     };
 
     for g in &app.groups {
+        if g.id != 0 && !out.is_empty() {
+            push(&mut out, (g.id, None), vec![]);
+        }
         emit_group(app, g, width, sel, &mut out);
     }
     out
+}
+
+/// Navigation follows visible content without projecting all text a second time.
+pub fn focusable_items(app: &App) -> Vec<(usize, Option<usize>)> {
+    let mut targets = Vec::new();
+    for (gi, g) in app.groups.iter().enumerate() {
+        if !g.task.is_empty() || g.done {
+            targets.push((gi, None));
+        }
+        if g.folded() {
+            for (ii, item) in g.items.iter().enumerate() {
+                if matches!(
+                    item,
+                    Act::Tool {
+                        status: Some(ToolStatus::Failed | ToolStatus::Error | ToolStatus::Timeout),
+                        ..
+                    }
+                ) {
+                    targets.push((gi, Some(ii)));
+                }
+            }
+            if let Some(ii) = g
+                .items
+                .iter()
+                .rposition(|it| matches!(it, Act::Assistant { .. }))
+            {
+                targets.push((gi, Some(ii)));
+            }
+            continue;
+        }
+        let mut ii = 0;
+        while ii < g.items.len() {
+            let item = &g.items[ii];
+            if !matches!(item, Act::Req { .. })
+                && !(app.reasoning == ReasonPref::Hidden && matches!(item, Act::Reason { .. }))
+            {
+                targets.push((gi, Some(ii)));
+            }
+            let first = ii;
+            ii += 1;
+            while ii < g.items.len() && same_folded_tool(item, &g.items[ii]) {
+                ii += 1;
+            }
+            debug_assert!(ii > first);
+        }
+    }
+    targets
+}
+
+fn same_folded_tool(first: &Act, next: &Act) -> bool {
+    match (first, next) {
+        (
+            Act::Tool {
+                agent,
+                name,
+                summary,
+                exit,
+                status: Some(ToolStatus::Ok),
+                expanded: false,
+                ..
+            },
+            Act::Tool {
+                agent: a,
+                name: n,
+                summary: s,
+                exit: e,
+                status: Some(ToolStatus::Ok),
+                expanded: false,
+                ..
+            },
+        ) => agent == a && name == n && summary == s && exit == e,
+        _ => false,
+    }
+}
+
+fn success_label(exit: Option<i32>) -> String {
+    exit.map(|code| format!("exit {code}"))
+        .unwrap_or_else(|| "ok".into())
 }
 
 fn push(out: &mut Vec<Row>, owner: (u64, Option<u64>), spans: Vec<Span<'static>>) {
@@ -215,11 +296,11 @@ fn emit_group(
     sel: Option<(u64, Option<u64>)>,
     out: &mut Vec<Row>,
 ) {
-    let width = w.max(20);
+    let width = w.max(1);
     let gid = g.id;
     let sel_style = |owner: (u64, Option<u64>)| -> Option<Style> {
         if sel == Some(owner) {
-            Some(Style::default().bg(Color::DarkGray))
+            Some(app.theme().selected())
         } else {
             None
         }
@@ -240,14 +321,14 @@ fn emit_group(
             owner,
             vec![
                 Span::styled(
-                    format!("{}you", mark(owner)),
+                    format!("{}You", mark(owner)),
                     sel_style(owner).unwrap_or_else(|| {
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(app.theme().text)
                             .add_modifier(Modifier::BOLD)
                     }),
                 ),
-                Span::styled(format!("  {}", g.at), dim()),
+                Span::styled(format!("  {}", g.at), dim(app)),
             ],
         );
         let task_lines: Vec<String> = wrapped(&g.task, width.saturating_sub(2)).collect();
@@ -260,10 +341,10 @@ fn emit_group(
             push(
                 out,
                 owner,
-                vec![Span::styled(
-                    format!("  {l}"),
-                    sel_style(owner).unwrap_or_default(),
-                )],
+                vec![
+                    Span::styled("│ ", sel_style(owner).unwrap_or_else(|| acc(app))),
+                    Span::styled(l.clone(), sel_style(owner).unwrap_or_default()),
+                ],
             );
         }
         if task_lines.len() > show {
@@ -272,7 +353,7 @@ fn emit_group(
                 owner,
                 vec![Span::styled(
                     format!("  … {} more line(s)", task_lines.len() - show),
-                    dim(),
+                    dim(app),
                 )],
             );
         }
@@ -285,8 +366,14 @@ fn emit_group(
             out,
             owner,
             vec![Span::styled(
-                format!("  ▸ {} — Enter/Space expands", g.summary()),
-                sel_style(owner).unwrap_or_else(dim),
+                format!("  ▸ Activity · {}", g.summary()),
+                sel_style(owner).unwrap_or_else(|| {
+                    if g.failed {
+                        Style::default().fg(app.theme().error)
+                    } else {
+                        dim(app)
+                    }
+                }),
             )],
         );
         // failed steps keep their diagnostic excerpt visible even in the
@@ -319,15 +406,15 @@ fn emit_group(
     if g.done {
         let owner = (gid, None);
         let (glyph, sty) = if g.failed {
-            ("✗", Style::default().fg(Color::Red))
+            ("✗", Style::default().fg(app.theme().error))
         } else {
-            ("✓", Style::default().fg(Color::Green))
+            ("✓", Style::default().fg(app.theme().success))
         };
         push(
             out,
             owner,
             vec![Span::styled(
-                format!("  {} {} — Enter/Space collapses", glyph, g.summary()),
+                format!("  ▾ Activity · {glyph} {}", g.summary()),
                 sel_style(owner).unwrap_or(sty),
             )],
         );
@@ -337,9 +424,6 @@ fn emit_group(
     let mut i = 0;
     while i < g.items.len() {
         if let Act::Tool {
-            agent,
-            name,
-            summary,
             status: Some(ToolStatus::Ok),
             expanded: false,
             ..
@@ -347,28 +431,23 @@ fn emit_group(
         {
             let mut n = 1usize;
             while i + n < g.items.len() {
-                match &g.items[i + n] {
-                    Act::Tool {
-                        agent: a,
-                        name: nm,
-                        summary: s,
-                        status: Some(ToolStatus::Ok),
-                        expanded: false,
-                        ..
-                    } if *a == *agent && *nm == *name && *s == *summary => n += 1,
-                    _ => break,
+                if same_folded_tool(&g.items[i], &g.items[i + n]) {
+                    n += 1;
+                } else {
+                    break;
                 }
             }
             if n > 1 {
                 let owner = (gid, Some(g.items[i].id()));
-                let (a2, n2, s2, ms2) = match &g.items[i] {
+                let (a2, n2, s2, ms2, exit) = match &g.items[i] {
                     Act::Tool {
                         agent,
                         name,
                         summary,
                         ms,
+                        exit,
                         ..
-                    } => (agent, name, summary, *ms),
+                    } => (agent, name, summary, *ms, *exit),
                     _ => unreachable!(),
                 };
                 let who = if a2 == "solo" {
@@ -381,12 +460,13 @@ fn emit_group(
                     owner,
                     vec![Span::styled(
                         format!(
-                            "  {}✓ {who}{n2} · exit 0 · {}ms — {}  ×{n}",
+                            "  {}✓ {who}{n2} · {} · {}ms — {}  ×{n}",
                             mark(owner),
+                            success_label(exit),
                             ms2,
                             clean(s2.lines().next().unwrap_or(""))
                         ),
-                        sel_style(owner).unwrap_or_else(|| Style::default().fg(Color::DarkGray)),
+                        sel_style(owner).unwrap_or_else(|| Style::default().fg(app.theme().muted)),
                     )],
                 );
                 i += n;
@@ -423,7 +503,7 @@ fn emit_group(
                         mark(owner),
                         SPIN[frame % SPIN.len()]
                     ),
-                    sel_style(owner).unwrap_or_else(dim),
+                    sel_style(owner).unwrap_or_else(|| dim(app)),
                 )],
             );
         }
@@ -442,7 +522,13 @@ fn emit_item(
     let it = &g.items[i];
     let owner = (gid, Some(it.id()));
     let sel = sel == Some(owner);
-    let sty = |s: Style| if sel { s.bg(Color::DarkGray) } else { s };
+    let sty = |s: Style| {
+        if sel {
+            s.patch(app.theme().selected())
+        } else {
+            s
+        }
+    };
     let mark = if sel { "›" } else { " " };
     let body_w = width.saturating_sub(2);
 
@@ -455,23 +541,87 @@ fn emit_item(
             at,
             ..
         } => {
+            push(out, owner, vec![]);
             push(
                 out,
                 owner,
                 vec![
                     Span::styled(
-                        format!("{mark}{agent}"),
-                        sty(acc().add_modifier(Modifier::BOLD)),
+                        format!(
+                            "{mark}{}",
+                            if agent == "solo" {
+                                "Sui".into()
+                            } else {
+                                clean(agent)
+                            }
+                        ),
+                        sty(Style::default()
+                            .fg(if agent == "solo" {
+                                app.theme().accent
+                            } else {
+                                app.theme().mission
+                            })
+                            .add_modifier(Modifier::BOLD)),
                     ),
-                    Span::styled(format!("  {at}{}", if *done { "" } else { "  ⠋" }), dim()),
+                    Span::styled(
+                        format!("  {at}{}", if *done { "" } else { "  ⠋" }),
+                        dim(app),
+                    ),
                 ],
             );
-            for l in wrapped(text, body_w).take(TEXT_CAP) {
-                push(
-                    out,
-                    owner,
-                    vec![Span::styled(format!("  {l}"), sty(Style::default()))],
-                );
+            let mut code_fence: Option<(char, usize)> = None;
+            let mut count = 0;
+            for raw in clean(text).split('\n') {
+                let trimmed = raw.trim_start();
+                let fence = ['`', '~'].into_iter().find_map(|ch| {
+                    let n = trimmed.chars().take_while(|&c| c == ch).count();
+                    (n >= 3 && raw.len() - trimmed.len() <= 3).then_some((ch, n))
+                });
+                let in_code = code_fence.is_some();
+                let mut fence_line = false;
+                if let Some((ch, n)) = fence {
+                    if let Some((open_ch, open_n)) = code_fence {
+                        if ch == open_ch && n >= open_n && trimmed[n..].trim().is_empty() {
+                            code_fence = None;
+                            fence_line = true;
+                        }
+                    } else {
+                        code_fence = Some((ch, n));
+                        fence_line = true;
+                    }
+                }
+                let heading = trimmed.chars().take_while(|&c| c == '#').count();
+                let style = if fence_line {
+                    dim(app).bg(app.theme().surface)
+                } else if in_code {
+                    app.theme().panel()
+                } else if (1..=6).contains(&heading)
+                    && trimmed.as_bytes().get(heading) == Some(&b' ')
+                {
+                    acc(app).add_modifier(Modifier::BOLD)
+                } else if trimmed.starts_with("> ") {
+                    dim(app).add_modifier(Modifier::ITALIC)
+                } else {
+                    Style::default()
+                };
+                for line in wrap(raw, body_w) {
+                    if count == TEXT_CAP {
+                        push(
+                            out,
+                            owner,
+                            vec![Span::styled(
+                                "  … display capped — v opens captured details",
+                                sty(dim(app)),
+                            )],
+                        );
+                        return;
+                    }
+                    out.push(Row {
+                        owner,
+                        line: Line::from(format!("  {line}")).style(sty(style)),
+                    });
+                    count += 1;
+                }
             }
         }
         Act::Reason {
@@ -498,16 +648,27 @@ fn emit_item(
                 out,
                 owner,
                 vec![
-                    Span::styled(label, sty(Style::default().fg(Color::Magenta))),
-                    Span::styled(format!("  {at}"), dim()),
+                    Span::styled(label, sty(Style::default().fg(app.theme().mission))),
+                    Span::styled(format!("  {at}"), dim(app)),
                 ],
             );
             if full {
-                for l in wrapped(text, body_w).take(TEXT_CAP) {
+                let mut lines = wrapped(text, width.saturating_sub(4));
+                for l in lines.by_ref().take(TEXT_CAP) {
                     push(
                         out,
                         owner,
-                        vec![Span::styled(format!("    {l}"), sty(dim()))],
+                        vec![Span::styled(format!("    {l}"), sty(dim(app)))],
+                    );
+                }
+                if lines.next().is_some() {
+                    push(
+                        out,
+                        owner,
+                        vec![Span::styled(
+                            "    … display capped — v opens captured details",
+                            sty(dim(app)),
+                        )],
                     );
                 }
             } else if !*done {
@@ -516,7 +677,7 @@ fn emit_item(
                     push(
                         out,
                         owner,
-                        vec![Span::styled(format!("    {l}"), sty(dim()))],
+                        vec![Span::styled(format!("    {l}"), sty(dim(app)))],
                     );
                 }
             }
@@ -541,20 +702,22 @@ fn emit_item(
             // injection into the transcript).
             let head = clean(summary.lines().next().unwrap_or(""));
             let (glyph, label, gsty) = match status {
-                None => ("⠋", "…", Style::default().fg(Color::Magenta)),
-                Some(ToolStatus::Ok) => ("✓", "ok", Style::default().fg(Color::DarkGray)),
-                Some(ToolStatus::Denied) => ("⊘", "denied", Style::default().fg(Color::Yellow)),
-                Some(ToolStatus::Skipped) => ("·", "skipped", dim()),
-                Some(ToolStatus::Intercepted) => ("·", "control plane", dim()),
+                None => ("⠋", "…", Style::default().fg(app.theme().mission)),
+                Some(ToolStatus::Ok) => ("✓", "ok", Style::default().fg(app.theme().muted)),
+                Some(ToolStatus::Denied) => {
+                    ("⊘", "denied", Style::default().fg(app.theme().warning))
+                }
+                Some(ToolStatus::Skipped) => ("·", "skipped", dim(app)),
+                Some(ToolStatus::Intercepted) => ("·", "control plane", dim(app)),
                 Some(_) => (
                     "✗",
                     status.unwrap().label(),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(app.theme().error),
                 ),
             };
             let tail_info = match status {
                 None => " · running".to_string(),
-                Some(ToolStatus::Ok) => format!(" · exit {} · {}ms", exit.unwrap_or(0), ms),
+                Some(ToolStatus::Ok) => format!(" · {} · {}ms", success_label(*exit), ms),
                 Some(ToolStatus::Skipped) | Some(ToolStatus::Intercepted) => format!(" · {label}"),
                 Some(_) => format!(
                     " · {label}{} · {}ms",
@@ -577,7 +740,7 @@ fn emit_item(
                         format!("{mark}  {glyph} {who}{name}{tail_info} — {head}"),
                         sty(gsty),
                     ),
-                    Span::styled(format!("  {at}"), dim()),
+                    Span::styled(format!("  {at}"), dim(app)),
                 ],
             );
             match status {
@@ -587,7 +750,7 @@ fn emit_item(
                         push(
                             out,
                             owner,
-                            vec![Span::styled(format!("      {l}"), sty(dim()))],
+                            vec![Span::styled(format!("      {l}"), sty(dim(app)))],
                         );
                     }
                 }
@@ -623,7 +786,7 @@ fn emit_item(
                             owner,
                             vec![Span::styled(
                                 format!("      {l}"),
-                                sty(Style::default().fg(Color::Red)),
+                                sty(Style::default().fg(app.theme().error)),
                             )],
                         );
                     }
@@ -633,21 +796,28 @@ fn emit_item(
                             owner,
                             vec![Span::styled(
                                 "      … display capped — full captured result in the run export",
-                                sty(dim()),
+                                sty(dim(app)),
                             )],
                         );
                     }
                 }
                 Some(ToolStatus::Ok) if *expanded => {
-                    for l in clean(result)
-                        .split('\n')
-                        .flat_map(|l| wrap(l, body_w.saturating_sub(4)))
-                        .take(TEXT_CAP)
-                    {
+                    let mut lines = wrapped(result, width.saturating_sub(6));
+                    for l in lines.by_ref().take(TEXT_CAP) {
                         push(
                             out,
                             owner,
-                            vec![Span::styled(format!("      {l}"), sty(dim()))],
+                            vec![Span::styled(format!("      {l}"), sty(dim(app)))],
+                        );
+                    }
+                    if lines.next().is_some() {
+                        push(
+                            out,
+                            owner,
+                            vec![Span::styled(
+                                "      … display capped — v opens captured details",
+                                sty(dim(app)),
+                            )],
                         );
                     }
                 }
@@ -666,7 +836,7 @@ fn emit_item(
                         "{dropped} preview chunks dropped (capture unaffected)"
                     ));
                 }
-                push(out, owner, vec![Span::styled(note, sty(dim()))]);
+                push(out, owner, vec![Span::styled(note, sty(dim(app)))]);
             }
         }
         Act::Note {
@@ -677,9 +847,9 @@ fn emit_item(
             ..
         } => {
             let s = if *err {
-                Style::default().fg(Color::Red)
+                Style::default().fg(app.theme().error)
             } else {
-                dim()
+                dim(app)
             };
             let who = agent
                 .as_deref()
@@ -696,7 +866,7 @@ fn emit_item(
                         owner,
                         vec![
                             Span::styled(format!("{mark}· {who}{l}"), sty(s)),
-                            Span::styled(format!("  {at}"), dim()),
+                            Span::styled(format!("  {at}"), dim(app)),
                         ],
                     );
                 } else {

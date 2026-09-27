@@ -13,10 +13,11 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
+use super::commands::Command;
 use super::text::Buf;
+use super::usage::UsageTotals;
 use crate::config::{self, ProfileCfg, UiSettings};
 use crate::events::{GateChoice, UiEvent};
-use crate::mission::UsageAgg;
 use crate::provider::Probe;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +58,9 @@ pub enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hit {
     Tab(Tab),
+    Commands,
+    ModalBody,
+    Command(Command),
     /// Transcript row owner: group id + item id (None = group row).
     Activity(u64, Option<u64>),
     /// Permission decision button. The u64 is the ask's id — a stale
@@ -651,6 +655,10 @@ pub struct TaskRow {
 }
 
 pub enum Modal {
+    Commands {
+        filter: Buf,
+        sel: usize,
+    },
     Provider(ProvForm),
     Picker(Picker),
     Permission {
@@ -735,6 +743,8 @@ pub struct App {
     pub screen: Screen,
     pub tab: Tab,
     pub sidebar: bool,
+    /// Last terminal size; shared layout keeps anchors valid as input grows.
+    pub viewport: std::cell::Cell<ratatui::layout::Rect>,
     pub mode: Mode,
     pub input: Buf,
     /// Activity transcript: one group per submitted run. Display state
@@ -754,6 +764,9 @@ pub struct App {
     pub reasoning: ReasonPref,
     /// Scroll offset in rows from the bottom; 0 = follow live output.
     pub scroll: usize,
+    /// Independent top-row offsets for Tasks, Changes, and Usage.
+    pub panel_scroll: [std::cell::Cell<usize>; 3],
+    pub panel_max_scroll: [std::cell::Cell<usize>; 3],
     /// Anchor while scrolled: (group id, item id, rows-into-block) of the
     /// top visible row — survives folding, appends, and resizes.
     anchor: Option<(u64, Option<u64>, usize)>,
@@ -780,7 +793,7 @@ pub struct App {
     pub diff_stale: bool,
     pub accepted_sha: Option<String>,
     pub audit: Option<String>,
-    pub usage: BTreeMap<String, (String, UsageAgg)>, // agent → (model, agg)
+    pub usage: BTreeMap<(String, String), UsageTotals>, // (agent, model) → totals
     pub profiles: BTreeMap<String, ProfileCfg>,
     pub session_keys: BTreeMap<String, String>,
     pub ui: UiSettings,
@@ -790,6 +803,8 @@ pub struct App {
     pub started: Option<Instant>,
     pub outcome: String,
     pub modal: Option<Modal>,
+    pub dialog_scroll: std::cell::Cell<usize>,
+    pub dialog_max_scroll: std::cell::Cell<usize>,
     pub form_stash: Option<ProvForm>,
     pub settings_sel: usize,
     pub status: String,
@@ -943,14 +958,15 @@ impl App {
                 Screen::Main
             },
             tab: Tab::Chat,
-            sidebar: true,
+            sidebar: ui.mode.as_deref() == Some("mission"),
+            viewport: std::cell::Cell::new(ratatui::layout::Rect::new(0, 0, 80, 24)),
             mode: match ui.mode.as_deref() {
                 Some("mission") => Mode::Mission,
                 _ => Mode::Solo,
             },
             input: Buf::new(),
             groups: {
-                // session group 0: welcome + stray notes, never collapses
+                // session group 0: runtime notes, never collapses
                 let mut g = ActGroup {
                     id: 0,
                     task: String::new(),
@@ -961,13 +977,7 @@ impl App {
                     outcome: String::new(),
                     expanded: true,
                     collapsed: false,
-                    items: vec![Act::Note {
-                        id: 0,
-                        agent: None,
-                        text: "welcome — configure a provider (Settings → add), pick models per role, then type a task".into(),
-                        err: false,
-                        at: now_hm(),
-                    }],
+                    items: vec![],
                     dur_ms: 0,
                     reqs: 0,
                     tools_ok: 0,
@@ -987,6 +997,8 @@ impl App {
                 _ => ReasonPref::Auto,
             },
             scroll: 0,
+            panel_scroll: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            panel_max_scroll: std::array::from_fn(|_| std::cell::Cell::new(0)),
             anchor: None,
             view_w: std::cell::Cell::new(80),
             view_h: std::cell::Cell::new(20),
@@ -1023,6 +1035,8 @@ impl App {
             } else {
                 None
             },
+            dialog_scroll: std::cell::Cell::new(0),
+            dialog_max_scroll: std::cell::Cell::new(0),
             form_stash: None,
             settings_sel: 0,
             status: String::new(),
@@ -1451,15 +1465,12 @@ impl App {
                 cached,
                 written,
                 output,
-                complete,
                 ..
             } => {
-                let ent = self
-                    .usage
-                    .entry(agent)
-                    .or_insert_with(|| (model.clone(), UsageAgg::default()));
-                ent.0 = model;
-                ent.1.add(complete, input, cached, written, output);
+                self.usage
+                    .entry((agent, model))
+                    .or_default()
+                    .add(input, cached, written, output);
             }
             UiEvent::Permission {
                 id,
@@ -1475,6 +1486,7 @@ impl App {
                 if self.modal.is_some() {
                     self.pending_perms.push_back((id, agent, summary, reply));
                 } else {
+                    self.dialog_scroll.set(0);
                     self.modal = Some(Modal::Permission {
                         id,
                         agent,
@@ -1534,6 +1546,13 @@ impl App {
                 accepted_sha,
             } => {
                 self.running = false;
+                if matches!(
+                    self.status.as_str(),
+                    "stopping…" | "stop the current task first"
+                ) || self.status.starts_with("run in progress —")
+                {
+                    self.status.clear();
+                }
                 // pending permission asks deliberately survive run end —
                 // never auto-decide or hide a prompt (pinned by
                 // transcript_permission_never_hidden)
@@ -1611,12 +1630,13 @@ impl App {
             self.anchor = None;
             return;
         }
-        let Some((g, i, off)) = self.anchor else {
-            return;
-        };
         let rows = super::transcript::rows(self, self.view_w.get());
         let total = rows.len();
         let h = self.view_h.get().max(1);
+        self.scroll = self.scroll.min(total.saturating_sub(h));
+        let Some((g, i, off)) = self.anchor else {
+            return;
+        };
         if let Some(idx) = rows.iter().position(|r| r.owner == (g, i)) {
             let top = idx + off;
             self.scroll = total.saturating_sub(h).saturating_sub(top.min(total));
@@ -1633,6 +1653,66 @@ impl App {
         } else {
             self.scroll.saturating_sub((-d) as usize)
         };
+        let max = super::transcript::rows(self, self.view_w.get())
+            .len()
+            .saturating_sub(self.view_h.get().max(1));
+        self.scroll = self.scroll.min(max);
+        if self.scroll == 0 {
+            self.anchor = None;
+        } else {
+            self.capture_anchor();
+        }
+    }
+
+    pub fn panel_scroll_index(&self) -> Option<usize> {
+        match self.tab {
+            Tab::Tasks => Some(0),
+            Tab::Changes => Some(1),
+            Tab::Usage => Some(2),
+            _ => None,
+        }
+    }
+
+    fn scroll_panel(&self, delta: isize) {
+        if let Some(i) = self.panel_scroll_index() {
+            self.panel_scroll[i].set(
+                self.panel_scroll[i]
+                    .get()
+                    .min(self.panel_max_scroll[i].get())
+                    .saturating_add_signed(delta)
+                    .min(self.panel_max_scroll[i].get()),
+            );
+        }
+    }
+
+    /// Bring the selected activity into view without jumping if already visible.
+    fn reveal_navigation(&mut self) {
+        let targets = self.focusables();
+        self.nav_sel = self.nav_sel.min(targets.len().saturating_sub(1));
+        let Some(&(group, item)) = targets.get(self.nav_sel) else {
+            return;
+        };
+        let owner = (
+            self.groups[group].id,
+            item.map(|i| self.groups[group].items[i].id()),
+        );
+        let rows = super::transcript::rows(self, self.view_w.get());
+        let Some(row) = rows.iter().position(|r| {
+            r.owner == owner && r.line.spans.iter().any(|s| !s.content.trim().is_empty())
+        }) else {
+            return;
+        };
+        let height = self.view_h.get().max(1);
+        let max = rows.len().saturating_sub(height);
+        let top = max.saturating_sub(self.scroll);
+        let target_top = if row < top {
+            row
+        } else if row >= top + height {
+            row + 1 - height
+        } else {
+            top
+        };
+        self.scroll = max.saturating_sub(target_top);
         if self.scroll == 0 {
             self.anchor = None;
         } else {
@@ -1654,6 +1734,7 @@ impl App {
         if !self.mouse {
             return;
         }
+        self.clamp_detail_scroll();
         match m.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = matches!(m.kind, MouseEventKind::ScrollUp);
@@ -1664,13 +1745,29 @@ impl App {
                     } else {
                         scroll.saturating_add(3)
                     };
+                    self.clamp_detail_scroll();
+                    return;
+                }
+                if matches!(self.modal, Some(Modal::Help | Modal::Permission { .. })) {
+                    self.scroll_dialog(if up { -3 } else { 3 });
+                    return;
+                }
+                if let Some(Modal::Commands { filter, sel }) = &mut self.modal {
+                    *sel = if up {
+                        sel.saturating_sub(1)
+                    } else {
+                        (*sel + 1).min(Command::matching(&filter.text()).len().saturating_sub(1))
+                    };
+                    return;
+                }
+                if self.modal.is_some() {
                     return;
                 }
                 match self.tab {
                     Tab::Chat => self.scroll_by(if up { 3 } else { -3 }),
                     // settings rows don't scroll — the wheel moves selection
                     Tab::Settings => self.settings_move(if up { -1 } else { 1 }),
-                    _ => {}
+                    _ => self.scroll_panel(if up { -3 } else { 3 }),
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1749,9 +1846,15 @@ impl App {
                     }
                 }
             }
-            Some(Hit::Tab(t)) if self.modal.is_none() => {
-                self.tab = t;
+            Some(Hit::Commands) if self.modal.is_none() => self.open_commands(),
+            Some(Hit::Command(c)) if matches!(self.modal, Some(Modal::Commands { .. })) => {
+                if c.unavailable(self).is_none() {
+                    self.modal = None;
+                    self.command(c);
+                    self.promote_perm();
+                }
             }
+            Some(Hit::Tab(t)) if self.modal.is_none() => self.command(Command::View(t)),
             Some(Hit::Setting(i)) if self.modal.is_none() && self.tab == Tab::Settings => {
                 self.settings_sel = i;
                 self.settings_activate(i);
@@ -1768,7 +1871,7 @@ impl App {
                     }
                 }
             }
-            Some(Hit::ViewScroll) => {} // inside the details view — not a dismiss click
+            Some(Hit::ViewScroll | Hit::ModalBody) => {} // inside the details view — not a dismiss click
             Some(Hit::Input) if self.modal.is_none() => {
                 self.nav = false; // clicking the input focuses it
             }
@@ -1776,7 +1879,7 @@ impl App {
                 // click outside a dismissible modal closes it; a click
                 // inside the transcript pane focuses it for keyboard nav
                 match self.modal {
-                    Some(Modal::Help) | Some(Modal::View { .. }) => {
+                    Some(Modal::Help) | Some(Modal::Commands { .. }) | Some(Modal::View { .. }) => {
                         self.modal = None;
                         self.promote_perm();
                     }
@@ -1824,51 +1927,50 @@ impl App {
     }
 
     /// Terminal resized — resolve the anchor against the new viewport
-    /// dims (mirrors draw.rs layout math so scroll survives a resize
+    /// dims (uses the same geometry as drawing so scroll survives a resize
     /// even while no events are flowing).
     pub fn on_resize(&mut self, w: u16, h: u16) {
-        let narrow = w < 90;
-        let side = self.sidebar && !narrow;
-        let chat_w = if side {
-            (w as usize * 70) / 100
-        } else {
-            w as usize
+        self.viewport.set(ratatui::layout::Rect::new(0, 0, w, h));
+        self.sync_layout();
+    }
+
+    pub fn sync_layout(&mut self) {
+        let layout = super::layout::regions(self.viewport.get(), self);
+        let changed = self.view_w.get() != layout.content.width as usize
+            || self.view_h.get() != layout.content.height as usize;
+        self.view_w.set(layout.content.width as usize);
+        self.view_h.set(layout.content.height as usize);
+        if changed {
+            self.fix_anchor();
+        }
+        self.clamp_detail_scroll();
+    }
+
+    fn detail_max_scroll(&self, text: &str) -> usize {
+        let viewport = self.viewport.get();
+        let width = viewport.width.min(90).saturating_sub(2).max(1) as usize;
+        let height = viewport.height.saturating_sub(4).min(34).saturating_sub(2) as usize;
+        text.split('\n')
+            .map(|line| super::transcript::wrap(&super::transcript::clean(line), width).len())
+            .sum::<usize>()
+            .saturating_sub(height)
+    }
+
+    fn clamp_detail_scroll(&mut self) {
+        let max = match &self.modal {
+            Some(Modal::View { text, .. }) => self.detail_max_scroll(text),
+            _ => return,
         };
-        self.view_w.set(chat_w.saturating_sub(2));
-        // header 1 + tabs 1 + input 3 + footer 1 → body; chat inner = −2 borders
-        self.view_h
-            .set((h as usize).saturating_sub(6).saturating_sub(2));
-        self.fix_anchor();
+        if let Some(Modal::View { scroll, .. }) = &mut self.modal {
+            *scroll = (*scroll).min(max);
+        }
     }
 
     // ── activity navigation ─────────────────────────────────────────
     /// Focusable targets in transcript order: folded/done groups get a
     /// summary row; open groups expose each item.
     pub fn focusables(&self) -> Vec<(usize, Option<usize>)> {
-        let mut v = Vec::new();
-        for (gi, g) in self.groups.iter().enumerate() {
-            if g.id == 0 {
-                for (ii, _) in g.items.iter().enumerate() {
-                    v.push((gi, Some(ii)));
-                }
-                continue;
-            }
-            if g.folded() {
-                v.push((gi, None));
-            } else {
-                if g.done {
-                    v.push((gi, None)); // status row = collapse handle
-                }
-                for (ii, it) in g.items.iter().enumerate() {
-                    // request markers render as the group's waiting row —
-                    // not individually focusable
-                    if !matches!(it, Act::Req { .. }) {
-                        v.push((gi, Some(ii)));
-                    }
-                }
-            }
-        }
-        v
+        super::transcript::focusable_items(self)
     }
 
     /// Toggle expansion at the current nav target — or open the detail
@@ -1909,6 +2011,9 @@ impl App {
                     });
                 }
             },
+        }
+        if self.modal.is_none() {
+            self.reveal_navigation();
         }
     }
 
@@ -2006,15 +2111,32 @@ impl App {
     }
 
     pub fn cycle_reasoning(&mut self) {
+        let selected = if self.nav {
+            self.focusables().get(self.nav_sel).copied()
+        } else {
+            None
+        };
         self.reasoning = self.reasoning.next();
         self.ui.reasoning = Some(self.reasoning.name().into());
         self.effects.push(Effect::SaveUi);
         self.status = format!("reasoning display: {}", self.reasoning.name());
         self.fix_anchor();
+        if self.nav {
+            let targets = self.focusables();
+            self.nav_sel = selected
+                .and_then(|owner| targets.iter().position(|&target| target == owner))
+                .unwrap_or_else(|| self.nav_sel.min(targets.len().saturating_sub(1)));
+            self.reveal_navigation();
+        }
     }
 
     // ── input handling → effects ────────────────────────────────────
     pub fn key(&mut self, k: KeyEvent) {
+        self.handle_key(k);
+        self.sync_layout();
+    }
+
+    fn handle_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // Track physical key state before any dispatch: a Release is only a
         // fresh decision when no matching Press is outstanding.
@@ -2070,6 +2192,63 @@ impl App {
         if !press {
             return;
         }
+        if ctrl && k.code == KeyCode::Char('p') {
+            self.open_commands();
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('t') {
+            self.command(Command::View(Tab::ALL[((self.tab as usize) + 1) % 5]));
+            return;
+        }
+        // View commands work from both composer and activity focus. Keep
+        // them after modal dispatch so editing fields and approvals retain
+        // their own key handling.
+        match (ctrl, k.code) {
+            (true, KeyCode::Char('b')) => {
+                self.command(Command::Sidebar);
+                return;
+            }
+            // Ctrl+M aliases Enter in legacy terminals; Ctrl+O is portable.
+            (true, KeyCode::Char('m' | 'o')) => {
+                self.toggle_mode();
+                return;
+            }
+            (true, KeyCode::Char('r')) => {
+                self.command(Command::Reasoning);
+                return;
+            }
+            (_, KeyCode::F(1)) => {
+                self.command(Command::Help);
+                return;
+            }
+            _ => {}
+        }
+        if let Some(i) = self.panel_scroll_index() {
+            match k.code {
+                KeyCode::Up => self.scroll_panel(-1),
+                KeyCode::Down => self.scroll_panel(1),
+                KeyCode::PageUp => {
+                    self.scroll_panel(-(self.view_h.get().saturating_sub(2).max(1) as isize))
+                }
+                KeyCode::PageDown => {
+                    self.scroll_panel(self.view_h.get().saturating_sub(2).max(1) as isize)
+                }
+                KeyCode::Home => self.panel_scroll[i].set(0),
+                KeyCode::End => self.panel_scroll[i].set(self.panel_max_scroll[i].get()),
+                _ => {}
+            }
+            if matches!(
+                k.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
+            ) {
+                return;
+            }
+        }
         // Activity-navigation mode: ↑/↓ select, Enter/Space expand or
         // collapse, 'v' full details, End returns to live, Tab/Esc exits
         // back to the input box. Enter here never sends.
@@ -2079,12 +2258,16 @@ impl App {
                     self.nav = false;
                     self.sel = None;
                 }
-                KeyCode::Up => self.nav_sel = self.nav_sel.saturating_sub(1),
+                KeyCode::Up => {
+                    self.nav_sel = self.nav_sel.saturating_sub(1);
+                    self.reveal_navigation();
+                }
                 KeyCode::Down => {
                     let n = self.focusables().len();
                     if n > 0 && self.nav_sel + 1 < n {
                         self.nav_sel += 1;
                     }
+                    self.reveal_navigation();
                 }
                 KeyCode::PageUp => self.scroll_by(10),
                 KeyCode::PageDown => self.scroll_by(-10),
@@ -2096,18 +2279,12 @@ impl App {
             return;
         }
         match (ctrl, k.code) {
-            (true, KeyCode::Char('t')) => self.tab = Tab::ALL[((self.tab as usize) + 1) % 5],
-            (true, KeyCode::Char('b')) => self.sidebar = !self.sidebar,
-            // Ctrl+M is byte 0x0D == Enter in most terminals; Ctrl+O (0x0F)
-            // is the portable chord. 'm' stays for kitty/CSI-u keyboards.
-            (true, KeyCode::Char('m')) | (true, KeyCode::Char('o')) => self.toggle_mode(),
-            // Ctrl+R cycles the reasoning display preference — a view
-            // option only; no request parameters change.
-            (true, KeyCode::Char('r')) => self.cycle_reasoning(),
             // NB: Ctrl+J is 0x0A = Enter on legacy terminals — binding it
             // would submit the task instead of inserting a newline.
-            (true, KeyCode::Char('n')) => self.input.insert('\n'),
-            (_, KeyCode::F(1)) => self.modal = Some(Modal::Help),
+            (true, KeyCode::Char('n')) if self.tab == Tab::Chat => {
+                self.input.insert('\n');
+                self.hist_i = None;
+            }
             (_, KeyCode::PageUp) => self.scroll_by(10),
             (_, KeyCode::PageDown) => self.scroll_by(-10),
             (_, KeyCode::Tab) => {
@@ -2115,7 +2292,13 @@ impl App {
                     // focus the transcript — selection starts at the
                     // latest focusable row
                     self.nav = true;
-                    self.nav_sel = self.focusables().len().saturating_sub(1);
+                    let targets = self.focusables();
+                    let latest_group = targets.last().map(|&(group, _)| group);
+                    self.nav_sel = targets
+                        .iter()
+                        .rposition(|&(group, item)| Some(group) == latest_group && item.is_none())
+                        .unwrap_or_else(|| targets.len().saturating_sub(1));
+                    self.reveal_navigation();
                 }
             }
             (_, KeyCode::Enter) => {
@@ -2126,19 +2309,19 @@ impl App {
                     if task.starts_with('/') {
                         match task.as_str() {
                             "/mission" => {
-                                self.set_mode(Mode::Mission);
+                                self.command(Command::Mode(Mode::Mission));
                                 self.input.clear();
                             }
                             "/solo" => {
-                                self.set_mode(Mode::Solo);
+                                self.command(Command::Mode(Mode::Solo));
                                 self.input.clear();
                             }
                             "/export" => {
-                                self.effects.push(Effect::ExportRun);
+                                self.command(Command::Export);
                                 self.input.clear();
                             }
                             "/help" => {
-                                self.modal = Some(Modal::Help);
+                                self.command(Command::Help);
                                 self.input.clear();
                             }
                             _ => {
@@ -2233,18 +2416,20 @@ impl App {
             }
             (_, KeyCode::Esc) => {
                 self.sel = None; // drop any drag-selection highlight
-                if self.tab == Tab::Settings {
-                    self.tab = Tab::Chat;
+                if self.tab != Tab::Chat {
+                    self.command(Command::View(Tab::Chat));
                 }
             }
             (_, KeyCode::Backspace) => {
                 if self.tab == Tab::Chat {
                     self.input.backspace();
+                    self.hist_i = None;
                 }
             }
             (_, KeyCode::Delete) => {
                 if self.tab == Tab::Chat {
                     self.input.delete();
+                    self.hist_i = None;
                 }
             }
             (_, KeyCode::Left) => {
@@ -2262,7 +2447,7 @@ impl App {
                     self.input.home();
                 }
             }
-            (_, KeyCode::Char(c)) if self.tab == Tab::Chat => {
+            (false, KeyCode::Char(c)) if self.tab == Tab::Chat => {
                 self.input.insert(c);
                 self.hist_i = None;
             }
@@ -2271,6 +2456,11 @@ impl App {
     }
 
     pub fn paste(&mut self, s: &str) {
+        self.handle_paste(s);
+        self.sync_layout();
+    }
+
+    fn handle_paste(&mut self, s: &str) {
         // modal field wins over chat input — pasting an API key into the
         // setup form must not leak it into the task box
         match &mut self.modal {
@@ -2279,6 +2469,10 @@ impl App {
                     b.insert_str(s);
                     f.refresh_endpoint();
                 }
+            }
+            Some(Modal::Commands { filter, sel }) => {
+                filter.insert_str(s);
+                *sel = 0;
             }
             Some(Modal::Picker(p)) => {
                 p.filter.insert_str(s);
@@ -2289,6 +2483,7 @@ impl App {
             None => {
                 if self.tab == Tab::Chat {
                     self.input.insert_str(s);
+                    self.hist_i = None;
                 }
             }
         }
@@ -2297,29 +2492,103 @@ impl App {
     /// Flip solo ↔ mission and persist the choice so the next launch
     /// remembers it (ui.mode in config.toml).
     pub fn toggle_mode(&mut self) {
-        self.mode = match self.mode {
-            Mode::Solo => Mode::Mission,
-            Mode::Mission => Mode::Solo,
-        };
-        self.ui.mode = Some(match self.mode {
-            Mode::Solo => "solo".into(),
-            Mode::Mission => "mission".into(),
-        });
-        self.effects.push(Effect::SaveUi);
-        self.status = match self.mode {
-            Mode::Solo => "mode: solo (one worker)".into(),
-            Mode::Mission => "mode: mission (orchestrator → workers → auditor)".into(),
-        };
-    }
-    pub fn set_mode(&mut self, m: Mode) {
-        if self.mode != m {
-            self.toggle_mode();
+        let mode = if self.mode == Mode::Solo {
+            Mode::Mission
         } else {
-            self.status = match m {
-                Mode::Solo => "already solo".into(),
-                Mode::Mission => "already mission".into(),
-            };
+            Mode::Solo
+        };
+        self.command(Command::Mode(mode));
+    }
+    pub fn set_mode(&mut self, mode: Mode) {
+        if self.running {
+            self.status = "stop the current task first".into();
+            return;
         }
+        if self.mode == mode {
+            self.status = format!(
+                "already {}",
+                if mode == Mode::Solo {
+                    "solo"
+                } else {
+                    "mission"
+                }
+            );
+            return;
+        }
+        self.mode = mode;
+        self.sidebar = mode == Mode::Mission;
+        self.ui.mode = Some(
+            if mode == Mode::Solo {
+                "solo"
+            } else {
+                "mission"
+            }
+            .into(),
+        );
+        self.effects.push(Effect::SaveUi);
+        self.status = if mode == Mode::Solo {
+            "mode: solo (one worker)"
+        } else {
+            "mode: mission (orchestrator → workers → auditor)"
+        }
+        .into();
+    }
+
+    fn scroll_dialog(&self, delta: isize) {
+        self.dialog_scroll.set(
+            self.dialog_scroll
+                .get()
+                .saturating_add_signed(delta)
+                .min(self.dialog_max_scroll.get()),
+        );
+    }
+
+    pub fn theme(&self) -> super::theme::Theme {
+        super::theme::Theme::new(self.ui.theme.as_deref())
+    }
+
+    pub fn open_commands(&mut self) {
+        if self.modal.is_none() {
+            self.modal = Some(Modal::Commands {
+                filter: Buf::new(),
+                sel: 0,
+            });
+        }
+    }
+
+    pub fn command(&mut self, command: Command) {
+        if let Some(reason) = command.unavailable(self) {
+            self.status = reason.into();
+            return;
+        }
+        match command {
+            Command::View(t) => {
+                self.tab = t;
+                self.nav = false;
+                self.sel = None;
+            }
+            Command::Mode(m) => self.set_mode(m),
+            Command::Sidebar => self.sidebar = !self.sidebar,
+            Command::Reasoning => self.cycle_reasoning(),
+            Command::Theme => {
+                self.ui.theme = Some(
+                    if super::theme::Theme::name(self.ui.theme.as_deref()) == "dark" {
+                        "terminal".into()
+                    } else {
+                        "dark".into()
+                    },
+                );
+                self.effects.push(Effect::SaveUi);
+            }
+            Command::Export => self.effects.push(Effect::ExportRun),
+            Command::Help => {
+                self.dialog_scroll.set(0);
+                self.modal = Some(Modal::Help);
+            }
+            Command::Stop => self.stop(),
+            Command::Quit => self.effects.push(Effect::Quit),
+        }
+        self.sync_layout();
     }
 
     pub fn stop(&mut self) {
@@ -2342,6 +2611,7 @@ impl App {
         if c == GateChoice::Session {
             self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.dialog_scroll.set(0);
         let _ = reply.send(c);
         self.pending_perms
             .pop_front()
@@ -2359,6 +2629,7 @@ impl App {
     fn promote_perm(&mut self) {
         if self.modal.is_none() {
             if let Some((id, agent, summary, reply)) = self.pending_perms.pop_front() {
+                self.dialog_scroll.set(0);
                 self.modal = Some(Modal::Permission {
                     id,
                     agent,
@@ -2380,7 +2651,52 @@ impl App {
     }
 
     fn modal_key(&mut self, k: KeyEvent, m: Modal) -> Option<Modal> {
+        let detail_max = if let Modal::View { text, .. } = &m {
+            self.detail_max_scroll(text)
+        } else {
+            0
+        };
+        if matches!(m, Modal::Help | Modal::Permission { .. }) {
+            match k.code {
+                KeyCode::Up => self.scroll_dialog(-1),
+                KeyCode::Down => self.scroll_dialog(1),
+                KeyCode::PageUp => self.scroll_dialog(-10),
+                KeyCode::PageDown => self.scroll_dialog(10),
+                KeyCode::Home => self.dialog_scroll.set(0),
+                KeyCode::End => self.dialog_scroll.set(self.dialog_max_scroll.get()),
+                _ => {}
+            }
+        }
         match m {
+            Modal::Commands {
+                mut filter,
+                mut sel,
+            } => {
+                let matches = Command::matching(&filter.text());
+                match k.code {
+                    KeyCode::Esc => return None,
+                    KeyCode::Up => sel = sel.saturating_sub(1),
+                    KeyCode::Down => sel = (sel + 1).min(matches.len().saturating_sub(1)),
+                    KeyCode::Backspace => {
+                        filter.backspace();
+                        sel = 0;
+                    }
+                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        filter.insert(c);
+                        sel = 0;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(c) = matches.get(sel) {
+                            if c.unavailable(self).is_none() {
+                                self.command(*c);
+                                return self.modal.take();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Some(Modal::Commands { filter, sel })
+            }
             Modal::Permission {
                 id,
                 agent,
@@ -2423,27 +2739,32 @@ impl App {
                 KeyCode::Up => Some(Modal::View {
                     title,
                     text,
-                    scroll: scroll.saturating_sub(1),
+                    scroll: scroll.min(detail_max).saturating_sub(1),
                 }),
                 KeyCode::Down => Some(Modal::View {
                     title,
                     text,
-                    scroll: scroll + 1,
+                    scroll: scroll.saturating_add(1).min(detail_max),
                 }),
                 KeyCode::PageUp => Some(Modal::View {
                     title,
                     text,
-                    scroll: scroll.saturating_sub(10),
+                    scroll: scroll.min(detail_max).saturating_sub(10),
                 }),
                 KeyCode::PageDown => Some(Modal::View {
                     title,
                     text,
-                    scroll: scroll + 10,
+                    scroll: scroll.saturating_add(10).min(detail_max),
                 }),
                 KeyCode::Home => Some(Modal::View {
                     title,
                     text,
                     scroll: 0,
+                }),
+                KeyCode::End => Some(Modal::View {
+                    title,
+                    text,
+                    scroll: detail_max,
                 }),
                 _ => Some(Modal::View {
                     title,
@@ -2535,7 +2856,15 @@ impl App {
                     buf.right();
                     Some(Modal::Text { title, buf, target })
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Home => {
+                    buf.home();
+                    Some(Modal::Text { title, buf, target })
+                }
+                KeyCode::End => {
+                    buf.end();
+                    Some(Modal::Text { title, buf, target })
+                }
+                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                     buf.insert(c);
                     Some(Modal::Text { title, buf, target })
                 }
@@ -2558,6 +2887,15 @@ impl App {
                     }
                 } else {
                     f.cycle(if k.code == KeyCode::Right { 1 } else { -1 });
+                }
+            }
+            KeyCode::Home | KeyCode::End => {
+                if let Some(buf) = f.cur() {
+                    if k.code == KeyCode::Home {
+                        buf.home();
+                    } else {
+                        buf.end();
+                    }
                 }
             }
             KeyCode::Char(' ') if f.cur().is_none() => f.cycle(1),
@@ -2625,7 +2963,7 @@ impl App {
                 }
                 f.refresh_endpoint();
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(b) = f.cur() {
                     b.insert(c);
                     f.refresh_endpoint();
@@ -2862,6 +3200,7 @@ impl App {
             SettingsRow::Acceptance,
             SettingsRow::Export,
             SettingsRow::Header("appearance"),
+            SettingsRow::Theme,
             SettingsRow::Reasoning,
             SettingsRow::Mouse,
             SettingsRow::Header("web research"),
@@ -2962,6 +3301,7 @@ impl App {
                 });
                 self.effects.push(Effect::SaveUi);
             }
+            Some(SettingsRow::Theme) => self.command(Command::Theme),
             Some(SettingsRow::Reasoning) => self.cycle_reasoning(),
             Some(SettingsRow::Mouse) => {
                 self.mouse = !self.mouse;
@@ -3026,6 +3366,7 @@ pub enum SettingsRow {
     Export,
     Workers,
     Reasoning,
+    Theme,
     Mouse,
     Auto,
     WebAccess,
@@ -3052,6 +3393,7 @@ impl SettingsRow {
             SettingsRow::Mode => "mission = orchestrator→workers→auditor · solo = single agent",
             SettingsRow::Export => "write a sanitized report of this run to exports/<run>/",
             SettingsRow::Workers => "parallel task slots in mission mode",
+            SettingsRow::Theme => "dark charcoal or your terminal’s native colors",
             SettingsRow::Reasoning => "reasoning display — view-only, never sent to the model",
             SettingsRow::Mouse => "wheel scrolls · click expands · drag copies",
             SettingsRow::Auto => "skip permission prompts — session only, resets on restart",

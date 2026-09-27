@@ -87,6 +87,19 @@ struct Pty {
     buf: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let bytes = self.buf.lock().unwrap();
+            let tail = &bytes[bytes.len().saturating_sub(2500)..];
+            eprintln!("PTY output tail: {:?}", String::from_utf8_lossy(tail));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Spawn `sui tui` under a real pty against the mock provider.
@@ -126,7 +139,12 @@ fn spawn(port: u16, repo: &PathBuf, home: &PathBuf) -> Pty {
             sink.lock().unwrap().extend_from_slice(&chunk[..n]);
         }
     });
-    Pty { buf, writer, child }
+    Pty {
+        buf,
+        writer,
+        child,
+        master: pair.master,
+    }
 }
 
 fn count(buf: &Arc<Mutex<Vec<u8>>>, pat: &str) -> usize {
@@ -301,20 +319,26 @@ fn pty_release_never_approves_next_modal() {
 
 /// Mouse wiring end-to-end: SGR wheel-up bytes arrive (MOUSE_ON was
 /// emitted at startup), crossterm parses ScrollUp, the transcript
-/// scrolls and its title says so. If capture were never enabled this
-/// is a silent no-op — the title never changes.
+/// scrolls and its footer says so. The fixture must exceed the viewport;
+/// an empty conversation correctly cannot scroll.
 #[test]
 fn pty_mouse_wheel_scrolls() {
     let (repo, home) = fixture();
-    let port = mock();
+    let port = common::serve(|_, _| {
+        common::sse_text(&format!("{}SCROLL_READY", "conversation row\n".repeat(70)))
+    });
     let mut p = spawn(port, &repo, &home);
     wait_for("initial paint", Duration::from_secs(10), || {
         count(&p.buf, "Enter") > 0
     });
+    send(&mut p, b"show a long answer\r");
+    wait_for("scrollable conversation", Duration::from_secs(10), || {
+        count(&p.buf, "SCROLL_READY") > 0
+    });
     // wheel up at (30,10) — inside the transcript pane
     send(&mut p, b"\x1b[<64;30;10M");
     wait_for("scroll indicator", Duration::from_secs(10), || {
-        count(&p.buf, "scrolled \u{25b2}") > 0
+        count(&p.buf, "rows") > 0
     });
     // wheel back down → live
     send(&mut p, b"\x1b[<65;30;10M");
@@ -334,14 +358,153 @@ fn pty_mouse_drag_copies_osc52() {
     wait_for("initial paint", Duration::from_secs(10), || {
         count(&p.buf, "Enter") > 0
     });
-    // wire coords are 1-based: transcript row 0 sits at internal (x,3) =
-    // wire y=4 (header y0, tabs y1, chat border y2, inner y3)
-    send(&mut p, b"\x1b[<0;13;4M"); // left down on transcript row 0
-    send(&mut p, b"\x1b[<32;41;5M"); // left drag to row 1
-    send(&mut p, b"\x1b[<0;41;5m"); // release
+    // Submit a real task: the new empty state is not a transcript item.
+    let idle_paints = count(&p.buf, "IDLE");
+    send(&mut p, b"Inspect the workspace\r");
+    wait_for("permission modal", Duration::from_secs(15), || {
+        count(&p.buf, "deny") > 0
+    });
+    send(&mut p, b"n");
+    wait_for("run finished", Duration::from_secs(10), || {
+        count(&p.buf, "IDLE") > idle_paints
+    });
+    // Wire coordinates are 1-based: header y=1, top padding y=2,
+    // user label y=3, task text y=4. Drag a visible task-text range.
+    send(&mut p, b"\x1b[<0;4;4M");
+    send(&mut p, b"\x1b[<32;22;4M");
+    send(&mut p, b"\x1b[<0;22;4m");
     wait_for("osc52 copy sequence", Duration::from_secs(10), || {
         count(&p.buf, "\x1b]52;c;") > 0
     });
     let _ = p.child.kill();
     let _ = p.child.wait();
+}
+
+#[test]
+fn pty_view_shortcuts_work_from_activity_focus() {
+    let (repo, home) = fixture();
+    let port = common::serve(|_, _| text_done());
+    let mut p = spawn(port, &repo, &home);
+    wait_for("initial paint", Duration::from_secs(10), || {
+        count(&p.buf, "Enter") > 0
+    });
+    send(&mut p, b"inspect workspace\r");
+    // Fast responses can coalesce running/done before a paint, so IDLE
+    // need not be repainted. Completion always adds the footer outcome.
+    wait_for("run complete", Duration::from_secs(10), || {
+        count(&p.buf, "ended") > 0
+    });
+    send(&mut p, b"\t");
+    wait_for("activity focus", Duration::from_secs(5), || {
+        count(&p.buf, "↑↓ select") > 0
+    });
+    send(&mut p, b"\x02"); // Ctrl+B: one physical chord.
+    wait_for("sidebar", Duration::from_secs(5), || {
+        count(&p.buf, "agents") > 0
+    });
+    send(&mut p, b"\x12"); // Ctrl+R, still in activity focus.
+    wait_for("reasoning saved", Duration::from_secs(5), || {
+        std::fs::read_to_string(home.join(".config/sui/config.toml"))
+            .unwrap()
+            .contains("reasoning = \"hidden\"")
+    });
+    send(&mut p, b"\x0f"); // Ctrl+O
+    wait_for("mode saved", Duration::from_secs(5), || {
+        std::fs::read_to_string(home.join(".config/sui/config.toml"))
+            .unwrap()
+            .contains("mode = \"mission\"")
+    });
+    send(&mut p, b"\x1bOP"); // F1 in an xterm-compatible terminal.
+    wait_for("help", Duration::from_secs(5), || {
+        count(&p.buf, " Help ") > 0
+    });
+    send(&mut p, b"\x11");
+    wait_for("terminal restoration", Duration::from_secs(5), || {
+        count(&p.buf, "\x1b[?1049l") > 0
+    });
+    let _ = p.child.wait();
+}
+
+/// Commands operate on the real UI without consuming a draft; preference
+/// persistence, mouse geometry after resize, and terminal cleanup are end to end.
+#[test]
+fn pty_palette_theme_paste_resize_and_restore() {
+    let (repo, home) = fixture();
+    let received = Arc::new(Mutex::new(String::new()));
+    let sink = received.clone();
+    let port = common::serve(move |_raw, messages| {
+        let user = messages.iter().rev().find(|m| m["role"] == "user").unwrap();
+        *sink.lock().unwrap() = user["content"].as_str().unwrap().into();
+        text_done()
+    });
+    let mut p = spawn(port, &repo, &home);
+    wait_for("initial paint", Duration::from_secs(10), || {
+        count(&p.buf, "Enter") > 0
+    });
+    send(
+        &mut p,
+        b"\x1b[200~first draft line\nsecond draft line\nlast draft line\x1b[201~",
+    );
+    wait_for("multiline draft", Duration::from_secs(5), || {
+        count(&p.buf, "last draft line") > 0
+    });
+    send(&mut p, b"\x10"); // Ctrl+P
+    wait_for("command palette", Duration::from_secs(5), || {
+        count(&p.buf, "Toggle theme") > 0
+    });
+    send(&mut p, b"theme\r");
+    wait_for("theme persistence", Duration::from_secs(5), || {
+        std::fs::read_to_string(home.join(".config/sui/config.toml"))
+            .unwrap()
+            .contains("theme = \"terminal\"")
+    });
+    let paints = count(&p.buf, "SUI");
+    p.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    wait_for("resized paint", Duration::from_secs(5), || {
+        count(&p.buf, "SUI") > paints
+    });
+    let palettes = count(&p.buf, "Ctrl+R");
+    send(&mut p, b"\x1b[<0;75;1M\x1b[<0;75;1m");
+    wait_for("mouse palette after resize", Duration::from_secs(5), || {
+        count(&p.buf, "Ctrl+R") > palettes
+    });
+    assert!(
+        received.lock().unwrap().is_empty(),
+        "paste and palette never submit a task"
+    );
+    send(&mut p, b"\x1b");
+    // Wait for the next draw before sending Enter; Esc can be an escape prefix
+    // on legacy terminals, so keep the two inputs separate.
+    std::thread::sleep(Duration::from_millis(100));
+    send(&mut p, b"\r");
+    wait_for("draft submitted intact", Duration::from_secs(5), || {
+        !received.lock().unwrap().is_empty()
+    });
+    assert_eq!(
+        received
+            .lock()
+            .unwrap()
+            .split("\n── sui task guidance ")
+            .next()
+            .unwrap(),
+        "first draft line\nsecond draft line\nlast draft line"
+    );
+    send(&mut p, b"\x11"); // Ctrl+Q
+    wait_for("terminal cleanup", Duration::from_secs(5), || {
+        count(&p.buf, "\x1b[?1049l") > 0
+            && count(&p.buf, "\x1b[?2004l") > 0
+            && count(&p.buf, "\x1b[?1006l") > 0
+    });
+    assert!(p.child.wait().unwrap().success());
+    assert!(
+        !repo.join("out/perm1.txt").exists(),
+        "text-only mock never wrote a file"
+    );
 }

@@ -137,22 +137,65 @@ never leak into them.
 ## The TUI
 
 First run opens setup — add a profile, pick models per role, type a
-task. After that the chat is an **activity transcript**: each submitted
-run folds to one line (`3 reqs · 7 tools · 12s`), expandable to bounded
-step previews. Failed steps keep their excerpts; pending permissions are
-never hidden.
+task. The main screen puts the conversation first, with a growing multiline
+composer and compact header. Completed activity folds to one line
+(`3 reqs · 7 tools · 12s`); final answers and failed-step excerpts stay
+visible. Headings, fenced code, and quotes get distinct styles; their
+original text remains available for selection and details. Expand activity
+for bounded previews or open its details. A running timer and explicit
+approval state show what is happening; a finished run displays its runtime
+outcome without implying verification.
 
-**Mouse** (works over SSH — your local terminal sends the events):
-wheel scrolls, click expands groups/steps/tabs, `[y]/[a]/[n]` permission
-buttons click, drag selects and auto-copies via OSC52, `Shift+drag` is
-native terminal selection. Toggle in Settings → mouse.
+![Sui's conversation view in the dark theme](docs/images/sui-tui-dark.png)
 
-**Keys**: `Ctrl+S` stop task · `Ctrl+Q` quit (both work inside permission
-prompts) · `Ctrl+R` cycles reasoning display · `↑↓`+Enter navigates
-history · `v` opens the step details view · `?` help.
+*Terminal capture using a local mock provider.* More views:
+[empty screen](docs/images/sui-tui-empty.png),
+[command palette](docs/images/sui-tui-commands.png),
+[permission prompt](docs/images/sui-tui-permission.png),
+[terminal-native colors on a light background](docs/images/sui-tui-terminal.png).
+
+**Commands and views:** `Ctrl+P` or the clickable header opens a searchable
+palette. Type to filter, use `↑↓` and Enter to choose, or Esc to return to
+your draft. The palette sizes to its results and keeps the selected row
+visible. Chat, Tasks, Changes, Usage, and Settings remain available;
+`Ctrl+T` cycles views and Esc returns to Chat. Existing `/solo`, `/mission`,
+`/export`, and `/help` commands still work.
+
+Tasks, Changes, and Usage scroll independently with the wheel, arrow keys,
+Page Up/Down, and Home/End. Their position indicators show when more content
+is available. Usage keeps each agent/model pair separate: `—` means a
+measurement is missing, `0` means a reported zero, and `+ (partial)` marks
+totals with missing measurements.
+
+**Appearance:** Settings → theme switches between `dark` (default) and
+`terminal` (your terminal's foreground, background, and ANSI colors).
+The preference persists as `[ui].theme`. No special font is required;
+`NO_COLOR` is respected. Solo starts with the sidebar hidden; Mission
+shows agents and run status at widths of 110 columns or more. `Ctrl+B`
+toggles it; Tasks remains accessible on narrow screens.
+
+**Input and keys:** Enter sends · `Ctrl+N` inserts a newline · `↑` recalls
+history from an empty composer · Tab focuses activity · `v` opens selected
+step details · `Ctrl+R` cycles reasoning · `Ctrl+O` switches Solo/Mission ·
+`Ctrl+S` stops · `Ctrl+Q` quits · F1 opens help. The composer grows to six
+text rows, then scrolls to keep the cursor visible. Editing respects
+Unicode grapheme boundaries. Editing a recalled task makes it your draft;
+history navigation no longer replaces that edited text. A draft entered
+during a run is kept until you send it after the run finishes. Mode changes
+are available after the current run stops.
+Ctrl+B, Ctrl+O, Ctrl+R, and F1 also work while activity has keyboard focus.
+Changing reasoning visibility keeps the selected activity when it remains visible.
+
+**Mouse** (also over SSH): wheel scrolls, click expands activity or opens
+commands, drag selects and auto-copies via OSC52. `Shift+drag` uses native
+terminal selection. Toggle capture in Settings → mouse.
 
 Mutating tool calls ask first: `y` approves once, `a` approves for the
-session (`AUTO` badge in the header), `n`/`Esc` denies.
+session (`AUTO` in the header), `n`/Esc denies. Enter never approves.
+Permission previews scroll with `↑↓`, PageUp/PageDown, or the wheel;
+decision buttons remain fixed and clickable. `Ctrl+S` and `Ctrl+Q` work
+inside prompts. An ask arriving while you type in a dialog is queued;
+closing the dialog surfaces it without treating typed text as approval.
 
 ## Web research
 
