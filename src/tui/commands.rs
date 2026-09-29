@@ -8,13 +8,14 @@ pub enum Command {
     Sidebar,
     Reasoning,
     Theme,
+    Motion,
     Export,
     Help,
     Stop,
     Quit,
 }
 impl Command {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::View(Tab::Chat),
         Self::View(Tab::Tasks),
         Self::View(Tab::Changes),
@@ -25,6 +26,7 @@ impl Command {
         Self::Sidebar,
         Self::Reasoning,
         Self::Theme,
+        Self::Motion,
         Self::Export,
         Self::Help,
         Self::Stop,
@@ -41,7 +43,8 @@ impl Command {
             Self::Mode(Mode::Mission) => "Switch to Mission",
             Self::Sidebar => "Toggle sidebar",
             Self::Reasoning => "Cycle reasoning display",
-            Self::Theme => "Toggle theme: dark / terminal",
+            Self::Theme => "Toggle theme: slime / terminal / dark",
+            Self::Motion => "Cycle motion: full / calm / off",
             Self::Export => "Export run report",
             Self::Help => "Help",
             Self::Stop => "Stop task",

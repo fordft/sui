@@ -33,7 +33,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     app.hits.borrow_mut().clear();
     app.chat_geom.set(ChatGeom::default());
     let layout = super::layout::regions(area, app);
+    let ms = super::slime::clock(app);
+    let wall = super::slime::now_ms();
     f.render_widget(Block::default().style(app.theme().base()), area);
+    super::fx::backdrop(f.buffer_mut(), area, app.theme());
     let ws = app
         .workspace
         .file_name()
@@ -49,15 +52,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             "APPROVAL".to_string()
         } else if app.running {
             match app.started {
-                Some(started) => {
-                    let elapsed = started.elapsed();
-                    let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                    format!(
-                        "{} RUNNING {}s",
-                        frames[(elapsed.as_millis() / 100 % 10) as usize],
-                        elapsed.as_secs()
-                    )
-                }
+                Some(started) => format!(
+                    "{} RUNNING {}s",
+                    super::slime::spinner(ms),
+                    started.elapsed().as_secs()
+                ),
                 None => "RUNNING".into(),
             }
         } else {
@@ -80,23 +79,48 @@ pub fn draw(f: &mut Frame, app: &App) {
     ])
     .split(layout.header);
     // Status comes before the workspace so AUTO survives ordinary narrow widths.
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" SUI ", acc(app).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("{auto}{mode} · {state}"),
-                Style::default().fg(if !auto.is_empty() {
-                    app.theme().warning
-                } else if app.mode == Mode::Mission {
-                    app.theme().mission
-                } else {
-                    app.theme().muted
-                }),
-            ),
-            Span::styled(format!("  {ws}"), dim(app)),
-        ])),
-        header[0],
-    );
+    let status_color = if !auto.is_empty() {
+        app.theme().warning
+    } else if app.mode == Mode::Mission {
+        app.theme().mission
+    } else {
+        app.theme().muted
+    };
+    let mut head = vec![Span::styled(
+        format!(" {} ", super::slime::face(super::slime::mood(app), ms)),
+        Style::default().fg(super::slime::lerp(
+            app.theme().accent,
+            app.theme().glow,
+            super::slime::pulse(ms, 2400),
+        )),
+    )];
+    // One span on purpose: "SUI" stays a contiguous run in the terminal stream.
+    head.push(Span::styled(
+        "SUI",
+        Style::default()
+            .fg(super::slime::lerp(
+                app.theme().accent,
+                app.theme().glow,
+                super::slime::pulse(ms + 1200, 2400),
+            ))
+            .add_modifier(Modifier::BOLD),
+    ));
+    head.push(Span::styled(
+        format!(" {auto}{mode} · "),
+        Style::default().fg(status_color),
+    ));
+    if app.running && app.anim.motion != super::fx::Motion::Off {
+        head.extend(super::fx::shimmer(
+            &state,
+            status_color,
+            app.theme().glow,
+            ms,
+        ));
+    } else {
+        head.push(Span::styled(state, Style::default().fg(status_color)));
+    }
+    head.push(Span::styled(format!("  {ws}"), dim(app)));
+    f.render_widget(Paragraph::new(Line::from(head)), header[0]);
     f.render_widget(
         Paragraph::new(nav)
             .style(acc(app))
@@ -130,10 +154,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .cursor_row
             .saturating_sub(height.saturating_sub(1));
         let lines: Vec<Line> = if app.input.is_empty() {
-            vec![Line::from(Span::styled(
-                "Ask Sui to build, fix, or investigate…",
-                dim(app),
-            ))]
+            vec![Line::from(Span::styled(super::slime::tip(ms), dim(app)))]
         } else {
             layout
                 .input
@@ -145,15 +166,24 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .map(Line::from)
                 .collect()
         };
+        let cheer = app
+            .anim
+            .done
+            .filter(|&(t, ok)| ok && wall.saturating_sub(t) < 1400)
+            .map(|(t, _)| (wall - t) as f32 / 1400.0);
         let mut composer = panel(app)
             .border_style(Style::default().fg(if app.nav {
                 app.theme().border
+            } else if app.running {
+                super::slime::breathing(app.theme(), ms)
+            } else if let Some(k) = cheer.filter(|_| app.anim.motion != super::fx::Motion::Off) {
+                super::slime::lerp(app.theme().success, app.theme().accent, k)
             } else {
                 app.theme().accent
             }))
             .title(Span::styled(
                 if app.running {
-                    " Draft · run in progress "
+                    " Draft · slime is working "
                 } else {
                     " Message "
                 },
@@ -172,6 +202,31 @@ pub fn draw(f: &mut Frame, app: &App) {
             );
         }
         f.render_widget(Paragraph::new(lines).block(composer), r);
+        let moving = app.anim.motion != super::fx::Motion::Off;
+        if app.running && moving && !app.nav {
+            super::fx::flow_border(
+                f.buffer_mut(),
+                r,
+                app.theme().border,
+                app.theme().accent,
+                ms,
+            );
+        }
+        if app.running
+            && moving
+            && r.width > 4
+            && r.height >= 2
+            && layout.input.lines.len() <= height
+        {
+            f.render_widget(
+                Paragraph::new(super::slime::ooze_bar(
+                    app.theme(),
+                    r.width as usize - 4,
+                    ms,
+                )),
+                Rect::new(r.x + 2, r.bottom() - 1, r.width - 4, 1),
+            );
+        }
         app.hits.borrow_mut().push(HitZone {
             x: r.x,
             y: r.y,
@@ -204,10 +259,42 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     draw_footer(f, app, layout.footer);
+    if app.tab == Tab::Chat
+        && app.anim.motion == super::fx::Motion::Full
+        && super::slime::pixel_ok(app.theme())
+    {
+        if let Some((t, true)) = app.anim.done {
+            super::fx::burst(
+                f.buffer_mut(),
+                layout.content,
+                wall.saturating_sub(t),
+                app.theme(),
+            );
+        }
+    }
     if let Some(m) = &app.modal {
         // Keep context visible, but give the active dialog visual priority.
+        let k = app
+            .anim
+            .modal
+            .filter(|_| app.anim.motion != super::fx::Motion::Off)
+            .map_or(1.0, |t| {
+                (wall.saturating_sub(t) as f32 / super::fx::FADE_MS as f32).min(1.0)
+            });
+        let (muted, back) = (app.theme().muted, app.theme().background);
         for cell in &mut f.buffer_mut().content {
-            cell.set_fg(app.theme().muted);
+            if cell.symbol() == "▀" {
+                // pixel art: sink both halves into the backdrop instead of flattening
+                cell.set_fg(super::fx::fade(cell.fg, back, 0.6 * k));
+                cell.set_bg(super::fx::fade(cell.bg, back, 0.6 * k));
+                continue;
+            }
+            let fg = if k >= 1.0 {
+                muted
+            } else {
+                super::fx::fade(cell.fg, muted, k)
+            };
+            cell.set_fg(fg);
         }
         draw_modal(f, app, m, area);
     }
@@ -280,30 +367,267 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// Home hero tiers, largest first: (hero rows, wordmark rows, title line in
+/// the text block, compact text). Heights already include the text block.
+const HOME_TIERS: [(usize, usize, bool, bool); 7] = [
+    (16, 7, false, false),
+    (12, 6, false, false),
+    (16, 0, true, false),
+    (12, 0, true, false),
+    (12, 0, false, true),
+    (9, 0, false, true),
+    (6, 0, false, true),
+];
+
+fn home_text(
+    app: &App,
+    mood: super::slime::Mood,
+    title: bool,
+    compact: bool,
+    ms: u64,
+) -> Vec<Line<'static>> {
+    use super::slime::Mood;
+    let th = app.theme();
+    let tagline = match mood {
+        Mood::Oops => "Oops, that one got squished.",
+        Mood::Happy => "Blob-tastic! Anything else?",
+        Mood::Sleep => "zzz… poke me to wake up",
+        _ => "your squishy coding buddy",
+    };
+    let key = Style::default().fg(th.text).bg(th.selection);
+    let chips = Line::from(vec![
+        Span::styled(" Enter ", key),
+        Span::styled(" send   ", Style::default().fg(th.muted)),
+        Span::styled(" ^P ", key),
+        Span::styled(" commands   ", Style::default().fg(th.muted)),
+        Span::styled(" ^N ", key),
+        Span::styled(" newline", Style::default().fg(th.muted)),
+    ]);
+    let question = Line::from(Span::styled(
+        "What are we building?",
+        Style::default().fg(th.text),
+    ));
+    let brand = Style::default().add_modifier(Modifier::BOLD);
+    if compact {
+        return vec![
+            Line::from(vec![
+                Span::styled("S U I", brand.fg(th.accent)),
+                Span::styled(format!(" · {tagline}"), Style::default().fg(th.muted)),
+            ]),
+            question,
+            chips,
+        ];
+    }
+    let mut out = Vec::new();
+    if title {
+        out.push(Line::from(super::fx::gradient(
+            "S U I", th.accent, th.glow, ms,
+        )));
+    }
+    out.push(Line::from(Span::styled(
+        tagline,
+        Style::default().fg(th.muted),
+    )));
+    out.extend([Line::from(""), question, Line::from(""), chips]);
+    out
+}
+
+fn scene_for(app: &App, mood: super::slime::Mood, boot: Option<u64>) -> super::hero::Scene {
+    let (wall, ms) = (super::slime::now_ms(), super::slime::clock(app));
+    let live = app.anim.motion != super::fx::Motion::Off;
+    super::hero::Scene {
+        mood,
+        ms,
+        boot,
+        tap: app
+            .anim
+            .since(app.anim.tap, wall)
+            .filter(|&t| live && t < 600),
+        poke: app
+            .anim
+            .since(app.anim.poke, wall)
+            .filter(|&t| live && t < 1500),
+        gaze: gaze(app, ms),
+    }
+}
+
+/// A small slime bottom-right of `at` (pokeable). No-op without pixel support.
+fn draw_pet(f: &mut Frame, app: &App, at: Rect, mood: super::slime::Mood) -> Option<Rect> {
+    let th = app.theme();
+    let bg = super::gfx::rgb(th.background).filter(|_| super::slime::pixel_ok(th))?;
+    let cols = super::hero::cols_for(at.height as usize) as u16;
+    if at.width < cols || at.height < 4 {
+        return None;
+    }
+    let rect = Rect::new(at.right() - cols, at.y, cols, at.height);
+    super::hero::render(at.height as usize, &scene_for(app, mood, None), bg).blit(
+        f.buffer_mut(),
+        rect,
+        bg,
+        false,
+    );
+    app.hits.borrow_mut().push(HitZone {
+        x: rect.x,
+        y: rect.y,
+        w: rect.width,
+        h: rect.height,
+        hit: Hit::Mascot,
+    });
+    Some(rect)
+}
+
+/// Empty panels get a napping slime instead of a bare line of text.
+fn nap(f: &mut Frame, app: &App, panel_area: Rect) {
+    if panel_area.width >= 40 && panel_area.height >= 12 {
+        let at = Rect::new(
+            panel_area.x + 1,
+            panel_area.bottom().saturating_sub(8),
+            panel_area.width.saturating_sub(2),
+            6,
+        );
+        draw_pet(f, app, at, super::slime::Mood::Sleep);
+    }
+}
+
+fn gaze(app: &App, ms: u64) -> (f32, f32) {
+    let t = ms as f32 / 1000.0;
+    let typed = app.input.text().chars().count();
+    // quarter steps: pupils hop between positions instead of crawling, so
+    // idle eyes repaint a few times a second, not every frame
+    let q = |v: f32| (v * 4.0).round() / 4.0;
+    if typed > 0 {
+        // read along the draft: pupils drift right as the line grows
+        (q(((typed % 40) as f32 / 40.0) * 1.6 - 0.8), 0.75)
+    } else {
+        (
+            q((t * 0.8).sin() * 0.55),
+            q(0.25 + 0.35 * (t * 0.37 + 2.0).sin()),
+        )
+    }
+}
+
+fn draw_home(f: &mut Frame, app: &App, a: Rect) {
+    use super::gfx::{rgb, smooth};
+    let th = app.theme();
+    let (wall, ms) = (super::slime::now_ms(), super::slime::clock(app));
+    let mood = super::slime::mood(app);
+    let live = app.anim.motion != super::fx::Motion::Off;
+    let boot = app.anim.boot(wall);
+    let fade = boot.map_or(1.0, |b| smooth(0.9, 1.6, b as f32 / 1000.0));
+    let bg = rgb(th.background);
+    let pixel = bg.filter(|_| super::slime::pixel_ok(th));
+
+    let Some(bgc) = pixel else {
+        // Terminal theme / NO_COLOR: the text mascot, no pixel art.
+        let big = a.height >= 15 && a.width >= 30;
+        let mut lines: Vec<Line> = Vec::new();
+        if big {
+            lines.push(super::slime::sparkles(th, 30, ms));
+            lines.extend(super::slime::mascot(th, mood, ms));
+            lines.push(Line::from(""));
+        }
+        lines.extend(home_text(app, mood, true, a.height < 10, ms));
+        let r = centered(60, lines.len() as u16, a);
+        f.render_widget(
+            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            r,
+        );
+        return;
+    };
+
+    let plan = HOME_TIERS.iter().find(|&&(hero, word, title, compact)| {
+        let text = if compact {
+            3
+        } else if title {
+            6
+        } else {
+            5
+        };
+        let total = hero + if word > 0 { word + 1 } else { 0 } + 1 + text - 1;
+        total <= a.height as usize
+            && super::hero::cols_for(hero) <= a.width as usize
+            && (word == 0 || super::hero::word_cols(word) <= a.width as usize)
+    });
+    let (hero_rows, word_rows, title, compact) = plan.copied().unwrap_or((0, 0, true, true));
+    let text = home_text(app, mood, title, compact, ms);
+    let total = hero_rows + if word_rows > 0 { word_rows + 1 } else { 0 } + text.len();
+    let mut y = a.y + a.height.saturating_sub(total as u16) / 2;
+    let centered_x = |cols: u16| a.x + (a.width - cols) / 2;
+    let hero_rect = (hero_rows > 0).then(|| {
+        let cols = super::hero::cols_for(hero_rows) as u16;
+        let r = Rect::new(centered_x(cols), y, cols, hero_rows as u16);
+        y += hero_rows as u16;
+        r
+    });
+    let word_rect = (word_rows > 0).then(|| {
+        let cols = super::hero::word_cols(word_rows) as u16;
+        let r = Rect::new(centered_x(cols), y, cols, word_rows as u16);
+        y += word_rows as u16 + 1;
+        r
+    });
+    let h = (text.len() as u16).min(a.bottom().saturating_sub(y));
+    let text_rect = Rect::new(a.x, y, a.width, h);
+
+    if live && app.anim.motion == super::fx::Motion::Full {
+        // ambient bubbles rise behind the slime but never behind words
+        let mut bubbles = super::hero::bubbles(
+            a.width as usize,
+            a.height as usize,
+            ms,
+            [70.0, 140.0, 255.0],
+        );
+        let words = Rect::new(centered_x(a.width.min(64)), text_rect.y, a.width.min(64), h);
+        let word_clear = word_rect.map(|r| Rect::new(r.x, r.y, r.width, r.height + 1));
+        for r in [Some(words), word_clear].into_iter().flatten() {
+            bubbles.clear(Rect::new(
+                r.x.saturating_sub(a.x),
+                r.y.saturating_sub(a.y),
+                r.width,
+                r.height,
+            ));
+        }
+        bubbles.blit(f.buffer_mut(), a, bgc, false);
+    }
+    if let Some(rect) = hero_rect {
+        let scene = scene_for(app, mood, boot);
+        super::hero::render(hero_rows, &scene, bgc).blit(f.buffer_mut(), rect, bgc, false);
+        app.hits.borrow_mut().push(HitZone {
+            x: rect.x,
+            y: rect.y,
+            w: rect.width,
+            h: rect.height,
+            hit: Hit::Mascot,
+        });
+    }
+    if let Some(rect) = word_rect {
+        let reveal = boot.map_or(1.0, |b| smooth(0.75, 1.45, b as f32 / 1000.0));
+        super::hero::wordmark(word_rows, reveal, ms, mood, bgc).blit(
+            f.buffer_mut(),
+            rect,
+            bgc,
+            false,
+        );
+    }
+    f.render_widget(
+        Paragraph::new(text).alignment(ratatui::layout::Alignment::Center),
+        text_rect,
+    );
+    if fade < 1.0 {
+        let screen = f.area();
+        super::fx::fade_in(f.buffer_mut(), text_rect, screen, th, fade);
+    }
+}
+
 fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
     let (inner_w, inner_h) = (a.width as usize, a.height as usize);
     app.view_w.set(inner_w);
     app.view_h.set(inner_h);
     if app.groups.len() == 1 && app.groups[0].items.is_empty() && !app.running {
-        let r = centered(60, 8, a);
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled("S U I", acc(app).add_modifier(Modifier::BOLD))),
-                Line::from(""),
-                Line::from("What are we building?"),
-                Line::from(""),
-                Line::from(Span::styled("Type a task below. Enter sends it.", dim(app))),
-                Line::from(Span::styled(
-                    "Ctrl+P opens commands, views, and settings.",
-                    dim(app),
-                )),
-            ])
-            .alignment(ratatui::layout::Alignment::Center),
-            r,
-        );
+        draw_home(f, app, a);
         return;
     }
     let rows = super::transcript::rows(app, inner_w);
+    let total = rows.len();
     let top = rows
         .len()
         .saturating_sub(inner_h)
@@ -354,6 +678,44 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
         }
     }
     f.render_widget(Paragraph::new(view), a);
+    companion(f, app, a, total);
+}
+
+/// While the transcript is still short, a small slime keeps you company in the
+/// empty space below it: thinking, asking, cheering or fretting. It only ever
+/// uses rows the transcript does not occupy, and never hides text.
+fn companion(f: &mut Frame, app: &App, a: Rect, used: usize) {
+    use super::slime::Mood;
+    let mood = super::slime::mood(app);
+    let show = app.running || matches!(mood, Mood::Happy | Mood::Oops);
+    if !show || app.scroll > 0 || a.width < 44 || (a.height as usize) < used + 7 {
+        return;
+    }
+    let rows = if a.height as usize >= used + 10 { 8 } else { 6 };
+    let at = Rect::new(a.x, a.bottom() - rows, a.width, rows);
+    let Some(pet) = draw_pet(f, app, at, mood) else {
+        return;
+    };
+    let (label, alive) = match mood {
+        Mood::Ask => ("waiting for your OK", true),
+        Mood::Happy => ("all done!", false),
+        Mood::Oops => ("something went wrong", false),
+        _ => (super::slime::working_phrase(super::slime::clock(app)), true),
+    };
+    let width = pet.x.saturating_sub(a.x + 2);
+    if width < 8 {
+        return;
+    }
+    let ms = super::slime::clock(app);
+    let spans = if alive && app.anim.motion != super::fx::Motion::Off {
+        super::fx::shimmer(label, app.theme().muted, app.theme().glow, ms)
+    } else {
+        vec![Span::styled(label, dim(app))]
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(ratatui::layout::Alignment::Right),
+        Rect::new(a.x, pet.y + pet.height / 2 - 1, width, 1),
+    );
 }
 
 // Secondary views keep a bounded projection, with explicit truncation and
@@ -434,6 +796,9 @@ fn draw_tasks(f: &mut Frame, app: &App, a: Rect) {
         panel_text(&mut rows, &detail, width, dim(app));
     }
     draw_scrolled_panel(f, app, a, "tasks", rows);
+    if app.tasks.is_empty() {
+        nap(f, app, a);
+    }
 }
 
 fn draw_changes(f: &mut Frame, app: &App, a: Rect) {
@@ -467,6 +832,9 @@ fn draw_changes(f: &mut Frame, app: &App, a: Rect) {
         panel_text(&mut rows, &app.diff_text, width, Style::default());
     }
     draw_scrolled_panel(f, app, a, "changes", rows);
+    if app.changes.is_empty() && app.audit.is_none() && app.diff_text.is_empty() {
+        nap(f, app, a);
+    }
 }
 
 fn draw_usage(f: &mut Frame, app: &App, a: Rect) {
@@ -508,6 +876,9 @@ fn draw_usage(f: &mut Frame, app: &App, a: Rect) {
         dim(app),
     );
     draw_scrolled_panel(f, app, a, "usage", rows);
+    if app.usage.is_empty() {
+        nap(f, app, a);
+    }
 }
 
 fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
@@ -665,6 +1036,10 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                 spans.push(Span::raw(super::theme::Theme::name(
                     app.ui.theme.as_deref(),
                 )));
+            }
+            SettingsRow::Motion => {
+                label = "motion".into();
+                spans.push(Span::raw(app.anim.motion.name()));
             }
             SettingsRow::Reasoning => {
                 label = "reasoning".into();
@@ -1102,7 +1477,8 @@ Settings → mouse turns capture on/off
 
 Commands
 /mission /solo /export /help
-Settings → theme: dark or terminal
+Settings → theme: slime, dark or terminal
+Click the slime · Settings → motion
 
 Approvals remain per action. Auto-approve
 never enables web access or external agents.";

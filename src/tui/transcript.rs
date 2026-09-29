@@ -488,24 +488,21 @@ fn emit_group(
         }) = g.items.last()
         {
             let owner = (gid, Some(g.items.last().unwrap().id()));
-            const SPIN: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let frame = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                / 100) as usize;
-            push(
-                out,
-                owner,
-                vec![Span::styled(
-                    format!(
-                        "  {}{} {agent} working…",
-                        mark(owner),
-                        SPIN[frame % SPIN.len()]
-                    ),
-                    sel_style(owner).unwrap_or_else(|| dim(app)),
-                )],
+            let ms = super::slime::clock(app);
+            let text = format!(
+                "  {}{} {agent} working… {}",
+                mark(owner),
+                super::slime::spinner(ms),
+                super::slime::working_phrase(ms)
             );
+            let spans = match sel_style(owner) {
+                Some(style) => vec![Span::styled(text, style)],
+                None if app.anim.motion != super::fx::Motion::Off => {
+                    super::fx::shimmer(&text, app.theme().muted, app.theme().glow, ms)
+                }
+                None => vec![Span::styled(text, dim(app))],
+            };
+            push(out, owner, spans);
         }
     }
 }
@@ -564,7 +561,7 @@ fn emit_item(
                             .add_modifier(Modifier::BOLD)),
                     ),
                     Span::styled(
-                        format!("  {at}{}", if *done { "" } else { "  ⠋" }),
+                        format!("  {at}{}", if *done { "" } else { "  ◜" }),
                         dim(app),
                     ),
                 ],
@@ -642,7 +639,7 @@ fn emit_item(
                     text.chars().count()
                 )
             } else {
-                format!("{mark}  ⠋ reasoning — {agent}")
+                format!("{mark}  ◜ reasoning — {agent}")
             };
             push(
                 out,
@@ -702,7 +699,7 @@ fn emit_item(
             // injection into the transcript).
             let head = clean(summary.lines().next().unwrap_or(""));
             let (glyph, label, gsty) = match status {
-                None => ("⠋", "…", Style::default().fg(app.theme().mission)),
+                None => ("◜", "…", Style::default().fg(app.theme().mission)),
                 Some(ToolStatus::Ok) => ("✓", "ok", Style::default().fg(app.theme().muted)),
                 Some(ToolStatus::Denied) => {
                     ("⊘", "denied", Style::default().fg(app.theme().warning))

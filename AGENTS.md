@@ -47,3 +47,8 @@ Integration binaries: `sui`, `sui-mission`, `sui-certify`, `sui-acp-bridge`.
 - Bounded output everywhere — truncate, never drop silently.
 - New provider/agent kinds thread through `ProfileCfg`/`Backend`,
   never as special cases in the agent loop.
+- TUI motion (`src/tui/{gfx,hero,fx,slime}.rs`) is presentation only:
+  `draw` stays a pure function of `(App, clock)` (pin it with
+  `slime::freeze_clock` in tests), essential text never depends on
+  animation state, and backgrounds stay constant along a row — the PTY
+  tests grep the byte stream, so per-cell gradients split words.

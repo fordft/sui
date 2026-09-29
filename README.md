@@ -146,6 +146,11 @@ for bounded previews or open its details. A running timer and explicit
 approval state show what is happening; a finished run displays its runtime
 outcome without implying verification.
 
+![Sui's home screen in the default slime theme](docs/images/sui-tui-slime.png)
+
+*Rendered from the TUI's own frame buffer at 150×46 with the animation clock
+pinned — in a terminal the slime hops, blinks, and follows your typing.*
+
 ![Sui's conversation view in the dark theme](docs/images/sui-tui-dark.png)
 
 *Terminal capture using a local mock provider.* More views:
@@ -167,12 +172,30 @@ is available. Usage keeps each agent/model pair separate: `—` means a
 measurement is missing, `0` means a reported zero, and `+ (partial)` marks
 totals with missing measurements.
 
-**Appearance:** Settings → theme switches between `dark` (default) and
-`terminal` (your terminal's foreground, background, and ANSI colors).
-The preference persists as `[ui].theme`. No special font is required;
-`NO_COLOR` is respected. Solo starts with the sidebar hidden; Mission
-shows agents and run status at widths of 110 columns or more. `Ctrl+B`
-toggles it; Tasks remains accessible on narrow screens.
+**Appearance:** Settings → theme switches between `slime` (default: black and
+deep blue with an azure gel slime), `dark`, and `terminal` (your terminal's
+foreground, background, and ANSI colors). The preference persists as
+`[ui].theme`. No special font is required; `NO_COLOR` is respected. Solo
+starts with the sidebar hidden; Mission shows agents and run status at widths
+of 110 columns or more. `Ctrl+B` toggles it; Tasks remains accessible on
+narrow screens.
+
+**The slime and motion:** the home screen is a small animated world. A
+pixel-art slime blinks, hops, follows your typing with its eyes, naps when
+you leave it alone, and squishes when you click it; a short splash plays at
+launch (any key skips it). While a task runs, the composer border flows,
+status text shimmers, and a companion slime keeps you company under short
+transcripts; a successful run ends with a burst of bubbles. Empty Tasks,
+Changes, and Usage views get a napping slime. Everything here is
+presentation: it never reaches model requests, journals, or exports.
+
+- Pixel art needs a truecolor terminal (`COLORTERM=truecolor`). With
+  `NO_COLOR`, the `terminal` theme, or a terminal that announces less, Sui
+  draws a text slime instead.
+- Settings → motion (or *Cycle motion* in the palette) chooses `full`,
+  `calm` (~8 fps, no splash, bubbles, or confetti — the default over SSH),
+  or `off` (frames are static). It persists as `[ui].motion`; `SUI_MOTION`
+  overrides it for one launch.
 
 **Input and keys:** Enter sends · `Ctrl+N` inserts a newline · `↑` recalls
 history from an empty composer · Tab focuses activity · `v` opens selected

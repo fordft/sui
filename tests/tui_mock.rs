@@ -192,6 +192,7 @@ fn app_with_mock(repo: &Path, port: u16) -> App {
     profiles.insert("mock-worker".into(), pc("work-model"));
     let ui = UiSettings {
         theme: None,
+        motion: None,
         workspace: Some(repo.to_string_lossy().into()),
         mode: Some("solo".into()),
         solo_profile: Some("mock-worker".into()),
@@ -2617,15 +2618,15 @@ fn redesign_theme_config_roundtrip_and_fallback() {
         assert_eq!(decoded.theme.as_deref(), value);
         assert_eq!(
             Theme::name(decoded.theme.as_deref()),
-            if value == Some("terminal") {
-                "terminal"
-            } else {
-                "dark"
+            match value {
+                Some("terminal") => "terminal",
+                Some("dark") => "dark",
+                _ => "slime",
             }
         );
     }
     let legacy: UiSettings = toml::from_str("mode = 'mission'\nmouse = false").unwrap();
-    assert_eq!(Theme::name(legacy.theme.as_deref()), "dark");
+    assert_eq!(Theme::name(legacy.theme.as_deref()), "slime");
     assert_eq!(legacy.mouse, Some(false));
 }
 

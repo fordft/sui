@@ -305,15 +305,37 @@ prefixes are unchanged).
   worker count, acceptance commands). Sidebar lists agents + run state;
   is hidden by default in Solo and shown in Mission at ≥110 columns
   (30-column allocation with a one-column gutter); Ctrl+B toggles it.
-- **Presentation**: dark semantic palette by default; `[ui].theme =
+- **Presentation**: slime (black-navy and deep-blue, azure accent) semantic palette by default; `[ui].theme =
+  "dark"` selects the previous neutral palette; `[ui].theme =
   "terminal"` uses the terminal's foreground for essential text and ANSI
   borders; selection also uses attributes that survive `NO_COLOR`. Missing
-  or unknown theme names resolve to dark. Transcript heading/fence/quote
+  or unknown theme names resolve to slime. Transcript heading/fence/quote
   styling preserves literal text and row ownership; capped previews expose
   a truncation marker and retain captured details. Dialogs subdue the
   background, and palette/permission heights follow their content.
   Preferences use the existing
   `UiSettings` persistence path and never affect model requests.
+- **Motion and pixel art**: `gfx` is a small software rasterizer — an RGBA
+  canvas at two pixels per terminal row, folded into cells through `▀` half
+  blocks (each half composites over what is already in the cell; `blank_only`
+  refuses cells holding text). `hero` draws the slime (signed-distance body,
+  gel shading, face, mood props), the glossy wordmark, and ambient bubbles;
+  `fx` holds `Anim`, the motion policy, and screen effects (gel backdrop,
+  flowing border, shimmer, confetti, dialog fade); `slime` holds moods,
+  copy, and the clock. Invariants: (1) a frame is a pure function of
+  `(App, clock)` — `draw` only reads `App.anim`, whose timestamps are
+  advanced by `fx::observe` from the event loop, and `slime::freeze_clock`
+  pins the clock for tests and screenshots; (2) essential text is never
+  gated on animation state (the splash fades words in, it never withholds
+  them); (3) pixel art requires RGB colours, a truecolor terminal, and no
+  `NO_COLOR` — otherwise the text mascot is drawn, and `motion = "off"`
+  renders static frames; (4) effects that overlay the transcript draw only
+  into blank cells; (5) bytes on the wire are budgeted: backdrop rows share
+  one background (words stay contiguous in the byte stream), pixel colours
+  snap to coarse steps against their backdrop, and resting motion advances
+  in a few discrete poses — an idle screen repaints a handful of cells per
+  frame rather than the whole hero. Full motion draws at 20 fps ambient and
+  30 fps while something reacts; `calm` draws at ~8 fps.
 - **Layout**: `tui::layout::regions` owns header, content, sidebar,
   composer, metadata, and footer geometry. Drawing and resize/input
   anchoring share it. Chat has an unboxed transcript; the composer grows

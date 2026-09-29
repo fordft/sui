@@ -7,7 +7,11 @@
 pub mod app;
 pub mod commands;
 pub mod draw;
+pub mod fx;
+pub mod gfx;
+pub mod hero;
 pub mod layout;
+pub mod slime;
 pub mod text;
 pub mod theme;
 pub mod transcript;
@@ -294,12 +298,17 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
         // never wait for the next input event
         let tick = if dirty {
             Duration::from_millis(33).saturating_sub(last_draw.elapsed())
+        } else if let Some(ms) = fx::frame_ms(&app, slime::now_ms()) {
+            Duration::from_millis(ms)
         } else {
             Duration::from_millis(200)
         };
         tokio::select! {
             biased;
             ev = keys.next() => {
+                if matches!(ev, Some(Ok(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))) {
+                    app.anim.touch(slime::now_ms());
+                }
                 if let Some(Ok(Event::Key(k))) = ev {
                     // raw mode: Ctrl+C arrives as a key event. App::key owns
                     // the Press/Release policy — permission shortcuts honor
@@ -357,9 +366,11 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
             }
             _ = tokio::time::sleep(tick) => {
                 // heartbeat / pending-frame deadline
-                if app.running || dirty { dirty = true; }
+                if fx::frame_ms(&app, slime::now_ms()).is_some() || dirty { dirty = true; }
             }
         }
+
+        fx::observe(&mut app, slime::now_ms());
 
         // lazy diff load when the Changes tab becomes visible
         if app.tab == Tab::Changes && app.diff_stale {

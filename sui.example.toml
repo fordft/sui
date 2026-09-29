@@ -116,7 +116,8 @@ bash_timeout_max_ms = 600000
 # The TUI persists these under [ui]; you can also set them by hand.
 #
 # [ui]
-# theme = "dark"                     # "dark" | "terminal"
+# theme = "slime"                    # "slime" (default) | "dark" | "terminal"
+# motion = "full"                    # "full" | "calm" (~8 fps) | "off"; SUI_MOTION overrides
 # workspace = "~/workspaces"         # default workspace dir
 # mode = "solo"                      # "solo" | "mission"
 # solo_profile = "cheap"

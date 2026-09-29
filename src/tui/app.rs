@@ -72,6 +72,8 @@ pub enum Hit {
     ViewScroll,
     /// The chat input box — clicking focuses it (exits transcript nav).
     Input,
+    /// The home-screen slime — clicking pokes it.
+    Mascot,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -845,6 +847,8 @@ pub struct App {
     /// two consecutive prompts. Release-only transports (no Press ever
     /// seen) still work.
     held: std::collections::HashSet<KeyCode>,
+    /// Motion policy and one-shot animation timestamps — presentation only.
+    pub anim: super::fx::Anim,
 }
 
 impl App {
@@ -863,6 +867,7 @@ impl App {
         profiles: BTreeMap<String, ProfileCfg>,
         ui: UiSettings,
     ) -> Self {
+        let motion_pref = ui.motion.clone();
         let no_profiles = profiles.is_empty();
         // authoritative probe: NoEntry on reads proves nothing — a write
         // must round-trip before we call the keyring usable (headless
@@ -1061,6 +1066,7 @@ impl App {
             history: Vec::new(),
             hist_i: None,
             held: std::collections::HashSet::new(),
+            anim: super::fx::Anim::new(motion_pref.as_deref()),
         };
         app.rebuild_web();
         app
@@ -1875,6 +1881,7 @@ impl App {
             Some(Hit::Input) if self.modal.is_none() => {
                 self.nav = false; // clicking the input focuses it
             }
+            Some(Hit::Mascot) if self.modal.is_none() => self.anim.poke(super::slime::now_ms()),
             _ => {
                 // click outside a dismissible modal closes it; a click
                 // inside the transcript pane focuses it for keyboard nav
@@ -2571,13 +2578,12 @@ impl App {
             Command::Sidebar => self.sidebar = !self.sidebar,
             Command::Reasoning => self.cycle_reasoning(),
             Command::Theme => {
-                self.ui.theme = Some(
-                    if super::theme::Theme::name(self.ui.theme.as_deref()) == "dark" {
-                        "terminal".into()
-                    } else {
-                        "dark".into()
-                    },
-                );
+                self.ui.theme = Some(super::theme::Theme::next(self.ui.theme.as_deref()).into());
+                self.effects.push(Effect::SaveUi);
+            }
+            Command::Motion => {
+                self.anim.motion = self.anim.motion.next();
+                self.ui.motion = Some(self.anim.motion.name().into());
                 self.effects.push(Effect::SaveUi);
             }
             Command::Export => self.effects.push(Effect::ExportRun),
@@ -3201,6 +3207,7 @@ impl App {
             SettingsRow::Export,
             SettingsRow::Header("appearance"),
             SettingsRow::Theme,
+            SettingsRow::Motion,
             SettingsRow::Reasoning,
             SettingsRow::Mouse,
             SettingsRow::Header("web research"),
@@ -3302,6 +3309,7 @@ impl App {
                 self.effects.push(Effect::SaveUi);
             }
             Some(SettingsRow::Theme) => self.command(Command::Theme),
+            Some(SettingsRow::Motion) => self.command(Command::Motion),
             Some(SettingsRow::Reasoning) => self.cycle_reasoning(),
             Some(SettingsRow::Mouse) => {
                 self.mouse = !self.mouse;
@@ -3367,6 +3375,7 @@ pub enum SettingsRow {
     Workers,
     Reasoning,
     Theme,
+    Motion,
     Mouse,
     Auto,
     WebAccess,
@@ -3393,7 +3402,10 @@ impl SettingsRow {
             SettingsRow::Mode => "mission = orchestrator→workers→auditor · solo = single agent",
             SettingsRow::Export => "write a sanitized report of this run to exports/<run>/",
             SettingsRow::Workers => "parallel task slots in mission mode",
-            SettingsRow::Theme => "dark charcoal or your terminal’s native colors",
+            SettingsRow::Theme => "slime gel, dark charcoal, or your terminal’s native colors",
+            SettingsRow::Motion => {
+                "full animation, calm (low frame rate), or off — SUI_MOTION overrides"
+            }
             SettingsRow::Reasoning => "reasoning display — view-only, never sent to the model",
             SettingsRow::Mouse => "wheel scrolls · click expands · drag copies",
             SettingsRow::Auto => "skip permission prompts — session only, resets on restart",
