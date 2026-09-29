@@ -127,7 +127,7 @@ impl Journal {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl Journal {
     fn for_test(f: File) -> Self {
         Self {
