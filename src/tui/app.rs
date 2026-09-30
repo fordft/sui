@@ -406,13 +406,40 @@ impl ProvForm {
     }
 }
 
+pub struct PickerItem {
+    pub label: String,
+    pub value: String,
+}
+
+impl PickerItem {
+    fn plain(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            label: value.clone(),
+            value,
+        }
+    }
+}
+
 pub struct Picker {
     pub title: String,
-    pub items: Vec<String>,
+    pub items: Vec<PickerItem>,
     pub filter: Buf,
     pub sel: usize,
     pub target: PickTarget,
     pub loading: bool,
+    /// Identifies the catalog fetch belonging to this particular dialog.
+    pub catalog_request: Option<u64>,
+}
+
+impl Picker {
+    pub fn filtered(&self) -> Vec<&PickerItem> {
+        let filter = self.filter.text().to_lowercase();
+        self.items
+            .iter()
+            .filter(|item| filter.is_empty() || item.label.to_lowercase().contains(&filter))
+            .collect()
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -722,7 +749,7 @@ pub enum Effect {
     FetchModels {
         base_url: String,
         key: Option<String>,
-        target: PickTarget,
+        request: u64,
     },
     Probe {
         name: String,
@@ -1031,11 +1058,15 @@ impl App {
             modal: if no_profiles {
                 Some(Modal::Picker(Picker {
                     title: "add a provider".into(),
-                    items: ProvType::ALL.iter().map(|t| t.name().to_string()).collect(),
+                    items: ProvType::ALL
+                        .iter()
+                        .map(|t| PickerItem::plain(t.name()))
+                        .collect(),
                     filter: Buf::new(),
                     sel: 0,
                     target: PickTarget::NewProvider,
                     loading: false,
+                    catalog_request: None,
                 }))
             } else {
                 None
@@ -1573,17 +1604,39 @@ impl App {
                 grp.failed = !matches!(outcome.as_str(), "done" | "accepted");
                 grp.outcome = outcome.clone();
                 grp.dur_ms = grp.started.elapsed().as_millis();
+                // Keep the full outcome in state/export, but don't repeat
+                // an error already shown immediately above this summary.
+                let reported = grp.items.last().is_some_and(
+                    |item| matches!(item, Act::Note { text, err: true, .. } if text == &outcome),
+                );
+                let summary = if reported && outcome.starts_with("error:") {
+                    "error"
+                } else {
+                    outcome.as_str()
+                };
+                if grp.items.len() >= Self::ITEM_CAP {
+                    grp.items.remove(0);
+                }
                 grp.items.push(Act::Note {
                     id,
                     agent: None,
-                    text: format!("run finished: {outcome}"),
+                    text: format!("run finished: {summary}"),
                     err: grp.failed,
                     at: now_hm(),
                 });
             }
             UiEvent::Error { run, agent, msg } => {
-                let id = self.next_id();
                 let g = self.group_for(run);
+                let text = format!("error: {msg}");
+                // Agent and launcher both report request failures. Collapse
+                // only consecutive identical reports for the same agent/run.
+                if self.groups[g].items.last().is_some_and(|item| {
+                    matches!(item, Act::Note { agent: Some(a), text: t, err: true, .. }
+                        if a == &agent && t == &text)
+                }) {
+                    return;
+                }
+                let id = self.next_id();
                 let items = &mut self.groups[g].items;
                 if items.len() >= Self::ITEM_CAP {
                     items.remove(0);
@@ -1591,7 +1644,7 @@ impl App {
                 items.push(Act::Note {
                     id,
                     agent: Some(agent),
-                    text: format!("error: {msg}"),
+                    text,
                     err: true,
                     at: now_hm(),
                 });
@@ -2939,10 +2992,11 @@ impl App {
                 Field::Cancel => return None,
                 Field::Model => {
                     // catalog picker; filter text doubles as manual entry
+                    let request = self.next_id();
                     self.effects.push(Effect::FetchModels {
                         base_url: f.endpoint_url(),
                         key: f.effective_key(),
-                        target: PickTarget::ProvModel,
+                        request,
                     });
                     self.form_stash = Some(f);
                     return Some(Modal::Picker(Picker {
@@ -2953,6 +3007,7 @@ impl App {
                         sel: 0,
                         target: PickTarget::ProvModel,
                         loading: true,
+                        catalog_request: Some(request),
                     }));
                 }
                 _ => f.cycle(1), // selectors advance on Enter too
@@ -2991,7 +3046,7 @@ impl App {
             }
             KeyCode::Up => p.sel = p.sel.saturating_sub(1),
             KeyCode::Down => {
-                let n = self.filtered(&p).len();
+                let n = p.filtered().len();
                 if p.sel + 1 < n {
                     p.sel += 1;
                 }
@@ -3005,8 +3060,8 @@ impl App {
                 p.sel = 0;
             }
             KeyCode::Enter => {
-                let list = self.filtered(&p);
-                let choice = list.get(p.sel).cloned().or_else(|| {
+                let list = p.filtered();
+                let choice = list.get(p.sel).map(|item| item.value.clone()).or_else(|| {
                     let t = p.filter.text();
                     if t.is_empty() {
                         None
@@ -3021,15 +3076,6 @@ impl App {
             _ => {}
         }
         Some(Modal::Picker(p))
-    }
-
-    fn filtered(&self, p: &Picker) -> Vec<String> {
-        let f = p.filter.text().to_lowercase();
-        p.items
-            .iter()
-            .filter(|i| f.is_empty() || i.to_lowercase().contains(&f))
-            .cloned()
-            .collect()
     }
 
     fn pick(&mut self, target: PickTarget, choice: String) -> Option<Modal> {
@@ -3062,12 +3108,13 @@ impl App {
                 }
                 // profile chosen → fetch its models for a second pick
                 if let Some((base, key, _)) = self.resolve(&choice) {
+                    let request = self.next_id();
                     let prof = choice.clone();
                     self.set_role_profile(r, choice.clone());
                     self.effects.push(Effect::FetchModels {
                         base_url: base,
                         key,
-                        target: PickTarget::ModelForRole(prof.clone()),
+                        request,
                     });
                     return Some(Modal::Picker(Picker {
                         title: format!("model for {} (Enter on filter text = manual)", r.name()),
@@ -3076,6 +3123,7 @@ impl App {
                         sel: 0,
                         target: PickTarget::ModelForRole(prof),
                         loading: true,
+                        catalog_request: Some(request),
                     }));
                 }
                 None
@@ -3137,8 +3185,17 @@ impl App {
     }
 
     /// Called by the loop when a model fetch resolves.
-    pub fn models_loaded(&mut self, models: Vec<crate::provider::ModelInfo>, err: Option<String>) {
+    pub fn models_loaded(
+        &mut self,
+        request: u64,
+        models: Vec<crate::provider::ModelInfo>,
+        err: Option<String>,
+    ) {
         if let Some(Modal::Picker(p)) = &mut self.modal {
+            if p.catalog_request != Some(request) {
+                return;
+            }
+            p.catalog_request = None;
             p.loading = false;
             match err {
                 Some(e) => {
@@ -3163,7 +3220,10 @@ impl App {
                                 }
                                 _ => String::new(),
                             };
-                            format!("{}{}{}{}", m.id, ctx, tools, price)
+                            PickerItem {
+                                label: format!("{}{}{}{}", m.id, ctx, tools, price),
+                                value: m.id.clone(),
+                            }
                         })
                         .collect();
                     if p.items.is_empty() {
@@ -3260,11 +3320,15 @@ impl App {
             Some(SettingsRow::AddProfile) => {
                 self.modal = Some(Modal::Picker(Picker {
                     title: "add a provider".into(),
-                    items: ProvType::ALL.iter().map(|t| t.name().to_string()).collect(),
+                    items: ProvType::ALL
+                        .iter()
+                        .map(|t| PickerItem::plain(t.name()))
+                        .collect(),
                     filter: Buf::new(),
                     sel: 0,
                     target: PickTarget::NewProvider,
                     loading: false,
+                    catalog_request: None,
                 }));
             }
             Some(SettingsRow::EditProfile(name)) => {
@@ -3290,11 +3354,12 @@ impl App {
                 }
                 self.modal = Some(Modal::Picker(Picker {
                     title: format!("profile for {}", role.name()),
-                    items,
+                    items: items.into_iter().map(PickerItem::plain).collect(),
                     filter: Buf::new(),
                     sel: 0,
                     target: PickTarget::Role(role),
                     loading: false,
+                    catalog_request: None,
                 }));
             }
             Some(SettingsRow::Mode) => self.toggle_mode(),

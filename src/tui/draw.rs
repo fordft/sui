@@ -1655,20 +1655,12 @@ never enables web access or external agents.";
             if p.loading {
                 items.push(ListItem::new(Span::styled("loading…", dim(app))));
             }
-            let list: Vec<String> = p
-                .items
-                .iter()
-                .filter(|i| {
-                    let f = p.filter.text().to_lowercase();
-                    f.is_empty() || i.to_lowercase().contains(&f)
-                })
-                .cloned()
-                .collect();
+            let list = p.filtered();
             let visible = r.height.saturating_sub(3 + u16::from(p.loading)) as usize;
             let offset = p.sel.saturating_sub(visible.saturating_sub(1));
             for (i, it) in list.iter().enumerate().skip(offset).take(visible) {
                 items.push(ListItem::new(Line::from(Span::styled(
-                    it.clone(),
+                    it.label.clone(),
                     if i == p.sel {
                         app.theme().selected()
                     } else {

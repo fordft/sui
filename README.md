@@ -299,6 +299,14 @@ reports contain project code. No API calls needed.
 
 See `sui.example.toml` for the full annotated schema.
 
+If a provider rejects a model name containing picker details such as
+`ctx=272000`, `tools`, or `$2.00/$8.00per-M`, check the profile's `model`
+in the global config. Earlier builds could save the entire display label.
+Replace it with the exact model ID from that provider's catalog, then
+restart Sui. Context size, tool support, and pricing are display metadata;
+they are never part of the selected model ID. A corrected ID still needs
+to be available to your provider account.
+
 ## Update / uninstall
 
 **Update**: `brew upgrade sui-ai` or rerun the installer — config,

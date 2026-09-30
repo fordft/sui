@@ -525,7 +525,7 @@ fn tui_settings_roles_and_forms() {
 
     // pick "mock-ctrl" from the picker
     if let Some(Modal::Picker(p)) = &mut app.modal {
-        p.sel = p.items.iter().position(|i| i == "mock-ctrl").unwrap();
+        p.sel = p.items.iter().position(|i| i.value == "mock-ctrl").unwrap();
     }
     app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     // → second picker for model; type manual id and accept via filter

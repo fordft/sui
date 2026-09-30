@@ -46,7 +46,7 @@ use app::*;
 
 /// Internal replies from async effects back into the app.
 enum Ctl {
-    Models(Result<Vec<ModelInfo>, String>),
+    Models(u64, Result<Vec<ModelInfo>, String>),
     ProbeDone(String, Result<provider::Probe, String>),
     ProfileSaved,
     Diff(String),
@@ -345,9 +345,9 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
             c = ctl_rx.recv() => {
                 if let Some(c) = c {
                     match c {
-                        Ctl::Models(r) => match r {
-                            Ok(ms) => app.models_loaded(ms, None),
-                            Err(e) => app.models_loaded(vec![], Some(e)),
+                        Ctl::Models(request, r) => match r {
+                            Ok(ms) => app.models_loaded(request, ms, None),
+                            Err(e) => app.models_loaded(request, vec![], Some(e)),
                         },
                         Ctl::ProbeDone(n, r) => app.probe_done(&n, r),
                         Ctl::ProfileSaved => {
@@ -599,13 +599,17 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                         app.status = format!("save ui: {e:#}");
                     }
                 }
-                Effect::FetchModels { base_url, key, .. } => {
+                Effect::FetchModels {
+                    base_url,
+                    key,
+                    request,
+                } => {
                     let tx = ctl_tx.clone();
                     tokio::spawn(async move {
                         let r = provider::list_models(&base_url, key.as_deref())
                             .await
                             .map_err(|e| format!("{e:#}"));
-                        let _ = tx.send(Ctl::Models(r));
+                        let _ = tx.send(Ctl::Models(request, r));
                     });
                 }
                 Effect::Probe {
