@@ -152,6 +152,9 @@ bash_timeout_max_ms = 600000
 # Headless one-shot runs need approved=true in user config (EOF denies).
 
 # ── Persisted UI settings (GLOBAL config only — written by Settings → Save) ──
+# Recent sessions / Resume and cache inspection are built into the palette and
+# Usage view; no extra service or configuration is needed. Recovery uses the
+# current trusted profiles/permissions and refuses changed request headers.
 # The TUI persists these under [ui]; you can also set them by hand.
 #
 # [ui]

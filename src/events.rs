@@ -141,6 +141,8 @@ pub enum UiEvent {
         written: Option<u64>,
         output: Option<u64>,
         complete: bool,
+        /// Native request diagnostics, also recorded for requests with no usage.
+        request: Option<RequestDetails>,
     },
     /// A mutating tool needs a decision; reply goes on `reply`.
     /// `agent` identifies who is asking — a mission can have several
@@ -182,4 +184,32 @@ pub enum UiEvent {
         agent: String,
         msg: String,
     },
+}
+
+/// Local prefix diagnostics identify observed changes, not provider miss causes.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RequestDetails {
+    pub request_id: u64,
+    pub session_id: String,
+    pub epoch_id: String,
+    pub requested_model: String,
+    pub static_prefix_hash: String,
+    pub tool_schema_hash: String,
+    #[serde(default)]
+    pub guidance_hash: Option<String>,
+    #[serde(default)]
+    pub cache_key_fingerprint: Option<String>,
+    pub purpose: String,
+    #[serde(default)]
+    pub first_delta_ms: Option<u64>,
+}
+
+impl RequestDetails {
+    pub fn from_trace(trace: &Value) -> Option<Self> {
+        let mut details: Self = serde_json::from_value(trace.clone()).ok()?;
+        details.first_delta_ms = trace["timing"]["first_delta_ms"]
+            .as_u64()
+            .filter(|ms| *ms > 0);
+        Some(details)
+    }
 }

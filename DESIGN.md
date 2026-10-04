@@ -172,6 +172,23 @@ BELOW_MIN_PREFIX, UNKNOWN.
 
 ## Certification
 
+Native Solo/headless writers record a versioned resume header containing only
+identity, workspace/profile/model and hashes binding the wire adapter/options,
+system, schemas and project guidance. Credentials are excluded. Native turns
+have runtime-owned start/end boundaries; process-lifetime Unix locks prevent
+recovery of an active writer. Recovery validates closed turns and paired tool
+calls, verifies bounded opaque sidecars, and forks the evidence into a new
+private run. No historical tool is dispatched. Identity, request sequence and
+context epoch are restored; permissions are resolved from the current launch.
+Older journals without a wire signature, image-bearing histories and incomplete
+turns remain inspectable/exportable but cannot claim exact session recovery.
+
+TUI Usage counts every attempted native request, including absent usage and
+transport failure. Its cache ratio sums only valid, complete, provider-reported
+input/cache pairs and reports their request coverage. First observed requests
+per session/epoch are separated from subsequent requests. Local prefix/tool/
+model/guidance changes are diagnostics, never proof of TTL or routing misses.
+
 `sui-certify --profile <name> [--profile <name2>]` drives the production
 loop (real provider stream, real tools, real journal) against a generated
 fixture workspace: tool continuation, identical replay, changed tail,

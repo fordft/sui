@@ -51,6 +51,8 @@ enum Ctl {
     ProfileSaved,
     Diff(String),
     WebTest(Result<String, String>),
+    Sessions(u64, Result<Vec<crate::session::Summary>, String>),
+    Resumed(Result<Box<(crate::session::SavedSession, Profile, PathBuf)>, String>),
 }
 
 /// Mouse capture: clicks+drags (1000/1002) + SGR encoding (1006).
@@ -94,8 +96,8 @@ pub struct Solo {
     sig: String,                        // profile+model signature; change → respawn
 }
 impl Solo {
-    pub fn send(&self, run: u64, msg: String) {
-        let _ = self.tx.send((run, msg));
+    pub fn send(&self, run: u64, msg: String) -> bool {
+        self.tx.send((run, msg)).is_ok()
     }
 }
 
@@ -110,54 +112,100 @@ pub fn spawn_solo(
     session: Arc<std::sync::atomic::AtomicBool>,
     web: Option<Arc<crate::web::WebService>>,
 ) -> Solo {
+    let backup_sink = sink.clone();
+    match start_solo(
+        prof, workspace, jdir, sink, cancel, flag, session, web, None,
+    ) {
+        Ok(solo) => solo,
+        Err(e) => {
+            let _ = backup_sink.send(UiEvent::Error {
+                run: 0,
+                agent: "ui".into(),
+                msg: format!("session init: {e:#}"),
+            });
+            let (tx, _) = unbounded_channel();
+            Solo {
+                tx,
+                sig: String::new(),
+            }
+        }
+    }
+}
+
+fn solo_signature(prof: &Profile) -> String {
+    format!(
+        "{}:{}:{}",
+        prof.name,
+        Provider::from_profile(prof).resume_fingerprint(),
+        context::sha256_hex(prof.api_key.as_deref().unwrap_or("").as_bytes())
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_solo(
+    prof: Profile,
+    workspace: PathBuf,
+    jdir: PathBuf,
+    sink: Sink,
+    cancel: Arc<tokio::sync::Notify>,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    session: Arc<std::sync::atomic::AtomicBool>,
+    web: Option<Arc<crate::web::WebService>>,
+    saved: Option<&crate::session::SavedSession>,
+) -> Result<Solo> {
+    let lock = crate::session::SessionLock::acquire(&jdir)?;
     let (tx, mut rx) = unbounded_channel::<(u64, String)>();
-    let sig = format!("{}:{}:{}", prof.name, prof.base_url, prof.model);
-    let workspace_for_log = workspace.display().to_string();
+    let sig = solo_signature(&prof);
+    let workspace_for_log = workspace.canonicalize()?.display().to_string();
     let al = crate::config::agent_limits(&workspace);
+    let mut agent = Agent::new(
+        Provider::from_profile(&prof),
+        ToolContext {
+            workspace,
+            bash_timeout: Duration::from_millis(al.bash_timeout_ms),
+            bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
+            web,
+            canon_root: std::sync::OnceLock::new(),
+            ui: std::sync::OnceLock::new(),
+        },
+        Gate::new(false), // approvals via modal; session flag is live
+        Journal::open_named(&jdir, "solo")?,
+        Limits {
+            max_turns: al.max_turns,
+            context_budget: al.context_token_budget,
+            context_reserve: al.context_reserve_tokens,
+            compact_context: al.context_compaction,
+            request_timeout: Duration::from_millis(al.request_timeout_ms),
+        },
+        Identity {
+            session_id: saved
+                .as_ref()
+                .map(|s| s.header.session_id.clone())
+                .unwrap_or_else(|| format!("sui-{:032x}", rand::random::<u128>())),
+            agent_id: saved
+                .as_ref()
+                .map(|s| s.header.agent_id.clone())
+                .unwrap_or_else(|| "solo".into()),
+            role: "worker".into(),
+            base_url: prof.base_url.clone(),
+            model: prof.model.clone(),
+            cache_key_fingerprint: prof
+                .prompt_cache_key
+                .as_ref()
+                .map(|k| context::sha256_hex(k.as_bytes())),
+        },
+    );
+    agent.set_quiet(true);
+    agent.wire_ui(sink.clone(), cancel, flag.clone(), Some(session.clone()));
+    agent.set_run_id(0);
+    if let Some(saved) = saved {
+        agent.restore_session(saved)?;
+        agent.jlog("session_resumed", serde_json::json!({"source": saved.id}));
+    } else {
+        agent.record_session(Some(prof.name.clone()))?;
+    }
     tokio::spawn(async move {
-        let mut agent = Agent::new(
-            Provider::from_profile(&prof),
-            ToolContext {
-                workspace,
-                bash_timeout: Duration::from_millis(al.bash_timeout_ms),
-                bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
-                web,
-                canon_root: std::sync::OnceLock::new(),
-                ui: std::sync::OnceLock::new(),
-            },
-            Gate::new(false), // approvals via modal; session flag is live
-            match Journal::open_named(&jdir, "solo") {
-                Ok(j) => j,
-                Err(e) => {
-                    let _ = sink.send(UiEvent::RunDone {
-                        run: 0,
-                        outcome: format!("journal init: {e:#}"),
-                        accepted_sha: None,
-                    });
-                    return;
-                }
-            },
-            Limits {
-                max_turns: al.max_turns,
-                context_budget: al.context_token_budget,
-                context_reserve: al.context_reserve_tokens,
-                compact_context: al.context_compaction,
-                request_timeout: Duration::from_millis(al.request_timeout_ms),
-            },
-            Identity {
-                session_id: format!("tui-{}", std::process::id()),
-                agent_id: "solo".into(),
-                role: "worker".into(),
-                base_url: prof.base_url.clone(),
-                model: prof.model.clone(),
-                cache_key_fingerprint: prof
-                    .prompt_cache_key
-                    .as_ref()
-                    .map(|k| context::sha256_hex(k.as_bytes())),
-            },
-        );
-        agent.set_quiet(true);
-        agent.wire_ui(sink.clone(), cancel, flag.clone(), Some(session.clone()));
+        let _session_lock = lock;
         agent.jlog(
             crate::journal::ev::SESSION,
             serde_json::json!({
@@ -209,7 +257,7 @@ pub fn spawn_solo(
             }
         }
     });
-    Solo { tx, sig }
+    Ok(Solo { tx, sig })
 }
 
 pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
@@ -248,12 +296,20 @@ pub fn resolve_to_backend(app: &App, name: &str) -> Option<crate::backend::Backe
 }
 
 pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
+    run_with_resume(force_mission, yolo, None, None).await
+}
+
+pub async fn run_with_resume(
+    force_mission: bool,
+    yolo: bool,
+    resume: Option<String>,
+    workspace: Option<PathBuf>,
+) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!("sui tui needs a terminal");
     }
-    let workspace = config::load_ui()
-        .workspace
-        .map(PathBuf::from)
+    let workspace = workspace
+        .or_else(|| config::load_ui().workspace.map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from("."));
@@ -272,7 +328,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
     }));
 
     let mut term = Terminal::new(CrosstermBackend::new(stdout()))?;
-    let jdir = run_dir();
+    let mut jdir = run_dir();
     let mut app = App::new(workspace.clone());
     if app.mouse {
         let _ = out.write_all(MOUSE_ON.as_bytes());
@@ -285,6 +341,16 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
     }
     if yolo {
         app.auto.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(id) = resume {
+        if force_mission {
+            anyhow::bail!(
+                "Resume supports native Solo/headless sessions; start missions separately"
+            );
+        }
+        app.resume_pending = true;
+        app.status = "loading session…".into();
+        app.effects.push(Effect::ResumeSession { id });
     }
 
     let (ev_tx, mut ev_rx) = unbounded_channel::<UiEvent>();
@@ -363,6 +429,29 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                             app.profiles = config::profiles(None).unwrap_or_default();
                         }
                         Ctl::Diff(s) => app.diff_text = s,
+                        Ctl::Sessions(request, rows) => app.sessions_loaded(request, rows),
+                        Ctl::Resumed(result) => {
+                            app.resume_pending = false;
+                            match result {
+                                Ok(data) => {
+                                    let (saved, profile, dir) = *data;
+                                    if app.workspace != saved.header.workspace || resolve_to_profile(&app, &profile.name).as_ref().map(solo_signature) != Some(solo_signature(&profile)) {
+                                        app.status = "workspace or profile changed while loading; select the session again".into();
+                                        dirty = true;
+                                        continue;
+                                    }
+                                    match start_solo(profile.clone(), app.workspace.clone(), dir.clone(), ev_tx.clone(), app.cancel.clone(), app.stop_flag.clone(), app.auto.clone(), app.web.clone(), Some(&saved)) {
+                                        Ok(new_solo) => {
+                                            app.restore_saved(&saved, &profile.name, dir.clone());
+                                            solo = Some(new_solo);
+                                            jdir = dir;
+                                        }
+                                        Err(e) => app.status = format!("resume: {e:#}"),
+                                    }
+                                }
+                                Err(e) => app.status = format!("resume: {e}"),
+                            }
+                        }
                         Ctl::WebTest(r) => {
                             app.status = match r {
                                 Ok(s) => s,
@@ -414,104 +503,159 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
         for e in std::mem::take(&mut app.effects) {
             match e {
                 Effect::Quit => quit = true,
+                Effect::ListSessions { request } => {
+                    let tx = ctl_tx.clone();
+                    let workspace = app.workspace.clone();
+                    let exclude = app.run_dir.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::session::recent(
+                                &crate::session::runs_root(),
+                                &workspace,
+                                exclude.as_deref(),
+                            )
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r.map_err(|e| format!("{e:#}")));
+                        let _ = tx.send(Ctl::Sessions(request, result));
+                    });
+                }
+                Effect::ResumeSession { id } => {
+                    let workspace = app.workspace.clone();
+                    let profiles: Vec<_> = app
+                        .profiles
+                        .keys()
+                        .filter_map(|n| resolve_to_profile(&app, n))
+                        .collect();
+                    let tx = ctl_tx.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || -> Result<_> {
+                            let saved = crate::session::SavedSession::load(&crate::session::runs_root(), &id, &workspace)?;
+                            let mut matches = profiles.into_iter().filter(|p| saved.header.profile.as_ref().is_none_or(|name| name == &p.name)
+                                && saved.header.signature == crate::session::Signature::current(&Provider::from_profile(p), &workspace));
+                            let profile = matches.next().context("recorded profile, model, tools or project guidance changed; restore the configuration or start a new session")?;
+                            if matches.next().is_some() { anyhow::bail!("several profiles match; the recorded session needs a unique profile"); }
+                            let dir = crate::session::new_run_dir()?;
+                            saved.fork(&dir, "solo")?;
+                            Ok(Box::new((saved, profile, dir)))
+                        }).await.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| format!("{e:#}")));
+                        let _ = tx.send(Ctl::Resumed(result));
+                    });
+                }
                 Effect::Stop => {} // notify+flag already fired in app.stop()
-                Effect::SendTask { task, mode, run } => match mode {
-                    Mode::Solo => {
-                        let pname = app.role_profile(Role::Solo);
-                        let prof = pname.as_deref().and_then(|n| resolve_to_profile(&app, n));
-                        match prof {
-                            Some(p) => {
-                                let sig = format!("{}:{}:{}", p.name, p.base_url, p.model);
-                                if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
-                                    solo = Some(spawn_solo(
-                                        p,
-                                        workspace.clone(),
-                                        jdir.clone(),
-                                        ev_tx.clone(),
-                                        app.cancel.clone(),
-                                        app.stop_flag.clone(),
-                                        app.auto.clone(),
-                                        app.web.clone(),
-                                    ));
+                Effect::SendTask { task, mode, run } => {
+                    let workspace = app.workspace.clone();
+                    match mode {
+                        Mode::Solo => {
+                            let pname = app.role_profile(Role::Solo);
+                            let prof = pname.as_deref().and_then(|n| resolve_to_profile(&app, n));
+                            match prof {
+                                Some(p) => {
+                                    let sig = solo_signature(&p);
+                                    if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
+                                        if solo.is_some() {
+                                            jdir = run_dir();
+                                            app.run_dir = Some(jdir.clone());
+                                        }
+                                        solo = Some(spawn_solo(
+                                            p,
+                                            workspace.clone(),
+                                            jdir.clone(),
+                                            ev_tx.clone(),
+                                            app.cancel.clone(),
+                                            app.stop_flag.clone(),
+                                            app.auto.clone(),
+                                            app.web.clone(),
+                                        ));
+                                    }
+                                    if !solo.as_ref().unwrap().send(run, task) {
+                                        app.apply_event(UiEvent::RunDone {
+                                            run,
+                                            outcome: "error: session unavailable".into(),
+                                            accepted_sha: None,
+                                        });
+                                    }
                                 }
-                                solo.as_ref().unwrap().send(run, task);
-                            }
-                            None => {
-                                app.apply_event(UiEvent::Error {
-                                    run,
-                                    agent: "ui".into(),
-                                    msg: "no solo profile configured — Settings → roles".into(),
-                                });
-                                app.apply_event(UiEvent::RunDone {
-                                    run,
-                                    outcome: "error: no solo profile".into(),
-                                    accepted_sha: None,
-                                });
-                                app.running = false;
+                                None => {
+                                    app.apply_event(UiEvent::Error {
+                                        run,
+                                        agent: "ui".into(),
+                                        msg: "no solo profile configured — Settings → roles".into(),
+                                    });
+                                    app.apply_event(UiEvent::RunDone {
+                                        run,
+                                        outcome: "error: no solo profile".into(),
+                                        accepted_sha: None,
+                                    });
+                                    app.running = false;
+                                }
                             }
                         }
-                    }
-                    Mode::Mission => {
-                        let control = app
-                            .role_profile(Role::Orchestrator)
-                            .and_then(|n| resolve_to_backend(&app, &n));
-                        let worker = app
-                            .role_profile(Role::Worker)
-                            .and_then(|n| resolve_to_backend(&app, &n));
-                        let auditor = app
-                            .role_profile(Role::Auditor)
-                            .and_then(|n| resolve_to_backend(&app, &n));
-                        match (control, worker) {
-                            (Some(control), Some(worker)) => {
-                                let al = config::agent_limits(&workspace);
-                                let cfg = mission::MissionCfg {
-                                    repo: workspace.clone(),
-                                    run_dir: jdir.clone(),
-                                    control,
-                                    worker,
-                                    auditor,
-                                    objective: task,
-                                    max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
-                                    // Unique per mission — a constant
-                                    // session would reuse branch names and
-                                    // `worktree add`'s `branch -D` would
-                                    // force-delete the PREVIOUS mission's
-                                    // accepted integration branch.
-                                    session: format!("tui-{}-{}", std::process::id(), run),
-                                    keep_worktrees: false, // accepted branch survives cleanup
-                                    request_timeout: Duration::from_millis(al.request_timeout_ms),
-                                    task_timeout: Duration::from_secs(900),
-                                    context_budget: al.context_token_budget,
-                                    context_reserve: al.context_reserve_tokens,
-                                    control_max_turns: al.max_turns,
-                                    worker_max_turns: al.max_turns,
-                                    events: Some(ev_tx.clone()),
-                                    cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
-                                    session_approve: Some(app.auto.clone()),
-                                    web: app.web.clone(),
-                                    run,
-                                };
-                                tokio::spawn(async move {
-                                    let _ = mission::run(cfg).await;
-                                });
-                            }
-                            _ => {
-                                app.apply_event(UiEvent::Error {
+                        Mode::Mission => {
+                            let control = app
+                                .role_profile(Role::Orchestrator)
+                                .and_then(|n| resolve_to_backend(&app, &n));
+                            let worker = app
+                                .role_profile(Role::Worker)
+                                .and_then(|n| resolve_to_backend(&app, &n));
+                            let auditor = app
+                                .role_profile(Role::Auditor)
+                                .and_then(|n| resolve_to_backend(&app, &n));
+                            match (control, worker) {
+                                (Some(control), Some(worker)) => {
+                                    let al = config::agent_limits(&workspace);
+                                    let cfg = mission::MissionCfg {
+                                        repo: workspace.clone(),
+                                        run_dir: jdir.clone(),
+                                        control,
+                                        worker,
+                                        auditor,
+                                        objective: task,
+                                        max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
+                                        // Unique per mission — a constant
+                                        // session would reuse branch names and
+                                        // `worktree add`'s `branch -D` would
+                                        // force-delete the PREVIOUS mission's
+                                        // accepted integration branch.
+                                        session: format!("tui-{}-{}", std::process::id(), run),
+                                        keep_worktrees: false, // accepted branch survives cleanup
+                                        request_timeout: Duration::from_millis(
+                                            al.request_timeout_ms,
+                                        ),
+                                        task_timeout: Duration::from_secs(900),
+                                        context_budget: al.context_token_budget,
+                                        context_reserve: al.context_reserve_tokens,
+                                        control_max_turns: al.max_turns,
+                                        worker_max_turns: al.max_turns,
+                                        events: Some(ev_tx.clone()),
+                                        cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
+                                        session_approve: Some(app.auto.clone()),
+                                        web: app.web.clone(),
+                                        run,
+                                    };
+                                    tokio::spawn(async move {
+                                        let _ = mission::run(cfg).await;
+                                    });
+                                }
+                                _ => {
+                                    app.apply_event(UiEvent::Error {
                                     run,
                                     agent: "ui".into(),
                                     msg: "mission needs orchestrator + worker profiles — Settings"
                                         .into(),
                                 });
-                                app.apply_event(UiEvent::RunDone {
-                                    run,
-                                    outcome: "error: profiles missing".into(),
-                                    accepted_sha: None,
-                                });
-                                app.running = false;
+                                    app.apply_event(UiEvent::RunDone {
+                                        run,
+                                        outcome: "error: profiles missing".into(),
+                                        accepted_sha: None,
+                                    });
+                                    app.running = false;
+                                }
                             }
                         }
                     }
-                },
+                }
                 Effect::SaveProfile {
                     name,
                     base_url,

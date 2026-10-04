@@ -135,6 +135,23 @@ impl Provider {
         self.image_input
     }
 
+    /// Bind persisted history to the same wire adapter and request options.
+    /// Credentials may rotate; neither their value nor the endpoint is persisted.
+    pub fn resume_fingerprint(&self) -> String {
+        let (transport, endpoint) = match &self.inner {
+            Inner::Chat { url, .. } => ("chat-completions", url.as_str()),
+            Inner::Responses { url, .. } => ("openai-responses", url.as_str()),
+            Inner::Codex(_) => ("codex-oauth", "chatgpt.com/backend-api/codex/responses"),
+        };
+        crate::context::sha256_hex(
+            json!({"wire_version": 1, "transport": transport, "endpoint": endpoint,
+                "model": self.model, "image_input": self.image_input,
+                "prompt_cache_key": self.prompt_cache_key})
+            .to_string()
+            .as_bytes(),
+        )
+    }
+
     /// One streaming request. `on_delta` receives content fragments as they
     /// arrive; `on_reasoning` receives provider-exposed reasoning fragments
     /// (`reasoning_content`, or OpenRouter-style `reasoning` when the former

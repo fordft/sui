@@ -10,12 +10,13 @@ pub enum Command {
     Theme,
     Motion,
     Export,
+    Sessions,
     Help,
     Stop,
     Quit,
 }
 impl Command {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::View(Tab::Chat),
         Self::View(Tab::Tasks),
         Self::View(Tab::Changes),
@@ -28,6 +29,7 @@ impl Command {
         Self::Theme,
         Self::Motion,
         Self::Export,
+        Self::Sessions,
         Self::Help,
         Self::Stop,
         Self::Quit,
@@ -46,6 +48,7 @@ impl Command {
             Self::Theme => "Toggle theme: slime / terminal / dark",
             Self::Motion => "Cycle motion: full / calm / off",
             Self::Export => "Export run report",
+            Self::Sessions => "Recent sessions / Resume",
             Self::Help => "Help",
             Self::Stop => "Stop task",
             Self::Quit => "Quit",
@@ -59,11 +62,14 @@ impl Command {
             Self::Stop => "Ctrl+S",
             Self::Quit => "Ctrl+Q",
             Self::Export => "/export",
+            Self::Sessions => "/resume",
             _ => "",
         }
     }
     pub fn unavailable(self, app: &App) -> Option<&'static str> {
         match self {
+            Self::Sessions | Self::Mode(_) if app.resume_pending => Some("session is loading"),
+            Self::Sessions if app.running => Some("stop the current task first"),
             Self::Stop if !app.running => Some("no task running"),
             Self::Mode(_) if app.running => Some("stop the current task first"),
             Self::Export if app.run_dir.is_none() => Some("no run journal available"),

@@ -3152,6 +3152,7 @@ fn audit_usage_retains_unknown_fields_and_model_attribution() {
             output,
             // Completion does not imply that optional measurements exist.
             complete: true,
+            request: None,
         });
     }
     assert_eq!(app.usage.len(), 2);

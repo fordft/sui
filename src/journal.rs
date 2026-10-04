@@ -167,7 +167,7 @@ impl Journal {
 const REPLAY_LIMIT: usize = 4 * 1024 * 1024;
 const JOURNAL_LINE_LIMIT: usize = 16 * 1024 * 1024;
 
-fn read_replay_file(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_replay_file(path: &Path) -> Result<Vec<u8>> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -192,8 +192,8 @@ fn read_replay_file(path: &Path) -> Result<Vec<u8>> {
 /// Restore the active context epoch. Legacy text journals remain readable;
 /// image observations and missing/tampered opaque state cannot claim replay.
 pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types::Message>> {
-    use crate::types::Message;
-    let mut history = Vec::new();
+    let mut events = Vec::new();
+    let mut bytes = 0;
     let mut users = 0;
     let mut reader = BufReader::new(File::open(path)?);
     loop {
@@ -209,13 +209,31 @@ pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types:
             bail!("journal event exceeds replay bounds");
         }
         let event: Value = serde_json::from_str(&line)?;
-        let data = &event["data"];
         if event["type"] == "user" {
             users += 1;
             if users > max_users {
                 break;
             }
         }
+        bytes += count;
+        if bytes > 32 * 1024 * 1024 {
+            bail!("journal exceeds 32 MiB replay limit");
+        }
+        events.push(event);
+    }
+    replay_events(path, events.iter())
+}
+
+pub(crate) fn replay_events<'a>(
+    path: &Path,
+    events: impl IntoIterator<Item = &'a Value>,
+) -> Result<Vec<crate::types::Message>> {
+    use crate::types::Message;
+    let mut history = Vec::new();
+    let mut replay_bytes = 0;
+    for event in events {
+        replay_bytes += serde_json::to_vec(event)?.len();
+        let data = &event["data"];
         match event["type"].as_str() {
             Some("journal_error") => bail!("cannot replay incomplete journal"),
             Some("image_observation") => bail!(
@@ -254,6 +272,7 @@ pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types:
                         bail!("opaque replay state failed integrity check");
                     }
                     items = serde_json::from_slice(&bytes)?;
+                    replay_bytes += bytes.len();
                 } else if data["response_items_count"].as_u64().unwrap_or(0) > 0 {
                     bail!("opaque replay state is missing");
                 }
@@ -263,11 +282,13 @@ pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types:
                     .map(String::from);
                 history.push(Message::Assistant {
                     content,
-                    tool_calls: serde_json::from_value::<Vec<crate::types::ToolCall>>(
-                        data["tool_calls"].clone(),
-                    )
-                    .ok()
-                    .filter(|v| !v.is_empty()),
+                    tool_calls: data
+                        .get("tool_calls")
+                        .filter(|v| !v.is_null())
+                        .map(|v| serde_json::from_value::<Vec<crate::types::ToolCall>>(v.clone()))
+                        .transpose()
+                        .context("invalid recorded tool calls")?
+                        .filter(|v| !v.is_empty()),
                     reasoning_content: data["reasoning_content"].as_str().map(String::from),
                     response_items: items,
                 });
@@ -283,6 +304,9 @@ pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types:
                     .into(),
             }),
             _ => {}
+        }
+        if replay_bytes > 64 * 1024 * 1024 {
+            bail!("history exceeds 64 MiB replay limit");
         }
     }
     Ok(history)

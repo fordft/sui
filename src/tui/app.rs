@@ -16,6 +16,17 @@ use crossterm::event::{
 use super::commands::Command;
 use super::text::Buf;
 use super::usage::UsageTotals;
+
+fn preview_text(text: &str) -> String {
+    if text.len() <= 32000 {
+        text.into()
+    } else {
+        format!(
+            "{}\n[session preview truncated; full text remains in the journal]",
+            &text[..crate::context::floor_char_boundary(text, 32000)]
+        )
+    }
+}
 use crate::config::{self, ProfileCfg, UiSettings};
 use crate::events::{GateChoice, UiEvent};
 use crate::provider::Probe;
@@ -448,6 +459,7 @@ pub enum PickTarget {
     Role(Role),
     ModelForRole(String), // after profile chosen → pick model
     NewProvider,          // provider type → open its form
+    Session,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -746,6 +758,12 @@ pub enum Effect {
     SaveUi,
     /// Export this session's journals to a sanitized report file.
     ExportRun,
+    ListSessions {
+        request: u64,
+    },
+    ResumeSession {
+        id: String,
+    },
     FetchModels {
         base_url: String,
         key: Option<String>,
@@ -824,6 +842,8 @@ pub struct App {
     pub accepted_sha: Option<String>,
     pub audit: Option<String>,
     pub usage: BTreeMap<(String, String), UsageTotals>, // (agent, model) → totals
+    pub last_requests: BTreeMap<String, crate::events::RequestDetails>,
+    pub resume_pending: bool,
     pub profiles: BTreeMap<String, ProfileCfg>,
     pub session_keys: BTreeMap<String, String>,
     pub ui: UiSettings,
@@ -1048,6 +1068,8 @@ impl App {
             accepted_sha: None,
             audit: None,
             usage: BTreeMap::new(),
+            last_requests: BTreeMap::new(),
+            resume_pending: false,
             profiles,
             session_keys,
             ui,
@@ -1503,12 +1525,28 @@ impl App {
                 cached,
                 written,
                 output,
+                complete,
+                request,
                 ..
             } => {
                 self.usage
-                    .entry((agent, model))
+                    .entry((agent.clone(), model))
                     .or_default()
-                    .add(input, cached, written, output);
+                    .add_request(
+                        &crate::types::Usage {
+                            input_tokens: input,
+                            cache_read_tokens: cached,
+                            cache_write_tokens: written,
+                            output_tokens: output,
+                            complete,
+                            estimated: false,
+                        },
+                        request.as_ref(),
+                        self.last_requests.get(&agent),
+                    );
+                if let Some(request) = request {
+                    self.last_requests.insert(agent, request);
+                }
             }
             UiEvent::Permission {
                 id,
@@ -2363,9 +2401,16 @@ impl App {
                 }
             }
             (_, KeyCode::Enter) => {
-                if self.tab == Tab::Chat && !self.input.is_empty() && self.running {
+                if self.tab == Tab::Chat
+                    && !self.input.is_empty()
+                    && (self.running || self.resume_pending)
+                {
                     self.status = "run in progress — Ctrl+S stops it; text kept".into();
-                } else if self.tab == Tab::Chat && !self.input.is_empty() && !self.running {
+                } else if self.tab == Tab::Chat
+                    && !self.input.is_empty()
+                    && !self.running
+                    && !self.resume_pending
+                {
                     let task = self.input.text();
                     if task.starts_with('/') {
                         match task.as_str() {
@@ -2381,13 +2426,17 @@ impl App {
                                 self.command(Command::Export);
                                 self.input.clear();
                             }
+                            "/resume" => {
+                                self.command(Command::Sessions);
+                                self.input.clear();
+                            }
                             "/help" => {
                                 self.command(Command::Help);
                                 self.input.clear();
                             }
                             _ => {
                                 self.status = format!(
-                                    "unknown command '{task}' — /mission /solo /export /help"
+                                    "unknown command '{task}' — /mission /solo /resume /export /help"
                                 );
                             }
                         }
@@ -2617,6 +2666,176 @@ impl App {
         }
     }
 
+    pub fn sessions_loaded(
+        &mut self,
+        request: u64,
+        result: Result<Vec<crate::session::Summary>, String>,
+    ) {
+        if let Some(Modal::Picker(p)) = &mut self.modal {
+            if p.target == PickTarget::Session && p.catalog_request == Some(request) {
+                p.loading = false;
+                match result {
+                    Ok(rows) => {
+                        p.items = rows
+                            .into_iter()
+                            .map(|s| PickerItem {
+                                label: s.label,
+                                value: s.id,
+                            })
+                            .collect();
+                        if p.items.is_empty() {
+                            self.status = "no native sessions for this workspace".into();
+                        }
+                    }
+                    Err(e) => self.status = format!("sessions: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Fold recorded facts into a bounded transcript; this never dispatches tools.
+    pub fn restore_saved(
+        &mut self,
+        saved: &crate::session::SavedSession,
+        profile: &str,
+        dir: PathBuf,
+    ) {
+        self.groups.clear();
+        self.usage.clear();
+        self.last_requests.clear();
+        self.tasks.clear();
+        self.changes.clear();
+        self.audit = None;
+        self.accepted_sha = None;
+        self.diff_stale = true;
+        self.history.clear();
+        self.hist_i = None;
+        self.stage.clear();
+        self.started = None;
+        self.outcome = "resumed (historical evidence)".into();
+        self.scroll = 0;
+        self.anchor = None;
+        self.sel = None;
+        self.nav = false;
+        self.next_run = 0;
+        let mut run = 0;
+        let mut req = 0;
+        let mut pending_task = String::new();
+        let mut turn_started = None;
+        let agent = saved.header.agent_id.clone();
+        for event in &saved.events {
+            let d = &event["data"];
+            match event["type"].as_str() {
+                Some("task") => pending_task = preview_text(d["task"].as_str().unwrap_or("")),
+                Some("turn_start") => {
+                    turn_started = event["ts_unix"].as_u64();
+                    self.next_run += 1;
+                    run = self.next_run;
+                    let g = self.group_for(run);
+                    self.groups[g].task = std::mem::take(&mut pending_task);
+                }
+                Some("user") => {
+                    let g = self.group_for(run);
+                    if self.groups[g].task.is_empty() {
+                        self.groups[g].task = preview_text(d["content"].as_str().unwrap_or(""));
+                    }
+                }
+                Some("request") => {
+                    req = d["request_id"].as_u64().unwrap_or(0);
+                    self.apply_event(UiEvent::ReqStart {
+                        run,
+                        agent: agent.clone(),
+                        req,
+                    });
+                    self.apply_event(UiEvent::ReqDone {
+                        run,
+                        agent: agent.clone(),
+                        req,
+                        ms: d["timing"]["request_total_ms"].as_u64().unwrap_or(0) as u128,
+                        ok: d["error_class"].is_null(),
+                        reasoning: false,
+                    });
+                    let u: crate::types::Usage =
+                        serde_json::from_value(d["usage"].clone()).unwrap_or_default();
+                    self.apply_event(UiEvent::Usage {
+                        run,
+                        agent: agent.clone(),
+                        model: d["returned_model"]
+                            .as_str()
+                            .or_else(|| d["requested_model"].as_str())
+                            .unwrap_or("unknown")
+                            .into(),
+                        input: u.input_tokens.filter(|_| !u.estimated),
+                        cached: u.cache_read_tokens.filter(|_| !u.estimated),
+                        written: u.cache_write_tokens.filter(|_| !u.estimated),
+                        output: u.output_tokens.filter(|_| !u.estimated),
+                        complete: u.complete && !u.estimated,
+                        request: crate::events::RequestDetails::from_trace(d),
+                    });
+                }
+                Some("assistant") => {
+                    if let Some(text) = d["content"].as_str().filter(|s| !s.is_empty()) {
+                        self.apply_event(UiEvent::Delta {
+                            run,
+                            agent: agent.clone(),
+                            req,
+                            text: preview_text(text),
+                        });
+                    }
+                }
+                Some("tool") => {
+                    let status = match d["status"].as_str() {
+                        Some("ok") => crate::events::ToolStatus::Ok,
+                        Some("failed") => crate::events::ToolStatus::Failed,
+                        Some("denied") => crate::events::ToolStatus::Denied,
+                        Some("timeout") => crate::events::ToolStatus::Timeout,
+                        Some("cancelled") => crate::events::ToolStatus::Cancelled,
+                        Some("skipped") => crate::events::ToolStatus::Skipped,
+                        Some("intercepted") => crate::events::ToolStatus::Intercepted,
+                        _ => crate::events::ToolStatus::Error,
+                    };
+                    self.apply_event(UiEvent::ToolDone {
+                        run,
+                        agent: agent.clone(),
+                        call: d["tool_call_id"].as_str().unwrap_or("").into(),
+                        name: d["name"].as_str().unwrap_or("unknown").into(),
+                        summary: "recorded result".into(),
+                        ms: d["execution_ms"].as_u64().unwrap_or(0) as u128,
+                        status,
+                        exit: d["exit_code"].as_i64().and_then(|n| i32::try_from(n).ok()),
+                        result: preview_text(d["result"].as_str().unwrap_or("")),
+                        truncated: d["result"].as_str().is_some_and(|s| s.len() > 32000),
+                        dropped: 0,
+                    });
+                }
+                Some("turn_end") => {
+                    let g = self.group_for(run);
+                    self.groups[g].dur_ms = turn_started
+                        .zip(event["ts_unix"].as_u64())
+                        .and_then(|(start, end)| end.checked_sub(start))
+                        .unwrap_or(0) as u128;
+                    self.groups[g].done = true;
+                    self.groups[g].outcome =
+                        format!("recorded: {}", d["outcome"].as_str().unwrap_or("unknown"));
+                    self.groups[g].failed =
+                        matches!(d["outcome"].as_str(), Some("error" | "stopped"));
+                }
+                _ => {}
+            }
+            if self.groups.len() > Self::GROUP_CAP {
+                self.groups.remove(0);
+            }
+        }
+        self.run_dir = Some(dir);
+        self.ui.solo_profile = Some(profile.into());
+        self.mode = Mode::Solo;
+        self.tab = Tab::Chat;
+        self.running = false;
+        self.resume_pending = false;
+        self.status = format!("resumed {} · saved checks are historical", saved.id);
+        self.sync_layout();
+    }
+
     pub fn command(&mut self, command: Command) {
         if let Some(reason) = command.unavailable(self) {
             self.status = reason.into();
@@ -2641,6 +2860,19 @@ impl App {
                 self.effects.push(Effect::SaveUi);
             }
             Command::Export => self.effects.push(Effect::ExportRun),
+            Command::Sessions => {
+                let request = self.next_id();
+                self.modal = Some(Modal::Picker(Picker {
+                    title: "Recent sessions / Resume (current workspace)".into(),
+                    items: vec![],
+                    filter: Buf::new(),
+                    sel: 0,
+                    target: PickTarget::Session,
+                    loading: true,
+                    catalog_request: Some(request),
+                }));
+                self.effects.push(Effect::ListSessions { request });
+            }
             Command::Help => {
                 self.dialog_scroll.set(0);
                 self.modal = Some(Modal::Help);
@@ -3104,6 +3336,14 @@ impl App {
 
     fn pick(&mut self, target: PickTarget, choice: String) -> Option<Modal> {
         match target {
+            PickTarget::Session => {
+                if !self.running && !self.resume_pending {
+                    self.resume_pending = true;
+                    self.status = "loading session…".into();
+                    self.effects.push(Effect::ResumeSession { id: choice });
+                }
+                None
+            }
             PickTarget::ProvModel => {
                 let mut f = self
                     .form_stash

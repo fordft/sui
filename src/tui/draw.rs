@@ -867,11 +867,49 @@ fn draw_usage(f: &mut Frame, app: &App, a: Rect) {
             }
         }
         panel_text(&mut rows, &line, width, Style::default());
+        panel_text(
+            &mut rows,
+            &format!("cache {}", usage.cache.display()),
+            width,
+            Style::default(),
+        );
+        if let Some(request) = &usage.last_request {
+            panel_text(
+                &mut rows,
+                &format!("first in epoch {}", usage.first.display()),
+                width,
+                dim(app),
+            );
+            panel_text(
+                &mut rows,
+                &format!("subsequent {}", usage.subsequent.display()),
+                width,
+                dim(app),
+            );
+            let ttft = request
+                .first_delta_ms
+                .map(|ms| format!(" · first delta {ms}ms"))
+                .unwrap_or_default();
+            panel_text(
+                &mut rows,
+                &format!("{} · {}{ttft}", request.epoch_id, request.purpose),
+                width,
+                dim(app),
+            );
+            if !usage.changes.is_empty() {
+                panel_text(
+                    &mut rows,
+                    &format!("changed: {}", usage.changes.join(", ")),
+                    width,
+                    acc(app),
+                );
+            }
+        }
         panel_text(&mut rows, "", width, Style::default());
     }
     panel_text(
         &mut rows,
-        "costs: — when pricing unknown (never shown as zero)",
+        "Cache is token-weighted. Local changes do not prove a provider miss cause; TTL/routing stay unknown. Costs: — when pricing unknown.",
         width,
         dim(app),
     );

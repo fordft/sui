@@ -172,6 +172,14 @@ is available. Usage keeps each agent/model pair separate: `—` means a
 measurement is missing, `0` means a reported zero, and `+ (partial)` marks
 totals with missing measurements.
 
+Usage also shows a **token-weighted cache percentage**, with measured-request
+coverage. Only complete, non-estimated input/cache pairs with cached ≤ input
+enter the percentage; failed or missing-usage requests remain in its coverage
+denominator. First requests in each observed session/epoch and subsequent
+requests have separate rates. The latest epoch, request purpose and first-delta
+latency are shown when recorded. Observed model/prefix/tool/guidance/cache-key
+changes are local diagnostics; provider TTL/routing causes remain unknown.
+
 **Appearance:** Settings → theme switches between `slime` (default: black and
 deep blue with an azure gel slime), `dark`, and `terminal` (your terminal's
 foreground, background, and ANSI colors). The preference persists as
@@ -318,6 +326,35 @@ The runtime — not the model — owns scheduling, worktrees, contract
 validation, ownership checks, acceptance commands, integration, and
 bounded repair/escalation. Your original checkout is never modified;
 accepted work lands on a `sui-mission-*` branch.
+
+## Resume a native session
+
+Open **Ctrl+P → Recent sessions / Resume**, or type `/resume`, then choose a
+recorded session for the current workspace. The searchable list shows up to 30
+recent native sessions. Your draft stays in the composer. The conversation,
+recorded tool results and Usage return without running any old tool calls.
+Saved checks are historical evidence and need rechecking against current code.
+
+Headless/SSH entry points use the same recovery path:
+
+```bash
+sui --resume latest "continue the task"
+sui --resume <run-id>                  # opens the TUI on a terminal
+```
+
+Recovery creates a fresh private run with a copy of the journal and verified
+opaque replay sidecars; the source journal stays unchanged. It retains the
+native session identity, request sequence and context epoch. Current permission
+settings apply; approvals recorded in the old journal never grant permission.
+Cache reuse still depends on the provider, its retention and routing.
+
+The recorded profile/model, wire adapter, tool schemas, system contract and
+project guidance must still match. An active session, unfinished turn or tool
+call, damaged journal, missing/tampered sidecar, or memory-only image observation
+is refused explicitly. Recovery is bounded to 32 MiB of journal and 64 MiB of
+replay state. Missions use their own lifecycle and cannot be resumed this way.
+Sessions recorded before resume headers were introduced remain exportable;
+they cannot promise the same request header and are marked unavailable.
 
 ## Export a run report
 

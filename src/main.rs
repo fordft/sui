@@ -84,6 +84,9 @@ struct Cli {
     /// Start the TUI in mission mode (orchestrator → workers → auditor)
     #[arg(long, global = true)]
     mission: bool,
+    /// Resume a recorded native session (exact run ID or "latest"). No old tools are rerun.
+    #[arg(long, global = true, conflicts_with = "mission")]
+    resume: Option<String>,
     /// One-shot prompt; omit to open the TUI (or REPL when not a terminal)
     prompt: Option<String>,
 }
@@ -92,7 +95,13 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Sub::Tui) = &cli.sub {
-        return sui::tui::run(cli.mission, cli.yes || cli.yolo).await;
+        return sui::tui::run_with_resume(
+            cli.mission,
+            cli.yes || cli.yolo,
+            cli.resume,
+            cli.workspace,
+        )
+        .await;
     }
     if let Some(Sub::AcpBridge { dir, expect }) = &cli.sub {
         return sui::acp::bridge::serve(dir, expect);
@@ -143,7 +152,13 @@ async fn main() -> Result<()> {
     // Bare `sui` on a terminal opens the TUI — the headless path is for
     // one-shot prompts and non-interactive (piped/scripted) use.
     if cli.prompt.is_none() && std::io::stdin().is_terminal() {
-        return sui::tui::run(cli.mission, cli.yes || cli.yolo).await;
+        return sui::tui::run_with_resume(
+            cli.mission,
+            cli.yes || cli.yolo,
+            cli.resume,
+            cli.workspace,
+        )
+        .await;
     }
     let non_interactive = cli.prompt.is_some() || !std::io::stdin().is_terminal();
     // Explicit flags beat a --profile choice — capture before they move.
@@ -159,7 +174,16 @@ async fn main() -> Result<()> {
         config_path: cli.config.clone(),
         non_interactive,
     })?;
-    if let Some(pname) = &cli.profile {
+    let saved = cli
+        .resume
+        .as_ref()
+        .map(|id| sui::session::SavedSession::load(&sui::session::runs_root(), id, &cfg.workspace))
+        .transpose()?;
+    let profile_name = cli
+        .profile
+        .clone()
+        .or_else(|| saved.as_ref().and_then(|s| s.header.profile.clone()));
+    if let Some(pname) = &profile_name {
         let p = config::resolve_profile(pname, cli.config.as_deref())
             .map_err(|e| anyhow::anyhow!("--profile {pname}: {e:#}"))?;
         cfg.base_url = flag_base.clone().unwrap_or(p.base_url);
@@ -169,6 +193,22 @@ async fn main() -> Result<()> {
         cfg.api_key = flag_key.or(p.api_key);
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
+    if let Some(saved) = &saved {
+        let provider = provider::Provider::new(
+            &cfg.base_url,
+            cfg.api_key.clone(),
+            cfg.model.clone(),
+            cfg.prompt_cache_key.clone(),
+        )
+        .with_transport(cfg.transport)
+        .with_image_input(cfg.image_input);
+        if saved.header.signature != sui::session::Signature::current(&provider, &cfg.workspace) {
+            anyhow::bail!("session provider, model, tools or project guidance changed; restore the configuration or start a new session");
+        }
+        cfg.session_id = saved.header.session_id.clone();
+        saved.fork(&cfg.run_dir, "headless")?;
+    }
+    let _session_lock = sui::session::SessionLock::acquire(&cfg.run_dir)?;
 
     eprintln!(
         "sui v0 · model={} · base={} · ws={} · log={}",
@@ -224,7 +264,10 @@ async fn main() -> Result<()> {
         },
         agent::Identity {
             session_id: cfg.session_id.clone(),
-            agent_id: "fast-path".into(),
+            agent_id: saved
+                .as_ref()
+                .map(|s| s.header.agent_id.clone())
+                .unwrap_or_else(|| "fast-path".into()),
             role: "worker".into(),
             base_url: cfg.base_url.clone(),
             model: cfg.model.clone(),
@@ -234,6 +277,17 @@ async fn main() -> Result<()> {
                 .map(|k| context::sha256_hex(k.as_bytes())),
         },
     );
+    if let Some(saved) = &saved {
+        agent.restore_session(saved)?;
+        agent.jlog("session_resumed", serde_json::json!({"source": saved.id}));
+        eprintln!(
+            "resumed {} · recorded checks are historical; no old tools rerun",
+            saved.id
+        );
+    } else {
+        agent.record_session(profile_name)?;
+    }
+    drop(saved);
 
     match cli.prompt {
         Some(p) => agent.run_turn(&p).await?,

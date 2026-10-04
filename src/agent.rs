@@ -240,6 +240,51 @@ impl Agent {
         self.history = msgs;
     }
 
+    pub fn resume_signature(&self) -> crate::session::Signature {
+        crate::session::Signature {
+            provider: self.provider.resume_fingerprint(),
+            system: self.hashes.static_prefix.clone(),
+            tools: self.hashes.tool_schema.clone(),
+            guidance: self
+                .guidance
+                .as_ref()
+                .map(|g| context::sha256_hex(g.as_bytes())),
+        }
+    }
+
+    pub fn record_session(&mut self, profile: Option<String>) -> Result<()> {
+        let header = crate::session::Header {
+            format: 1,
+            workspace: self.tools.workspace.canonicalize()?,
+            profile,
+            model: self.ident.model.clone(),
+            session_id: self.ident.session_id.clone(),
+            agent_id: self.ident.agent_id.clone(),
+            signature: self.resume_signature(),
+        };
+        self.journal
+            .log("resume_header", serde_json::to_value(header)?);
+        if self.journal.failed() {
+            return Err(anyhow!("session header could not be persisted"));
+        }
+        Ok(())
+    }
+
+    pub fn restore_session(&mut self, saved: &crate::session::SavedSession) -> Result<()> {
+        if saved.header.signature != self.resume_signature() {
+            return Err(anyhow!(
+                "session provider, model, tools or project guidance changed; start a new session"
+            ));
+        }
+        if saved.header.session_id != self.ident.session_id {
+            return Err(anyhow!("session identity changed"));
+        }
+        self.restore_history(saved.history.clone());
+        self.request_seq = saved.next_request;
+        self.context_epoch = saved.epoch;
+        Ok(())
+    }
+
     pub fn history(&self) -> &[Message] {
         &self.history
     }
@@ -250,8 +295,12 @@ impl Agent {
 
     /// Queue a user message, then drive until completion.
     pub async fn run_turn(&mut self, user_input: &str) -> Result<()> {
+        self.journal.log("turn_start", json!({"run": self.run_id}));
         self.push_user(user_input);
-        self.drive().await
+        let result = self.drive().await;
+        self.journal.log("turn_end", json!({"run": self.run_id,
+            "outcome": if result.is_err() { "error" } else if self.stop.load(Ordering::Relaxed) { "stopped" } else { "returned" }}));
+        result
     }
 
     pub fn push_user(&mut self, user_input: &str) {
@@ -393,6 +442,10 @@ impl Agent {
                         run: run_id, agent: aid, req: req_id, ms: 0, ok: false, reasoning: false,
                     });
                     self.journal.log("interrupted", json!({ "request_id": req_id, "phase": "request" }));
+                    let trace = self.trace(req_id, assembly_ms, est_tokens, &request_fp, None, None, None, 0, 0,
+                        Some("cancelled"), if compacting { "compaction" } else { "agent" });
+                    self.emit_usage(&trace, None);
+                    self.journal.log("request", trace);
                     return Ok(());
                 }
             };
@@ -400,22 +453,21 @@ impl Agent {
             let outcome = match outcome {
                 Ok(o) => o,
                 Err(e) => {
-                    self.journal.log(
-                        "request",
-                        self.trace(
-                            req_id,
-                            assembly_ms,
-                            est_tokens,
-                            &request_fp,
-                            None,
-                            None,
-                            None,
-                            0,
-                            0,
-                            Some(error_class(&e)),
-                            if compacting { "compaction" } else { "agent" },
-                        ),
+                    let trace = self.trace(
+                        req_id,
+                        assembly_ms,
+                        est_tokens,
+                        &request_fp,
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        Some(error_class(&e)),
+                        if compacting { "compaction" } else { "agent" },
                     );
+                    self.emit_usage(&trace, None);
+                    self.journal.log("request", trace);
                     self.emit(UiEvent::ReqDone {
                         run: run_id,
                         agent: self.ident.agent_id.clone(),
@@ -442,22 +494,6 @@ impl Agent {
                 reasoning: outcome.reasoning_content.is_some(),
             });
 
-            if let Some(u) = &outcome.usage {
-                self.emit(UiEvent::Usage {
-                    run: run_id,
-                    agent: self.ident.agent_id.clone(),
-                    model: outcome
-                        .returned_model
-                        .clone()
-                        .unwrap_or_else(|| self.ident.model.clone()),
-                    input: u.input_tokens.filter(|_| !u.estimated),
-                    cached: u.cache_read_tokens.filter(|_| !u.estimated),
-                    written: u.cache_write_tokens.filter(|_| !u.estimated),
-                    output: u.output_tokens.filter(|_| !u.estimated),
-                    complete: u.complete && !u.estimated,
-                });
-            }
-
             if !quiet {
                 if !outcome.content.is_empty() {
                     println!();
@@ -472,22 +508,21 @@ impl Agent {
                     None => eprintln!("· usage: not reported"),
                 }
             }
-            self.journal.log(
-                "request",
-                self.trace(
-                    req_id,
-                    assembly_ms,
-                    est_tokens,
-                    &request_fp,
-                    outcome.usage.as_ref(),
-                    outcome.returned_model.as_deref(),
-                    outcome.finish_reason.as_deref(),
-                    outcome.first_delta_ms,
-                    outcome.total_ms,
-                    None,
-                    if compacting { "compaction" } else { "agent" },
-                ),
+            let trace = self.trace(
+                req_id,
+                assembly_ms,
+                est_tokens,
+                &request_fp,
+                outcome.usage.as_ref(),
+                outcome.returned_model.as_deref(),
+                outcome.finish_reason.as_deref(),
+                outcome.first_delta_ms,
+                outcome.total_ms,
+                None,
+                if compacting { "compaction" } else { "agent" },
             );
+            self.emit_usage(&trace, outcome.usage.as_ref());
+            self.journal.log("request", trace);
             if compacting {
                 self.commit_compaction(&outcome, before_tokens, schema_tokens)?;
                 continue;
@@ -973,6 +1008,7 @@ impl Agent {
             "purpose": purpose,
             "static_prefix_hash": self.hashes.static_prefix,
             "tool_schema_hash": self.hashes.tool_schema,
+            "guidance_hash": self.guidance.as_ref().map(|g| context::sha256_hex(g.as_bytes())),
             "epoch_prefix_hash": self.hashes.epoch_prefix,
             "request_fingerprint": request_fp,
             "cache_policy": "implicit",
@@ -993,6 +1029,24 @@ impl Agent {
             "finish_reason": finish_reason,
             "error_class": error,
         })
+    }
+
+    fn emit_usage(&self, trace: &Value, usage: Option<&crate::types::Usage>) {
+        let usage = usage.filter(|u| !u.estimated);
+        self.emit(UiEvent::Usage {
+            run: self.run_id,
+            agent: self.ident.agent_id.clone(),
+            model: trace["returned_model"]
+                .as_str()
+                .unwrap_or(&self.ident.model)
+                .into(),
+            input: usage.and_then(|u| u.input_tokens),
+            cached: usage.and_then(|u| u.cache_read_tokens),
+            written: usage.and_then(|u| u.cache_write_tokens),
+            output: usage.and_then(|u| u.output_tokens),
+            complete: usage.is_some_and(|u| u.complete),
+            request: crate::events::RequestDetails::from_trace(trace),
+        });
     }
 
     /// UI consent is independent of local-tool auto approval.
