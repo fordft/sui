@@ -277,7 +277,18 @@ async fn native_mission_cli_runs_profiles_through_acceptance_and_audit() {
     let port = mock(Script {
         plan_payload: good_plan(&base),
         worker_routes: vec![],
-        worker_first: worker_writes("out/ok.txt", "ok\n"),
+        worker_first: json!([
+            tc(
+                "locate",
+                "inventory",
+                r#"{"action":"files","query":"README"}"#
+            ),
+            tc(
+                "write",
+                "write_file",
+                r#"{"path":"out/ok.txt","content":"ok\n"}"#
+            ),
+        ]),
         worker_repair: json!("text"),
         audit_verdicts: vec!["PASS".into()],
         escalation: json!({"decision": "abort"}),
@@ -335,6 +346,9 @@ async fn native_mission_cli_runs_profiles_through_acceptance_and_audit() {
     let journal = std::fs::read_to_string(run.join("mission.jsonl")).unwrap();
     assert!(journal.contains("Accepted"));
     assert!(journal.contains("PASS"));
+    let worker = std::fs::read_to_string(run.join("w-W1.jsonl")).unwrap();
+    assert!(worker.contains("inventory"));
+    assert!(worker.contains("README.md [file]"));
     let _ = std::fs::remove_dir_all(fixture_home);
 }
 

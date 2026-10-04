@@ -39,7 +39,16 @@ pub fn sse_text(t: &str) -> String {
 }
 
 /// SSE body for a tool-call reply.
-pub fn sse_tool_calls(calls: Value) -> String {
+pub fn sse_tool_calls(mut calls: Value) -> String {
+    // Streaming fragments are grouped by index, not ID. Distinct calls in a
+    // batch need distinct indices, as on the real chat-completions wire.
+    if let Some(calls) = calls.as_array_mut() {
+        for (index, call) in calls.iter_mut().enumerate() {
+            if call["index"].is_null() {
+                call["index"] = json!(index);
+            }
+        }
+    }
     let d = json!({"choices": [{"index": 0, "delta": {"role": "assistant",
         "tool_calls": calls}, "finish_reason": "tool_calls"}]});
     let u = json!({"choices": [], "usage": {"prompt_tokens": 100,

@@ -11,6 +11,9 @@ pub fn system() -> String {
         "You are sui's engineering agent inside a workspace, reached through tools.\n\n\
 {}\n\n\
 Tool protocol:\n\
+- inventory(action, query, path, limit): find files or syntax-based symbol \
+definitions with file:line locations. Use it to locate code, then read_file \
+the relevant region. Results describe current files, not a call graph.\n\
 - read_file(path, offset, limit): line-numbered read, <=100 lines by default.\n\
 - write_file(path, content): create or fully replace a file.\n\
 - edit_file(path, old_str, new_str): replace an exact UNIQUE substring. \
@@ -54,9 +57,8 @@ judgment and never add requirements:\n{}\n\n\
     )
 }
 
-/// v1 seam: frozen repository-epoch segment (tree-sitter map, build/test
-/// commands, conventions). Generated once per epoch, then immutable.
-/// Returns None until the repo index lands.
+/// Reserved frozen repository-epoch segment. Inventory is an on-demand tool,
+/// never a changing map injected into this cache-stable prefix.
 pub fn epoch_segment() -> Option<String> {
     None
 }

@@ -287,6 +287,41 @@ dependencies:
 cargo test --test ui_headless -- --include-ignored
 ```
 
+## Code inventory
+
+Native agents can call `inventory` directly in Solo or any Mission role;
+there is no server, index command or configuration to start separately.
+`files` lists workspace-relative paths. `symbols` locates named functions,
+methods, types and other declarations using Tree-sitter, with file and
+1-based start/end lines for the next `read_file` call. For example:
+
+```json
+{"action":"symbols","query":"checkout","path":"src","limit":20}
+```
+
+Queries are literal, case-insensitive substrings of names or paths.
+Symbol extraction supports Rust, JavaScript/JSX, TypeScript/TSX, Python
+and Go. Other languages remain discoverable through `files` and shell
+search. This is a syntax inventory; it does not resolve references,
+dynamic dispatch, macro expansion or a semantic call graph.
+
+Each call scans current files, including uncommitted edits and new files,
+inside that agent's workspace/worktree. It respects `.gitignore` and
+`.ignore`, skips symlinks, generated/dependency directories and known
+credential-file names, and writes nothing to the repository. Results stay
+in appended tool history; no changing repo map is inserted into the stable
+prompt. Scans have a three-second cooperative budget, 10,000-entry,
+32 MiB input and 500,000-node limits; source files over 512 KiB are skipped.
+Output defaults to 50 rows (max 200) with a 24 KiB row budget. Skipped
+files, syntax errors, unsupported files and truncation are reported;
+partial results never prove a symbol is absent. Narrow `path` or `query`
+when needed.
+
+Adding this tool changes the native tool/system signature. Sessions from
+v0.5.0 and earlier remain inspectable/exportable, but Resume requires the
+same recorded signature and therefore a matching older binary. Start a
+new session to use inventory.
+
 ## Engineering lenses
 
 Native agents carry a small always-on **scan** (outcome · correctness ·

@@ -129,6 +129,10 @@ bash_timeout_max_ms = 600000
 # Browser consent/remote access are independent of YOLO and web research.
 # Headless one-shot runs need approved=true in user config (EOF denies).
 
+# Code inventory is built into native Solo/Mission tools and needs no config.
+# inventory(action="files"|"symbols", query, path, limit) reads the current
+# workspace/worktree; symbols support Rust, JS/TS/TSX, Python and Go.
+
 # ── Persisted UI settings (GLOBAL config only — written by Settings → Save) ──
 # Recent sessions / Resume and cache inspection are built into the palette and
 # Usage view; no extra service or configuration is needed. Recovery uses the

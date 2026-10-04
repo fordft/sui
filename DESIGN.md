@@ -53,7 +53,7 @@ DOMAIN control (frontier model)     DOMAIN worker (cheap model)
 ## Per-agent prompt layout
 
 ```
-[static contract + 10 tool schemas]  lowest mutation
+[static contract + 11 tool schemas]  lowest mutation
 [frozen repo epoch / map]
 [mission contract | task spec]
 ── cache breakpoint ──
@@ -79,9 +79,22 @@ rolling truncation.
 | `browser(action, ...)` | managed headless Playwright; loopback-only by default; typed actions |
 | `terminal(action, ...)` | real workspace PTY + xterm screen; bounded input/output and lifecycle |
 | `view_image(path)` | workspace-confined, bounded image observation for image-capable profiles |
+| `inventory(action, query, path, limit)` | read-only current files or Tree-sitter definition locations; bounded, ignore-aware, per-worktree |
 
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
+
+Inventory walks current files on demand and parses definitions with embedded
+Rust, JS/JSX, TS/TSX, Python and Go grammars. It requires no shell/server,
+external index, model inference or repository writes. Worktree roots confine
+each worker's observations; ignore rules, dependency/output exclusions and
+no-follow traversal limit discovery. Cooperative cancellation, time/input/
+entry/node/output budgets keep scans bounded. Coverage counters distinguish
+unsupported/skipped/broken files from a complete scan. Results enter only
+append-only tool history; the epoch prefix is never rebuilt after edits.
+This is syntactic navigation, not semantic references or a resolved call graph.
+The tool schema is appended after the original ten and frozen for a session;
+adding it intentionally invalidates older resume signatures.
 
 UI sessions initialize lazily per native agent. Trusted global `[browser]`
 config owns UI consent, package bootstrap, and remote-browser policy;

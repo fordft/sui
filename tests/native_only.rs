@@ -41,14 +41,16 @@ fn failure(output: Output) -> String {
 }
 
 #[test]
-fn native_tool_schema_preserves_the_v047_wire_fingerprint() {
+fn existing_tool_schemas_preserve_the_v047_wire_fingerprint() {
     // Captured from the released v0.4.7 binary, before SDK removal.
     // Its transitive preserve_order feature must remain native-owned.
-    let schema = serde_json::to_string(&sui::tools::schemas()).unwrap();
+    let schemas = sui::tools::schemas();
+    let schema = serde_json::to_string(&schemas[..10]).unwrap();
     assert_eq!(
         sui::context::sha256_hex(schema.as_bytes()),
         "8f670344f77bcd258b8aa6d8108380c2bcbd713d7b688ed276375e7ec7794e80"
     );
+    assert_eq!(schemas[10]["function"]["name"], "inventory");
 }
 
 #[test]

@@ -48,6 +48,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "browser",
     "terminal",
     "view_image",
+    "inventory",
 ];
 
 /// Result of an intercepted tool call (e.g. orchestrator plan submission).
@@ -1179,6 +1180,12 @@ fn summarize(name: &str, args: &str, v: &Value) -> String {
         "browser" | "terminal" => format!("{name}: {}", v["action"].as_str().unwrap_or("")),
         "view_image" => format!("view image {}", v["path"].as_str().unwrap_or("")),
         "skill" => format!("lens: {}", v["name"].as_str().unwrap_or("")),
+        "inventory" => format!(
+            "inventory {} {} {}",
+            v["action"].as_str().unwrap_or(""),
+            v["path"].as_str().unwrap_or("."),
+            v["query"].as_str().unwrap_or("")
+        ),
         _ => format!("{name} {args}"),
     }
 }

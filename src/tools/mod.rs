@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod fs;
+pub mod inventory;
 pub mod ui;
 
 use anyhow::Result;
@@ -131,6 +132,8 @@ pub fn schemas() -> Vec<Value> {
         }),
     ];
     schemas.extend(ui::schemas());
+    // Append new tools so existing schema bytes/order remain unchanged.
+    schemas.push(inventory::schema());
     schemas
 }
 
@@ -201,6 +204,7 @@ pub async fn execute(
             Ok(ExecOut::plain(text, kind))
         }
         "bash" => bash::run(ctx, args, cancel, obs).await,
+        "inventory" => inventory::execute(ctx, args, cancel).await,
         "browser" | "terminal" => ui::service(ctx)?.execute(ctx, name, args, cancel).await,
         "view_image" => ui::view_image(ctx, args).await,
         "skill" => {
