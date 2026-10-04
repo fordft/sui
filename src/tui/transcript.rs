@@ -694,7 +694,7 @@ fn emit_item(
             at,
             ..
         } => {
-            // summary is model/ACP-generated text — strip control
+            // summary is model-generated text — strip control
             // sequences before it reaches a header row (escape-sequence
             // injection into the transcript).
             let head = clean(summary.lines().next().unwrap_or(""));

@@ -16,9 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::acp::{bridge, driver};
 use crate::agent::{Agent, Identity, Intercept, Limits};
-use crate::backend::Backend;
 use crate::config::Profile;
 use crate::context;
 use crate::journal::Journal;
@@ -51,11 +49,11 @@ pub struct MissionCfg {
     pub repo: PathBuf,
     pub run_dir: PathBuf,
     /// Orchestrator/escalation plane.
-    pub control: Backend,
+    pub control: Profile,
     /// Implementation plane.
-    pub worker: Backend,
-    /// Auditor plane — None = the control backend.
-    pub auditor: Option<Backend>,
+    pub worker: Profile,
+    /// Auditor plane — None = the control profile.
+    pub auditor: Option<Profile>,
     pub objective: String,
     /// 1..=2. Concurrency only activates on a 2-task independent wave.
     pub max_workers: usize,
@@ -219,96 +217,13 @@ fn mk_agent(
     Ok(a)
 }
 
-/// Live external-agent sessions for one mission, keyed by session key
-/// (task id for workers so repair follow-ups reuse the session; role name
-/// for control). Drivers are spawned lazily and all shut down — protocol
-/// close first, bounded process-tree kill second — when the mission ends.
-pub struct MissionRt {
-    pool: std::sync::Mutex<std::collections::HashMap<String, driver::AcpSession>>,
-    /// Resolved `[agent]` limits — parsed once per mission instead of
-    /// re-reading global + project TOML on every agent spawn.
+/// Native runtime settings resolved once per mission.
+struct MissionRt {
     limits: crate::config::AgentLimits,
 }
 
-impl MissionRt {
-    /// Get or spawn a session for `key`. A dead or mismatched driver is
-    /// torn down and respawned — never silently reused after transport
-    /// failure (side effects may be unobservable).
-    #[allow(clippy::too_many_arguments)]
-    async fn session(
-        &self,
-        cfg: &MissionCfg,
-        spec: &crate::config::AcpSpec,
-        key: &str,
-        agent_id: &str,
-        cwd: &Path,
-        expect: &str,
-    ) -> Result<driver::AcpSession> {
-        // fast path: live session for this key
-        {
-            let pool = self.pool.lock().unwrap();
-            if let Some(s) = pool.get(key) {
-                if !s.dead() {
-                    return Ok(s.clone());
-                }
-            }
-        }
-        // dead/missing → (re)spawn. A prior dead session is dropped here,
-        // which ends its loop and kills any lingering child.
-        let dir = cfg.run_dir.join("acp-artifacts").join(key);
-        std::fs::create_dir_all(&dir)?;
-        let journal = Arc::new(Mutex::new(Journal::open_named(
-            &cfg.run_dir,
-            &format!("acp-{key}"),
-        )?));
-        let norm = Arc::new(Mutex::new(crate::acp::norm::Norm::new(
-            cfg.run,
-            agent_id.to_string(),
-            cfg.events.clone(),
-            journal.clone(),
-        )));
-        // same gate posture as native workers: worktrees are disposable,
-        // a UI session flag still applies when present
-        let mut g = Gate::new(true);
-        if let (Some(sink), Some((_, f))) = (&cfg.events, &cfg.cancel) {
-            g.set_ui(sink.clone(), f.clone(), cfg.session_approve.clone());
-        }
-        let sess = driver::AcpSession::spawn(
-            key.to_string(),
-            spec.clone(),
-            cwd,
-            Some(driver::BridgeCfg {
-                dir,
-                expect: expect.to_string(),
-            }),
-            norm,
-            Arc::new(tokio::sync::Mutex::new(g)),
-            journal,
-            cfg.run,
-        )
-        .await?;
-        let mut pool = self.pool.lock().unwrap();
-        if let Some(old) = pool.insert(key.to_string(), sess.clone()) {
-            tokio::spawn(async move { old.shutdown().await });
-        }
-        Ok(sess)
-    }
-
-    /// Protocol-close every session; bounded process-tree kill follows.
-    pub async fn shutdown_all(&self) {
-        let sessions: Vec<driver::AcpSession> =
-            self.pool.lock().unwrap().drain().map(|(_, s)| s).collect();
-        for s in sessions {
-            s.cancel(); // protocol cancel first — cheap even when idle
-            s.shutdown().await;
-        }
-    }
-}
-
-/// Worker-role dispatch: native agent loop or an ACP session prompt in
-/// the task worktree. Either way the deterministic gates afterwards
-/// (ownership, acceptance) are the real contract — an agent's `end_turn`
-/// or reported success is never proof.
+/// Run the native worker inside its task worktree. Ownership and
+/// acceptance gates validate the result after the turn returns.
 async fn drive_task(
     cfg: &MissionCfg,
     rt: &MissionRt,
@@ -318,132 +233,50 @@ async fn drive_task(
     agent_id: &str,
     journal_name: &str,
 ) -> Result<()> {
-    match &cfg.worker {
-        Backend::Native(prof) => {
-            let mut agent = mk_agent(
-                cfg,
-                prof,
-                wt,
-                &prompts::worker_system(),
-                Journal::open_named(&cfg.run_dir, journal_name)?,
-                agent_id,
-                "worker",
-                &cfg.session,
-                c.max_turns.unwrap_or(cfg.worker_max_turns),
-                cfg.request_timeout,
-                cfg.context_budget,
-                cfg.context_reserve,
-                &rt.limits,
-            )?;
-            tokio::time::timeout(cfg.task_timeout, agent.run_turn(&prompt))
-                .await
-                .context("task deadline")?
-        }
-        Backend::Acp(spec) => {
-            let sess = rt.session(cfg, spec, &c.id, agent_id, wt, "any").await?;
-            match tokio::time::timeout(cfg.task_timeout, sess.prompt(&prompt)).await {
-                Err(_) => {
-                    // deadline: protocol cancel first, then the pool's
-                    // bounded kill. The session is poisoned — its remaining
-                    // side effects are unobservable, so it is not reused.
-                    sess.cancel();
-                    sess.shutdown().await;
-                    rt.pool.lock().unwrap().remove(&c.id);
-                    bail!("task deadline");
-                }
-                Ok(Err(e)) => Err(e),
-                Ok(Ok(end)) => match end.stop {
-                    agent_client_protocol::schema::v1::StopReason::EndTurn => Ok(()),
-                    agent_client_protocol::schema::v1::StopReason::Cancelled => {
-                        bail!("agent turn cancelled")
-                    }
-                    agent_client_protocol::schema::v1::StopReason::Refusal => {
-                        bail!("agent refused")
-                    }
-                    other => bail!("agent stopped: {other:?}"),
-                },
-            }
-        }
-    }
+    let mut agent = mk_agent(
+        cfg,
+        &cfg.worker,
+        wt,
+        &prompts::worker_system(),
+        Journal::open_named(&cfg.run_dir, journal_name)?,
+        agent_id,
+        "worker",
+        &cfg.session,
+        c.max_turns.unwrap_or(cfg.worker_max_turns),
+        cfg.request_timeout,
+        cfg.context_budget,
+        cfg.context_reserve,
+        &rt.limits,
+    )?;
+    tokio::time::timeout(cfg.task_timeout, agent.run_turn(&prompt))
+        .await
+        .context("task deadline")?
 }
 
 /// Shape validator for a control payload (plan, verdict, escalation).
 type PayloadCheck = Arc<dyn Fn(&Value) -> Result<()> + Send + Sync>;
 
-/// Control-role dispatch: native uses submit_result interception; ACP
-/// reads the session's artifact drops (shape-validated by the bridge,
-/// re-validated here authoritatively). Returns the captured payload.
+/// Capture a runtime-validated native submit_result payload.
 #[allow(clippy::too_many_arguments)]
 async fn run_control(
     cfg: &MissionCfg,
     rt: &MissionRt,
-    backend: &Backend,
+    prof: &Profile,
     agent_id: &str,
     workspace: &Path,
     prompt: String,
-    expect: &str,
     check: PayloadCheck,
 ) -> Result<Cap> {
-    match backend {
-        Backend::Native(prof) => {
-            let (mut a, cap) = control_agent(cfg, rt, prof, workspace, agent_id, check)?;
-            // same deadline as the ACP arm — a stuck control turn must
-            // not hang the mission (max_turns alone bounds it much looser)
-            tokio::time::timeout(cfg.task_timeout, a.run_turn(&prompt))
-                .await
-                .context("control deadline")??;
-            let c = cap.lock().unwrap();
-            Ok(Cap {
-                payload: c.payload.clone(),
-                rejects: c.rejects,
-                last_error: c.last_error.clone(),
-            })
-        }
-        Backend::Acp(spec) => {
-            let dir = cfg.run_dir.join("acp-artifacts").join(agent_id);
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)?;
-            }
-            // Recreate even when the session is pooled: session() only
-            // makes the dir on the SPAWN path, but the bridge writes
-            // artifacts into it on every submit_result — a reused
-            // session would find its drop dir gone and every
-            // submission would fail.
-            std::fs::create_dir_all(&dir)?;
-            let sess = rt
-                .session(cfg, spec, agent_id, agent_id, workspace, expect)
-                .await?;
-            let full = format!(
-                "{prompt}\n\nSubmit your final deliverable ONLY via the MCP tool \
-                 `submit_result` (server `sui-artifacts`). Do not paste it in chat; \
-                 end your turn after a successful submission."
-            );
-            let end = tokio::time::timeout(cfg.task_timeout, sess.prompt(&full))
-                .await
-                .context("control deadline")??;
-            let mut cap = Cap {
-                payload: None,
-                rejects: 0,
-                last_error: None,
-            };
-            for payload in bridge::read_artifacts(&dir) {
-                match check(&payload) {
-                    Ok(()) => {
-                        cap.payload = Some(payload);
-                        break;
-                    }
-                    Err(e) => {
-                        cap.rejects += 1;
-                        cap.last_error = Some(format!("{e:#}"));
-                    }
-                }
-            }
-            if cap.payload.is_none() && cap.last_error.is_none() {
-                cap.last_error = Some(format!("turn ended {:?} with no artifact", end.stop));
-            }
-            Ok(cap)
-        }
-    }
+    let (mut a, cap) = control_agent(cfg, rt, prof, workspace, agent_id, check)?;
+    tokio::time::timeout(cfg.task_timeout, a.run_turn(&prompt))
+        .await
+        .context("control deadline")??;
+    let c = cap.lock().unwrap();
+    Ok(Cap {
+        payload: c.payload.clone(),
+        rejects: c.rejects,
+        last_error: c.last_error.clone(),
+    })
 }
 
 /// Control-plane agent (orchestrator / auditor / escalation) with
@@ -579,7 +412,7 @@ async fn base_for(
 
 /// Worker lifecycle: worktree → agent run → commit → ownership →
 /// acceptance gates. Never panics on task failure — returns evidence.
-/// The agent backend (native loop or external ACP) is interchangeable;
+/// The native loop implements the task inside its isolated worktree;
 /// the gates are not.
 async fn spawn_task(
     cfg: &MissionCfg,
@@ -767,7 +600,6 @@ async fn escalate(
         "escalation",
         &worktree::worktrees_dir(&cfg.run_dir).join("control"),
         prompts::escalation_task(&contract_json, &prev.capsule, budget_left),
-        "decision",
         check,
     )
     .await
@@ -949,7 +781,6 @@ async fn audit_once(
         "auditor",
         integ_wt,
         prompts::audit_task(plan, diff, gates, risks),
-        "verdict",
         check,
     )
     .await?;
@@ -988,6 +819,7 @@ pub async fn run(cfg: MissionCfg) -> Result<MissionReport> {
 }
 
 async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
+    crate::config::validate_native_config(None, &cfg.repo)?;
     let t0 = Instant::now();
     let mut journal = Journal::open_named(&cfg.run_dir, "mission")?;
     std::fs::create_dir_all(worktree::worktrees_dir(&cfg.run_dir))?;
@@ -1019,9 +851,8 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
         run_dir: cfg.run_dir.clone(),
     };
 
-    // external-agent session pool; scoped so drivers die with the mission
+    // Native limits stay stable for the lifetime of this mission.
     let rt = MissionRt {
-        pool: Default::default(),
         limits: crate::config::agent_limits(&cfg.repo),
     };
     // scoped so the body's borrows release before report finalization
@@ -1061,9 +892,6 @@ async fn run_inner(cfg: &MissionCfg) -> Result<MissionReport> {
             }
         }
     };
-    // bounded teardown: protocol cancel → close → process-tree kill —
-    // runs before a body error propagates so agents never leak
-    rt.shutdown_all().await;
     let flow = flow?;
     if cancelled {
         journal.log("mission", json!({ "state": format!("{:?}", S::Cancelled) }));
@@ -1214,7 +1042,6 @@ async fn body(
         "orchestrator",
         &control_wt,
         prompts::orchestrator_task(&cfg.objective, &base, &overview),
-        "plan",
         check_plan,
     )
     .await

@@ -44,8 +44,7 @@ pub async fn validate(plan: &MissionPlan, repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Repo-free plan invariants — used by the ACP artifact bridge, which
-/// validates submissions without holding repository context.
+/// Repo-free plan invariants checked before repository validation.
 pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
     if plan.objective.trim().is_empty() {
         bail!("plan: empty objective");
@@ -61,8 +60,7 @@ pub fn validate_shape(plan: &MissionPlan) -> Result<()> {
     for t in &plan.tasks {
         // Task ids become worktree dir names (wt_dir.join(&id) — a
         // "../" id would make remove_dir_all delete arbitrary paths),
-        // git branch names, journal filenames, session keys, and ACP
-        // artifact dirs. Restrict to a filesystem-and-ref-safe alphabet
+        // git branch names, journal filenames, and session keys. Restrict to a filesystem-and-ref-safe alphabet
         // and reserve the control-plane names so a task can't collide
         // with orchestrator/auditor/escalation session keys.
         if !valid_task_id(&t.id) || !ids.insert(t.id.clone()) {

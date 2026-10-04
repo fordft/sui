@@ -117,43 +117,11 @@ pub struct Profile {
     pub pricing: Option<PricingCfg>,
 }
 
-/// A trusted external coding-agent executable — the ACP backend side.
-/// Resolved from `[agents.<name>]` in user-owned config only (global or
-/// --config), never from project sui.toml. `approved` is the explicit
-/// install/trust bit: Sui never auto-installs and refuses unapproved
-/// commands. Authentication belongs to the agent's own CLI (e.g. Devin
-/// Cloud login, Codex auth) — Sui injects no credentials and scrubs the
-/// inherited environment before spawning.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AcpSpec {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    /// Extra environment variable NAMES copied to the child beyond the
-    /// built-in safe set. Secret-looking names are refused at spawn.
-    pub env_allow: Vec<String>,
-    /// Preferred model. Applied via `session/set_config_option` when the
-    /// session advertises a Model option; known backends (devin) may take
-    /// it as a launch arg instead. Absent = agent default.
-    pub model: Option<String>,
-    pub approved: bool,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct ExternalAgentCfg {
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    env_allow: Option<Vec<String>>,
-    model: Option<String>,
-    approved: Option<bool>,
-}
-
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
     provider: Option<ProviderCfg>,
     agent: Option<AgentCfg>,
     profiles: Option<BTreeMap<String, ProfileCfg>>,
-    agents: Option<BTreeMap<String, ExternalAgentCfg>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -286,6 +254,52 @@ fn read_toml(p: &Path) -> Result<FileConfig> {
     toml::from_str(&s).with_context(|| format!("parse {}", p.display()))
 }
 
+/// Reject removed executable-agent configuration before any native agent starts.
+/// Read-only consumers, including historical exports, still use read_toml.
+pub fn validate_native_config(config_path: Option<&Path>, workspace: &Path) -> Result<()> {
+    validate_native_sources(config_path, Some(workspace))
+}
+
+fn validate_native_sources(config_path: Option<&Path>, workspace: Option<&Path>) -> Result<()> {
+    let mut paths = Vec::new();
+    if let Some(p) = global_cfg_path().filter(|p| p.exists()) {
+        paths.push(p);
+    }
+    if let Some(p) = workspace.map(|w| w.join("sui.toml")).filter(|p| p.exists()) {
+        paths.push(p);
+    }
+    if let Some(p) = config_path {
+        paths.push(p.to_path_buf());
+    }
+    for p in paths {
+        let contents =
+            std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+        let doc: toml::Value = contents
+            .parse()
+            .with_context(|| format!("parse {}", p.display()))?;
+        if doc.get("agents").is_some() {
+            bail!("ACP agents have been removed; remove [agents] from {} and use native [profiles.<name>] profiles", p.display());
+        }
+        if let Some(ui) = doc.get("ui") {
+            for role in [
+                "solo_profile",
+                "orchestrator_profile",
+                "worker_profile",
+                "auditor_profile",
+            ] {
+                if ui
+                    .get(role)
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|name| name.starts_with("acp:"))
+                {
+                    bail!("ACP agents have been removed; replace [ui].{role} in {} with a native profile name", p.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Profiles are read ONLY from user-owned files: ~/.config/sui/config.toml
 /// and an explicit --config path. Project sui.toml profiles are ignored.
 pub fn profiles(config_path: Option<&Path>) -> Result<BTreeMap<String, ProfileCfg>> {
@@ -332,75 +346,13 @@ pub fn global_provider_key() -> Option<String> {
     pc.api_key.filter(|k| !k.is_empty())
 }
 
-/// Names of every defined `[agents.<name>]` (user-owned files only) —
-/// for the TUI role picker; resolution/approval still goes through
-/// `resolve_agent`.
-pub fn agent_names(config_path: Option<&Path>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for p in [global_cfg_path(), config_path.map(|p| p.to_path_buf())]
-        .into_iter()
-        .flatten()
-    {
-        if let Ok(c) = read_toml(&p) {
-            if let Some(as_) = c.agents {
-                out.extend(as_.keys().cloned());
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// Resolve a named external ACP agent. Like profiles, `[agents]` entries
-/// are read ONLY from user-owned files — a project file could otherwise
-/// point the mission at an arbitrary executable.
-pub fn resolve_agent(name: &str, config_path: Option<&Path>) -> Result<AcpSpec> {
-    let mut all = BTreeMap::new();
-    if let Some(g) = global_cfg_path().filter(|p| p.exists()) {
-        if let Some(as_) = read_toml(&g)?.agents {
-            all.extend(as_);
-        }
-    }
-    if let Some(p) = config_path {
-        if let Some(as_) = read_toml(p)?.agents {
-            all.extend(as_);
-        }
-    }
-    let a = all.get(name).with_context(|| {
-        format!(
-            "unknown agent '{name}' (defined: {})",
-            if all.is_empty() {
-                "none — add [agents.<name>] to ~/.config/sui/config.toml".into()
-            } else {
-                all.keys().cloned().collect::<Vec<_>>().join(", ")
-            }
-        )
-    })?;
-    let command = a
-        .command
-        .clone()
-        .filter(|c| !c.trim().is_empty())
-        .with_context(|| format!("agent '{name}' needs a command"))?;
-    if !a.approved.unwrap_or(false) {
-        bail!(
-            "agent '{name}' is not approved — verify the executable ({command}) and set \
-             approved = true in [agents.{name}]"
-        );
-    }
-    Ok(AcpSpec {
-        name: name.to_string(),
-        command,
-        args: a.args.clone().unwrap_or_default(),
-        env_allow: a.env_allow.clone().unwrap_or_default(),
-        model: a.model.clone(),
-        approved: true,
-    })
-}
-
 /// Resolve a named profile for certification. Key material comes from the
 /// profile's key_env env var, or an inline api_key in the user-owned file.
 pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile> {
+    if name.starts_with("acp:") {
+        bail!("ACP agents have been removed; select a native [profiles.<name>] profile");
+    }
+    validate_native_sources(config_path, None)?;
     let all = profiles(config_path)?;
     let p = all.get(name).with_context(|| {
         format!(
@@ -443,6 +395,7 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .context("workspace path does not exist")?;
+    validate_native_config(ov.config_path.as_deref(), &workspace)?;
 
     let mut global = FileConfig::default();
     if let Some(g) = global_cfg_path().filter(|p| p.exists()) {
@@ -469,9 +422,6 @@ pub fn load(ov: Overrides) -> Result<Config> {
     }
     if project.profiles.is_some() {
         eprintln!("warning: [profiles] in project sui.toml ignored (profiles are global-only)");
-    }
-    if project.agents.is_some() {
-        eprintln!("warning: [agents] in project sui.toml ignored (agents are global-only)");
     }
     if project
         .agent
@@ -622,7 +572,7 @@ pub fn load(ov: Overrides) -> Result<Config> {
         run_dir,
         session_id,
         // auto_approve is flag/global-only — same trust class as
-        // [profiles]/[agents]/api_key: a checked-in project file must
+        // [profiles]/api_key: a checked-in project file must
         // not be able to turn on unattended bash/write execution.
         auto_approve: ov.auto_approve || fa.auto_approve.or(ga.auto_approve).unwrap_or(false),
         max_turns: al.max_turns,

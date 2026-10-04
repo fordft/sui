@@ -8,8 +8,7 @@
 //!   turns web access on.
 //! - Retrieved content is untrusted external data, never instructions.
 //! - Search snippets are not fetched content; cached results are not
-//!   fresh results; agent-reported ACP search activity is never
-//!   re-executed. Honesty fields record what actually happened.
+//!   fresh results. Honesty fields record what actually happened.
 //! - The API key rides only on the MCP endpoint URL — never into
 //!   journals, tool envelopes, or model context.
 

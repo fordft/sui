@@ -182,8 +182,8 @@ fn cfg(port: u16, repo: &Path) -> MissionCfg {
     MissionCfg {
         repo: repo.to_path_buf(),
         run_dir: std::env::temp_dir().join(format!("sui-mrun-{ts}")),
-        control: sui::backend::Backend::Native(prof("strong")),
-        worker: sui::backend::Backend::Native(prof("cheap")),
+        control: prof("strong"),
+        worker: prof("cheap"),
         auditor: None,
         objective: "test objective".into(),
         max_workers: 1,
@@ -267,6 +267,75 @@ async fn mission_success() {
         "integration branch must survive cleanup"
     );
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), sha);
+}
+
+#[tokio::test]
+async fn native_mission_cli_runs_profiles_through_acceptance_and_audit() {
+    let _g = LOCK.lock().await;
+    let repo = fixture_repo();
+    let base = head(&repo);
+    let port = mock(Script {
+        plan_payload: good_plan(&base),
+        worker_routes: vec![],
+        worker_first: worker_writes("out/ok.txt", "ok\n"),
+        worker_repair: json!("text"),
+        audit_verdicts: vec!["PASS".into()],
+        escalation: json!({"decision": "abort"}),
+    });
+    let fixture_home = repo.with_extension("cli-home");
+    std::fs::create_dir_all(&fixture_home).unwrap();
+    let config = fixture_home.join("profiles.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[profiles.strong]\nbase_url = 'http://127.0.0.1:{port}/v1'\nmodel = 'mock'\n\
+         [profiles.cheap]\nbase_url = 'http://127.0.0.1:{port}/v1'\nmodel = 'mock'\n"
+        ),
+    )
+    .unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_sui-mission"))
+            .env("HOME", &fixture_home)
+            .args([
+                "--control-profile",
+                "strong",
+                "--worker-profile",
+                "cheap",
+                "--auditor-profile",
+                "strong",
+                "--task",
+                "write the marker",
+            ])
+            .arg("--workspace")
+            .arg(&repo)
+            .arg("--config")
+            .arg(&config)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("accepted"));
+    assert!(repo_clean(&repo), "original checkout must stay untouched");
+    assert_eq!(head(&repo), base);
+    let runs = fixture_home.join(".local/share/sui/runs");
+    let run = std::fs::read_dir(runs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let journal = std::fs::read_to_string(run.join("mission.jsonl")).unwrap();
+    assert!(journal.contains("Accepted"));
+    assert!(journal.contains("PASS"));
+    let _ = std::fs::remove_dir_all(fixture_home);
 }
 
 #[tokio::test]

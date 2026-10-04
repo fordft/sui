@@ -64,8 +64,7 @@ impl Gate {
         self.decide(summary, agent, run).await != GateChoice::Deny
     }
 
-    /// Same gate as `check` but returns the typed decision — ACP permission
-    /// requests need Once vs Session to pick the matching option kind.
+    /// Same gate as check, preserving one-action versus session approval.
     pub async fn decide(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
         self.decide_inner(summary, agent, run, false).await
     }

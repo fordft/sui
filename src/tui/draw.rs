@@ -1519,7 +1519,7 @@ Settings → theme: slime, dark or terminal
 Click the slime · Settings → motion
 
 Approvals remain per action. Auto-approve
-never enables web access or external agents.";
+never enables web access.";
             let inner = panel(app).inner(r);
             let lines = super::transcript::wrap(text, inner.width.max(1) as usize);
             let max = lines.len().saturating_sub(inner.height as usize);

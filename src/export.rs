@@ -411,6 +411,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 }
                 "task" => agent.timeline.push(tl(ts, "task", d.clone())),
                 "task_done" => agent.timeline.push(tl(ts, "task_done", d.clone())),
+                // Historical ACP journals remain readable after backend removal.
                 "acp_model" => agent.timeline.push(tl(ts, "acp_model", d.clone())),
                 "journal_error" => agent.timeline.push(tl(ts, "journal_error", d.clone())),
                 "user" => agent.timeline.push(tl(ts, "user", d.clone())),

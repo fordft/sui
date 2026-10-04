@@ -1,6 +1,4 @@
-pub mod acp;
 pub mod agent;
-pub mod backend;
 pub mod charter;
 pub mod codex;
 pub mod config;

@@ -153,6 +153,7 @@ pub fn start_solo(
     web: Option<Arc<crate::web::WebService>>,
     saved: Option<&crate::session::SavedSession>,
 ) -> Result<Solo> {
+    config::validate_native_config(None, &workspace)?;
     let lock = crate::session::SessionLock::acquire(&jdir)?;
     let (tx, mut rx) = unbounded_channel::<(u64, String)>();
     let sig = solo_signature(&prof);
@@ -284,17 +285,6 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
     })
 }
 
-/// Role name → backend. `acp:<name>` selects a trusted external agent
-/// from `[agents.<name>]`; anything else is a native provider profile.
-pub fn resolve_to_backend(app: &App, name: &str) -> Option<crate::backend::Backend> {
-    if let Some(agent) = name.strip_prefix("acp:") {
-        return config::resolve_agent(agent, None)
-            .ok()
-            .map(crate::backend::Backend::Acp);
-    }
-    resolve_to_profile(app, name).map(crate::backend::Backend::Native)
-}
-
 pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
     run_with_resume(force_mission, yolo, None, None).await
 }
@@ -313,6 +303,8 @@ pub async fn run_with_resume(
         .unwrap_or_else(|| PathBuf::from("."))
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from("."));
+
+    config::validate_native_config(None, &workspace)?;
 
     // terminal init + panic-safe restore
     enable_raw_mode().context("raw mode")?;
@@ -595,13 +587,13 @@ pub async fn run_with_resume(
                         Mode::Mission => {
                             let control = app
                                 .role_profile(Role::Orchestrator)
-                                .and_then(|n| resolve_to_backend(&app, &n));
+                                .and_then(|n| resolve_to_profile(&app, &n));
                             let worker = app
                                 .role_profile(Role::Worker)
-                                .and_then(|n| resolve_to_backend(&app, &n));
+                                .and_then(|n| resolve_to_profile(&app, &n));
                             let auditor = app
                                 .role_profile(Role::Auditor)
-                                .and_then(|n| resolve_to_backend(&app, &n));
+                                .and_then(|n| resolve_to_profile(&app, &n));
                             match (control, worker) {
                                 (Some(control), Some(worker)) => {
                                     let al = config::agent_limits(&workspace);

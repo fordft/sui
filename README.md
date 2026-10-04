@@ -115,24 +115,15 @@ Codex backend's Responses API — subscription access, not API billing,
 so cost fields report unknown rather than zero. Tokens refresh
 transparently and never touch journals or prompts.
 
-### External coding agents (ACP)
+All roles run Sui's native agent loop with a model/provider profile.
+The Codex OAuth profile uses the Responses API through this same loop.
 
-Run a whole agent — `devin acp`, the Codex ACP adapter — in a mission
-role over the Agent Client Protocol. Configured in user-owned config
-only, with an explicit trust bit:
-
-```toml
-[agents.devin]
-command = "devin"
-args = ["acp"]
-approved = true        # required — Sui never installs or runs unapproved agents
-```
-
-External agents own their internal model/tool loop; Sui still owns the
-contract, worktrees, ownership checks, acceptance gates, and audit.
-Their tool calls are evidence, never re-executed; their `end_turn` is
-never proof. Children spawn with an empty environment — provider keys
-never leak into them.
+ACP executable-agent support has been removed. Remove legacy [agents]
+tables and replace acp:<name> values in [ui] roles with native profile
+names. Missions use --control-profile, --worker-profile and optional
+--auditor-profile. The old --*-agent flags and acp-bridge command are
+unavailable. Configuration is never rewritten automatically; historical
+journals remain available through export.
 
 ## The TUI
 
@@ -318,8 +309,6 @@ release-verification.
 ```bash
 sui-mission --control-profile strong --worker-profile cheap \
   --auditor-profile strong --task "..." 
-# external agents in any role:
-sui-mission --control-profile codex --worker-agent devin --task "..."
 ```
 
 The runtime — not the model — owns scheduling, worktrees, contract

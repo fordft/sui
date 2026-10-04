@@ -3360,16 +3360,6 @@ impl App {
                     self.status = "auditor follows orchestrator".into();
                     return None;
                 }
-                // ACP agents aren't profiles — resolve() misses them, so
-                // picking one used to close the modal without setting the
-                // role. `acp:<name>` is a valid role value end-to-end
-                // (resolve_to_backend handles it); no model pick follows.
-                if choice.starts_with("acp:") {
-                    self.set_role_profile(r, choice.clone());
-                    self.effects.push(Effect::SaveUi);
-                    self.status = format!("{} → {choice}", r.name());
-                    return None;
-                }
                 // profile chosen → fetch its models for a second pick
                 if let Some((base, key, _)) = self.resolve(&choice) {
                     let request = self.next_id();
@@ -3607,12 +3597,6 @@ impl App {
             }
             Some(SettingsRow::Role(role)) => {
                 let mut items: Vec<String> = self.profiles.keys().cloned().collect();
-                // external ACP agents are selectable per-role as acp:<name>
-                items.extend(
-                    config::agent_names(None)
-                        .into_iter()
-                        .map(|n| format!("acp:{n}")),
-                );
                 if role == Role::Auditor {
                     items.insert(0, "(same as orchestrator)".into());
                 }

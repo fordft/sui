@@ -9,16 +9,6 @@ use sui::{agent, config, context, journal, permission, provider, tools, web};
 enum Sub {
     /// Terminal UI (also the default when run bare on a terminal)
     Tui,
-    /// MCP artifact-submission bridge served over stdio — spawned by ACP
-    /// agents via session/new mcp_servers; not for interactive use
-    AcpBridge {
-        /// Session-scoped artifact drop directory
-        #[arg(long)]
-        dir: std::path::PathBuf,
-        /// Expected payload kind: plan | verdict | decision | any
-        #[arg(long, default_value = "any")]
-        expect: String,
-    },
     /// Sign in to OpenAI with your ChatGPT account (Codex OAuth).
     /// Reuses an existing `codex login` session automatically; this writes
     /// Sui's own token store so its refresh chain never collides with the
@@ -94,6 +84,9 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.prompt.as_deref() == Some("acp-bridge") {
+        anyhow::bail!("ACP agents and acp-bridge have been removed; use Sui's native profiles");
+    }
     if let Some(Sub::Tui) = &cli.sub {
         return sui::tui::run_with_resume(
             cli.mission,
@@ -102,9 +95,6 @@ async fn main() -> Result<()> {
             cli.workspace,
         )
         .await;
-    }
-    if let Some(Sub::AcpBridge { dir, expect }) = &cli.sub {
-        return sui::acp::bridge::serve(dir, expect);
     }
     if let Some(Sub::Auth { manual }) = &cli.sub {
         let path = sui::codex::login(*manual).await?;
