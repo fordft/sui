@@ -133,9 +133,11 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
         let Ok(events) = preview(&path) else { continue };
         let matches = events.iter().any(|v| {
             v["type"] == crate::journal::ev::SESSION
-                && v["data"]["workspace"]
-                    .as_str()
-                    .is_some_and(|p| Path::new(p) == want)
+                && v["data"]["workspace"].as_str().is_some_and(|p| {
+                    Path::new(p)
+                        .canonicalize()
+                        .is_ok_and(|recorded| recorded == want)
+                })
         });
         if !matches {
             continue;

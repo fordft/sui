@@ -155,6 +155,21 @@ fn recovery_refuses_active_incomplete_foreign_and_older_sessions() {
         .contains("tool call"));
 }
 
+#[cfg(unix)]
+#[test]
+fn recent_sessions_recognize_workspace_aliases_without_crossing_repos() {
+    let root = dir();
+    let workspace = dir();
+    let alias = root.join("workspace-alias");
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    fixture(&root, &alias, "aliased", false);
+    let recent = sui::session::recent(&root, &workspace, None).unwrap();
+    assert!(recent.iter().any(|s| s.id == "aliased"));
+    assert!(sui::session::recent(&root, &dir(), None)
+        .unwrap()
+        .is_empty());
+}
+
 fn details(n: u64, epoch: &str) -> RequestDetails {
     RequestDetails {
         request_id: n,
