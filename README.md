@@ -238,6 +238,56 @@ targets — private/link-local/metadata IPs, credential-bearing or
 secret-shaped URLs, non-http(s) schemes — are refused before anything is
 sent. Per-run request caps apply across all workers in a mission.
 
+## Built-in headless UI testing
+
+Ask Sui to test a web or terminal interface directly. Native agents have
+`browser`, `terminal`, and `view_image` tools; Sui opens and owns the
+sessions. No monitor, desktop, Xvfb, separate Playwright CLI, or ttyd
+server is required, including on Ubuntu over SSH.
+
+- `browser`: open a URL, inspect an accessibility snapshot, click/fill by
+  role and exact name or CSS selector, press keys, resize, screenshot, close.
+- `terminal`: start a real program with arguments in the workspace,
+  type/press keys, resize, inspect the interpreted terminal screen,
+  screenshot, close. ANSI cursor movement and alternate screens are rendered
+  with xterm, rather than treated as a raw output log.
+- `view_image`: send a workspace PNG/JPEG/WebP (up to 4 MiB) as image input.
+
+On first use, independent UI consent covers downloading **pinned**
+Playwright/xterm packages and Chromium into the user cache. Later sessions
+reuse the cache. The server needs **Node.js 20+, npm, and Chromium system
+libraries**; Sui does not install privileged OS packages. No project
+dependencies are modified. Session processes are killed on cancellation,
+timeout, close, or agent drop. Each native agent owns its own sessions.
+
+Browser requests and WebSockets are restricted to HTTP(S)/WS(S) on
+`localhost`, `127.0.0.1`, and `[::1]`, including redirect destinations.
+Service workers and downloads are disabled. To authorize unattended UI
+sessions, set `[browser] approved = true` in **global user config**;
+`allow_remote = true` separately permits remote traffic, and
+`auto_install = false` prevents automatic dependency downloads. Project
+config, YOLO, and web-research settings cannot enable these permissions.
+This is an automation guard, not an OS sandbox; terminal programs run
+with user privileges and a scrubbed environment, like the bash tool.
+
+Image-capable API profiles must declare `image_input = true` in trusted
+`[provider]` or `[profiles.<name>]` config. Codex OAuth defaults to image
+input. Text-only profiles still use snapshots and can save screenshots,
+but receive an explicit **visual review unverified** result. Images stay
+in memory unless the tool requests a workspace-relative `path`; image
+bytes are never placed in journals or exports. Browser screenshots mask
+password fields and elements marked `data-sui-private`; snapshots exclude
+these fields too, and fill refuses private/password targets. Use test data.
+Screenshots are viewport captures. Check persisted application state as
+well as appearance before declaring a flow verified.
+
+The real browser/PTY integration test is opt-in because it can download
+dependencies:
+
+```bash
+cargo test --test ui_headless -- --include-ignored
+```
+
 ## Engineering lenses
 
 Native agents carry a small always-on **scan** (outcome · correctness ·
@@ -326,6 +376,37 @@ Runtime: **git** and **bash** for workspace/mission operations; the
 target project's own toolchain for its builds/tests. Headless Linux is
 supported — without a desktop credential service, keys fall back to
 session/env storage, and `sui auth codex --manual` handles login.
+
+## Cache behavior and long sessions
+
+Profiles default to Chat Completions. Set `kind = "openai-responses"` in a
+trusted global profile to use a compatible `/v1/responses` endpoint directly.
+This keeps Responses usage fields (including reported zero cache reads and
+writes) and encrypted reasoning for tool continuation. It also avoids token
+count changes introduced by some gateways' Chat conversion paths. Sui never
+subtracts a guessed gateway overhead. `sui-certify` reports a token-weighted
+cache rate with measured-request coverage; missing fields remain unknown.
+Pricing uses separate uncached, cache-read, and cache-write input buckets.
+An incomplete count or required price makes the estimate unknown.
+
+With `[agent] context_compaction = true` (default), the native loop requests a
+summary near 80% of its context budget. The request appends a summary instruction
+while preserving model, tool schemas, settings and the existing conversation.
+A completed bounded summary becomes a journaled context checkpoint in a new
+epoch, retaining the latest text task verbatim. Summary generation counts toward
+request limits and usage. Tool calls from a summarization request are never
+executed. Failed or insufficient summaries preserve the old history; input
+already above the hard budget still stops. A summary provides context, not
+runtime verification or permission. Set `context_compaction = false` to retain
+the original stop-at-budget behavior.
+
+Opaque reasoning for journal replay lives in bounded, owner-only, hash-verified
+`replay-*.json` sidecars next to the journal. Sidecar contents are excluded from
+exports. Keep them with the journal for exact Responses replay; a missing or
+modified sidecar fails replay explicitly. Image-bearing history still cannot
+claim exact replay from text-only journals. Gateway/backend caching controls
+require separate capability verification; an API-compatible endpoint need not
+support explicit breakpoints or public API diagnostics.
 
 ## Known limitations
 

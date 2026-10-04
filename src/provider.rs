@@ -1,3 +1,5 @@
+pub(crate) mod responses;
+
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -15,10 +17,16 @@ pub struct Provider {
     client: reqwest::Client,
     inner: Inner,
     model: String,
+    image_input: bool,
     prompt_cache_key: Option<String>,
+    session_id: String,
 }
 
 enum Inner {
+    Responses {
+        url: String,
+        api_key: Option<String>,
+    },
     Chat {
         url: String,
         api_key: Option<String>,
@@ -77,19 +85,62 @@ impl Provider {
             }
         };
         Self {
+            image_input: base_url.starts_with("codex://"),
             client: b.build().unwrap_or_else(|_| reqwest::Client::new()),
             inner,
             model,
             prompt_cache_key,
+            session_id: format!("sui-{}-{:032x}", std::process::id(), rand::random::<u128>()),
         }
+    }
+
+    pub(crate) fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    pub fn from_profile(profile: &crate::config::Profile) -> Self {
+        Self::new(
+            &profile.base_url,
+            profile.api_key.clone(),
+            profile.model.clone(),
+            profile.prompt_cache_key.clone(),
+        )
+        .with_transport(profile.transport)
+        .with_image_input(profile.image_input)
+    }
+
+    pub fn with_transport(mut self, transport: crate::config::Transport) -> Self {
+        if transport == crate::config::Transport::CodexOauth {
+            self.inner = Inner::Codex(Default::default());
+        }
+        if transport == crate::config::Transport::OpenaiResponses {
+            if let Inner::Chat { url, api_key } = self.inner {
+                self.inner = Inner::Responses {
+                    url: format!("{}/responses", url.trim_end_matches("/chat/completions")),
+                    api_key,
+                };
+            }
+        }
+        self
+    }
+
+    /// Capability belongs to the resolved provider profile, never inferred
+    /// from a model-name substring or advertised as verified by the runtime.
+    pub fn with_image_input(mut self, enabled: bool) -> Self {
+        self.image_input = enabled;
+        self
+    }
+    pub fn image_input(&self) -> bool {
+        self.image_input
     }
 
     /// One streaming request. `on_delta` receives content fragments as they
     /// arrive; `on_reasoning` receives provider-exposed reasoning fragments
     /// (`reasoning_content`, or OpenRouter-style `reasoning` when the former
-    /// is absent — never both for the same delta). Opaque reasoning blobs
-    /// (e.g. reasoning_details objects) are preserved in the outcome but
-    /// never pushed through `on_reasoning` — they aren't displayable text.
+    /// is absent — never both for the same delta). Opaque Responses items
+    /// are preserved by Responses transports; Chat transports retain only
+    /// exposed reasoning text and cannot promise opaque-state replay.
     pub async fn stream_chat(
         &self,
         messages: &crate::context::Compiled<'_>,
@@ -111,6 +162,7 @@ impl Provider {
                         client: &self.client,
                         model: &self.model,
                         prompt_cache_key: self.prompt_cache_key.as_deref(),
+                        session_id: &self.session_id,
                     },
                     messages,
                     tools,
@@ -118,6 +170,36 @@ impl Provider {
                     on_reasoning,
                 )
                 .await;
+            }
+            Inner::Responses { url, api_key } => {
+                let start = Instant::now();
+                let (instructions, input) = crate::codex::build_input(messages);
+                let mut body = json!({
+                    "model": self.model, "instructions": instructions, "input": input,
+                    "tools": crate::codex::build_tools(tools), "tool_choice": "auto",
+                    "store": false, "stream": true, "include": ["reasoning.encrypted_content"],
+                });
+                if let Some(key) = &self.prompt_cache_key {
+                    body["prompt_cache_key"] = json!(key);
+                }
+                let mut http = self
+                    .client
+                    .post(url)
+                    .header(
+                        "session_id",
+                        self.prompt_cache_key.as_deref().unwrap_or(&self.session_id),
+                    )
+                    .json(&body);
+                if let Some(key) = api_key {
+                    http = http.bearer_auth(key);
+                }
+                let response = http.send().await.context("send Responses request")?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    // Provider errors may echo credentials; avoid persisting their body.
+                    bail!("provider http {status}");
+                }
+                return responses::read(response, start, on_delta, on_reasoning).await;
             }
             Inner::Chat { url, api_key } => (url.clone(), api_key.clone()),
         };
@@ -372,7 +454,23 @@ pub enum CapStatus {
 /// calling, and usage reporting in a single round trip. Costs one tiny
 /// request — the UI must warn before invoking.
 pub async fn probe(base_url: &str, api_key: Option<&str>, model: &str) -> Result<Probe> {
-    let p = Provider::new(base_url, api_key.map(String::from), model.to_string(), None);
+    probe_with_transport(
+        base_url,
+        api_key,
+        model,
+        crate::config::Transport::default(),
+    )
+    .await
+}
+
+pub async fn probe_with_transport(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    transport: crate::config::Transport,
+) -> Result<Probe> {
+    let p = Provider::new(base_url, api_key.map(String::from), model.to_string(), None)
+        .with_transport(transport);
     let msgs = vec![Message::User {
         content: "Reply with the word ok.".into(),
     }];
@@ -431,11 +529,13 @@ fn parse_usage(u: &Value) -> Usage {
         cache_read_tokens: g(&u["prompt_tokens_details"]["cached_tokens"])
             .or_else(|| g(&u["prompt_cache_hit_tokens"])),
         cache_write_tokens: g(&u["cache_write_tokens"])
-            .or_else(|| g(&u["prompt_tokens_details"]["cache_write_tokens"])),
+            .or_else(|| g(&u["prompt_tokens_details"]["cache_write_tokens"]))
+            .or_else(|| g(&u["prompt_tokens_details"]["cache_creation_tokens"])),
         output_tokens: g(&u["completion_tokens"]),
         // The stream proved the response complete only if a finish_reason
         // arrived — stream_chat stamps this after the loop.
         complete: false,
+        estimated: u["estimated"].as_bool().unwrap_or(false),
     }
 }
 

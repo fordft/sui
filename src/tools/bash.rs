@@ -305,6 +305,7 @@ pub async fn run(
             exit: None,
             truncated: out.truncated,
             preview_dropped: dropped,
+            image: None,
         });
     }
     if out.timed_out {
@@ -317,6 +318,7 @@ pub async fn run(
             exit: None,
             truncated: out.truncated,
             preview_dropped: dropped,
+            image: None,
         });
     }
     let code = out.code.unwrap_or(-1);
@@ -345,6 +347,7 @@ pub async fn run(
         exit: Some(code),
         truncated: out.truncated,
         preview_dropped: dropped,
+        image: None,
     })
 }
 
@@ -388,6 +391,7 @@ mod tests {
             bash_timeout_max: Duration::from_secs(60),
             web: None,
             canon_root: std::sync::OnceLock::new(),
+            ui: std::sync::OnceLock::new(),
         }
     }
 

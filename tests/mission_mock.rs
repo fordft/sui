@@ -166,12 +166,14 @@ fn head(repo: &PathBuf) -> String {
 
 fn cfg(port: u16, repo: &Path) -> MissionCfg {
     let prof = |name: &str| Profile {
+        transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "mock".into(),
         api_key: None,
         prompt_cache_key: None,
         pricing: None,
+        image_input: false,
     };
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -191,6 +193,7 @@ fn cfg(port: u16, repo: &Path) -> MissionCfg {
         task_timeout: Duration::from_secs(60),
         context_budget: 120_000,
         context_reserve: 8_192,
+
         control_max_turns: 10,
         worker_max_turns: 10,
         events: None,

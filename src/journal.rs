@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Event-type names are an implicit contract between writers (tui,
@@ -19,6 +19,7 @@ type Notice = Box<dyn Fn(&str) + Send>;
 /// perturb the repository epoch fingerprint.
 pub struct Journal {
     f: File,
+    replay_dir: PathBuf,
     /// Latched on the first persistence failure — the journal is the
     /// run's evidence trail, so once writes break we stop half-writing
     /// and let consumers see the gap.
@@ -54,9 +55,45 @@ impl Journal {
         let f = o.open(run_dir.join(format!("{name}.jsonl")))?;
         Ok(Self {
             f,
+            replay_dir: run_dir.to_path_buf(),
             failed: false,
             notice: None,
         })
+    }
+
+    /// Opaque replay state is kept in bounded owner-only sidecars, never
+    /// inline in journals or exports. Content addressing binds the reference.
+    pub fn store_response_items(&self, items: &[Value]) -> Result<Option<Value>> {
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let bytes = serde_json::to_vec(items)?;
+        if bytes.len() > REPLAY_LIMIT {
+            bail!("opaque replay state exceeds 4 MiB");
+        }
+        let hash = crate::context::sha256_hex(&bytes);
+        let filename = format!("replay-{hash}.json");
+        let path = self.replay_dir.join(&filename);
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if read_replay_file(&path)? != bytes {
+                    bail!("opaque replay state hash collision or damaged sidecar");
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(Some(json!({"file": filename, "sha256": hash})))
     }
 
     /// Route the failure diagnostic somewhere other than stderr —
@@ -127,11 +164,136 @@ impl Journal {
     }
 }
 
+const REPLAY_LIMIT: usize = 4 * 1024 * 1024;
+const JOURNAL_LINE_LIMIT: usize = 16 * 1024 * 1024;
+
+fn read_replay_file(path: &Path) -> Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .context("opaque replay sidecar is unavailable")?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() > REPLAY_LIMIT as u64 {
+        bail!("opaque replay sidecar exceeds bounds");
+    }
+    let mut bytes = Vec::new();
+    file.take(REPLAY_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > REPLAY_LIMIT {
+        bail!("opaque replay sidecar exceeds bounds");
+    }
+    Ok(bytes)
+}
+
+/// Restore the active context epoch. Legacy text journals remain readable;
+/// image observations and missing/tampered opaque state cannot claim replay.
+pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types::Message>> {
+    use crate::types::Message;
+    let mut history = Vec::new();
+    let mut users = 0;
+    let mut reader = BufReader::new(File::open(path)?);
+    loop {
+        let mut line = String::new();
+        let count = reader
+            .by_ref()
+            .take(JOURNAL_LINE_LIMIT as u64 + 1)
+            .read_line(&mut line)?;
+        if count == 0 {
+            break;
+        }
+        if count > JOURNAL_LINE_LIMIT {
+            bail!("journal event exceeds replay bounds");
+        }
+        let event: Value = serde_json::from_str(&line)?;
+        let data = &event["data"];
+        if event["type"] == "user" {
+            users += 1;
+            if users > max_users {
+                break;
+            }
+        }
+        match event["type"].as_str() {
+            Some("journal_error") => bail!("cannot replay incomplete journal"),
+            Some("image_observation") => bail!(
+                "cannot reconstruct identical request history: image observation was memory-only"
+            ),
+            Some("context_checkpoint") => {
+                history = serde_json::from_value(data["messages"].clone())
+                    .context("invalid context checkpoint")?;
+            }
+            Some("user") => history.push(Message::User {
+                content: data["content"]
+                    .as_str()
+                    .context("invalid user event")?
+                    .into(),
+            }),
+            Some("assistant") => {
+                let mut items = Vec::new();
+                if let Some(reference) = data.get("response_items_ref").filter(|r| !r.is_null()) {
+                    let hash = reference["sha256"]
+                        .as_str()
+                        .context("missing replay hash")?;
+                    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        bail!("invalid replay hash");
+                    }
+                    let expected = format!("replay-{hash}.json");
+                    if reference["file"].as_str() != Some(expected.as_str()) {
+                        bail!("invalid replay sidecar path");
+                    }
+                    let bytes = read_replay_file(
+                        &path
+                            .parent()
+                            .context("journal parent unavailable")?
+                            .join(expected),
+                    )?;
+                    if crate::context::sha256_hex(&bytes) != hash {
+                        bail!("opaque replay state failed integrity check");
+                    }
+                    items = serde_json::from_slice(&bytes)?;
+                } else if data["response_items_count"].as_u64().unwrap_or(0) > 0 {
+                    bail!("opaque replay state is missing");
+                }
+                let content = data["content"]
+                    .as_str()
+                    .filter(|c| !c.is_empty())
+                    .map(String::from);
+                history.push(Message::Assistant {
+                    content,
+                    tool_calls: serde_json::from_value::<Vec<crate::types::ToolCall>>(
+                        data["tool_calls"].clone(),
+                    )
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+                    reasoning_content: data["reasoning_content"].as_str().map(String::from),
+                    response_items: items,
+                });
+            }
+            Some("tool") => history.push(Message::Tool {
+                tool_call_id: data["tool_call_id"]
+                    .as_str()
+                    .context("invalid tool id")?
+                    .into(),
+                content: data["result"]
+                    .as_str()
+                    .context("invalid tool result")?
+                    .into(),
+            }),
+            _ => {}
+        }
+    }
+    Ok(history)
+}
+
 #[cfg(all(test, target_os = "linux"))]
 impl Journal {
     fn for_test(f: File) -> Self {
         Self {
             f,
+            replay_dir: PathBuf::new(),
             failed: false,
             notice: None,
         }

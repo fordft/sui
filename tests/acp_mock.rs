@@ -518,12 +518,14 @@ async fn mission_native_plan_acp_worker_native_audit() {
         .unwrap()
         .as_nanos();
     let prof = |name: &str| sui::config::Profile {
+        transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "mock".into(),
         api_key: None,
         prompt_cache_key: None,
         pricing: None,
+        image_input: false,
     };
     // worker does real work in its worktree via MOCK_ACP_CMD
     let mut wspec = spec(
@@ -545,6 +547,7 @@ async fn mission_native_plan_acp_worker_native_audit() {
         task_timeout: Duration::from_secs(60),
         context_budget: 120_000,
         context_reserve: 8_192,
+
         control_max_turns: 10,
         worker_max_turns: 10,
         events: None,
@@ -587,12 +590,14 @@ async fn mission_acp_worker_ownership_violation_fails() {
         .unwrap()
         .as_nanos();
     let prof = |name: &str| sui::config::Profile {
+        transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "mock".into(),
         api_key: None,
         prompt_cache_key: None,
         pricing: None,
+        image_input: false,
     };
     // worker writes BOTH the owned file and an out-of-scope file — the
     // deterministic ownership gate must catch it regardless of ACP claims
@@ -618,6 +623,7 @@ async fn mission_acp_worker_ownership_violation_fails() {
         task_timeout: Duration::from_secs(60),
         context_budget: 120_000,
         context_reserve: 8_192,
+
         control_max_turns: 10,
         worker_max_turns: 10,
         events: None,

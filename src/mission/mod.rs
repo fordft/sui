@@ -88,6 +88,10 @@ pub struct UsageAgg {
     pub cache_write: u64,
     pub output: u64,
     pub telemetry_known: u64,
+    pub input_known: u64,
+    pub cache_read_known: u64,
+    pub cache_write_known: u64,
+    pub output_known: u64,
 }
 
 impl UsageAgg {
@@ -106,6 +110,10 @@ impl UsageAgg {
         if complete {
             self.telemetry_known += 1;
         }
+        self.input_known += u64::from(complete && input.is_some());
+        self.cache_read_known += u64::from(complete && cache_read.is_some());
+        self.cache_write_known += u64::from(complete && cache_write.is_some());
+        self.output_known += u64::from(complete && output.is_some());
         self.input += input.unwrap_or(0);
         self.cache_read += cache_read.unwrap_or(0);
         self.cache_write += cache_write.unwrap_or(0);
@@ -115,7 +123,7 @@ impl UsageAgg {
     /// Fold a journal `request` event's `data.usage` object.
     pub fn add_journal(&mut self, u: &serde_json::Value) {
         self.add(
-            u["complete"] == true,
+            u["complete"] == true && u["estimated"] != true,
             u["input_tokens"].as_u64(),
             u["cache_read_tokens"].as_u64(),
             u["cache_write_tokens"].as_u64(),
@@ -167,18 +175,14 @@ fn mk_agent(
     // worktree — sui.toml precedence still applies via cfg.repo. Parsed
     // once per mission in MissionRt, not per spawn.
     let mut a = Agent::new(
-        Provider::new(
-            &prof.base_url,
-            prof.api_key.clone(),
-            prof.model.clone(),
-            prof.prompt_cache_key.clone(),
-        ),
+        Provider::from_profile(prof),
         ToolContext {
             workspace: workspace.to_path_buf(),
             bash_timeout: Duration::from_millis(al.bash_timeout_ms),
             bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
             web: cfg.web.clone(),
             canon_root: std::sync::OnceLock::new(),
+            ui: std::sync::OnceLock::new(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply
         journal,
@@ -186,6 +190,7 @@ fn mk_agent(
             max_turns,
             context_budget: budget,
             context_reserve: reserve,
+            compact_context: al.context_compaction,
             request_timeout: req_timeout,
         },
         Identity {

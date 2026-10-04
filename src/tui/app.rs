@@ -752,6 +752,7 @@ pub enum Effect {
         request: u64,
     },
     Probe {
+        transport: config::Transport,
         name: String,
         base_url: String,
         model: String,
@@ -2835,6 +2836,10 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Enter => {
                     if let Some((base, key, model)) = self.resolve(&name) {
                         self.effects.push(Effect::Probe {
+                            transport: config::Transport::from_kind(
+                                self.profiles.get(&name).and_then(|p| p.kind.as_deref()),
+                            )
+                            .unwrap_or_default(),
                             name,
                             base_url: base,
                             model,
@@ -2964,6 +2969,17 @@ impl App {
                     if !name.is_empty() {
                         self.status = "test sends one small live request".into();
                         self.effects.push(Effect::Probe {
+                            transport: if f.ptype == ProvType::Codex {
+                                config::Transport::CodexOauth
+                            } else {
+                                config::Transport::from_kind(
+                                    f.editing
+                                        .as_ref()
+                                        .and_then(|name| self.profiles.get(name))
+                                        .and_then(|p| p.kind.as_deref()),
+                                )
+                                .unwrap_or_default()
+                            },
                             name,
                             base_url: f.endpoint_url(),
                             model: f.model.text(),
@@ -2983,7 +2999,15 @@ impl App {
                             key_env,
                             key,
                             store,
-                            kind: (f.ptype == ProvType::Codex).then(|| "codex-oauth".to_string()),
+                            kind: if f.ptype == ProvType::Codex {
+                                Some("codex-oauth".into())
+                            } else {
+                                f.editing
+                                    .as_ref()
+                                    .and_then(|name| self.profiles.get(name))
+                                    .and_then(|p| p.kind.clone())
+                                    .filter(|k| k != "codex-oauth")
+                            },
                         });
                         self.screen = Screen::Main;
                         return None;

@@ -149,18 +149,14 @@ async fn solo(
     worktree::add(env, &wt, &branch, &base).await?;
     let al = sui::config::agent_limits(env);
     let mut a = Agent::new(
-        Provider::new(
-            &prof.base_url,
-            prof.api_key.clone(),
-            prof.model.clone(),
-            prof.prompt_cache_key.clone(),
-        ),
+        Provider::from_profile(prof),
         ToolContext {
             workspace: wt.clone(),
             bash_timeout: Duration::from_millis(al.bash_timeout_ms),
             bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
             web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
             canon_root: std::sync::OnceLock::new(),
+            ui: std::sync::OnceLock::new(),
         },
         Gate::new(true),
         Journal::open_named(run_dir, journal_name)?,
@@ -168,6 +164,7 @@ async fn solo(
             max_turns: al.max_turns,
             context_budget: al.context_token_budget,
             context_reserve: al.context_reserve_tokens,
+            compact_context: al.context_compaction,
             request_timeout: Duration::from_millis(al.request_timeout_ms),
         },
         Identity {
@@ -289,15 +286,36 @@ fn est_cost(u: &mission::UsageAgg, b: &Backend) -> Option<f64> {
         Backend::Acp(_) => return None,
     };
     let pr = p.pricing.as_ref()?;
-    if u.telemetry_known == 0 {
+    if u.requests == 0
+        || [
+            u.input_known,
+            u.cache_read_known,
+            u.cache_write_known,
+            u.output_known,
+        ]
+        .iter()
+        .any(|known| *known != u.requests)
+    {
         return None;
     }
-    Some(
-        u.input as f64 * pr.input.unwrap_or(0.0) / 1e6
-            + u.cache_read as f64 * pr.cached.unwrap_or(0.0) / 1e6
-            + u.cache_write as f64 * pr.cache_write.unwrap_or(0.0) / 1e6
-            + u.output as f64 * pr.output.unwrap_or(0.0) / 1e6,
-    )
+    pr.estimate(&sui::types::Usage {
+        input_tokens: Some(u.input),
+        cache_read_tokens: Some(u.cache_read),
+        cache_write_tokens: Some(u.cache_write),
+        output_tokens: Some(u.output),
+        complete: true,
+        estimated: false,
+    })
+}
+
+fn known_count(tokens: u64, known: u64, requests: u64) -> String {
+    if known == 0 {
+        "unknown".into()
+    } else if known == requests {
+        tokens.to_string()
+    } else {
+        format!("{tokens} ({known}/{requests})")
+    }
 }
 
 fn rss_kb() -> u64 {
@@ -570,8 +588,16 @@ async fn main() -> Result<()> {
                 .unwrap_or("—"),
             r.control.requests,
             r.worker.requests,
-            r.control.cache_read,
-            r.worker.cache_read,
+            known_count(
+                r.control.cache_read,
+                r.control.cache_read_known,
+                r.control.requests
+            ),
+            known_count(
+                r.worker.cache_read,
+                r.worker.cache_read_known,
+                r.worker.requests
+            ),
             cost,
             r.elapsed_ms,
             r.repairs,

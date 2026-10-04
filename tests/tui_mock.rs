@@ -187,6 +187,7 @@ fn app_with_mock(repo: &Path, port: u16) -> App {
         api_key: None,
         prompt_cache_key: None,
         pricing: None,
+        image_input: Some(false),
     };
     profiles.insert("mock-ctrl".into(), pc("ctrl-model"));
     profiles.insert("mock-worker".into(), pc("work-model"));
@@ -459,12 +460,14 @@ async fn tui_mission_events_flow() {
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let prof = |name: &str, model: &str| Profile {
+        transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: model.into(),
         api_key: None,
         prompt_cache_key: None,
         pricing: None,
+        image_input: false,
     };
     let cfg = MissionCfg {
         repo: repo.clone(),
@@ -480,6 +483,7 @@ async fn tui_mission_events_flow() {
         task_timeout: Duration::from_secs(60),
         context_budget: 120_000,
         context_reserve: 8_192,
+
         control_max_turns: 10,
         worker_max_turns: 10,
         events: Some(ev_tx),

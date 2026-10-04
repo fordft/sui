@@ -65,18 +65,14 @@ struct Ctx {
 impl Ctx {
     fn agent(&self, scenario: &str) -> Result<Agent> {
         Ok(Agent::new(
-            Provider::new(
-                &self.prof.base_url,
-                self.prof.api_key.clone(),
-                self.prof.model.clone(),
-                self.prof.prompt_cache_key.clone(),
-            ),
+            Provider::from_profile(&self.prof),
             ToolContext {
                 workspace: self.ws.clone(),
                 bash_timeout: Duration::from_secs(120),
                 bash_timeout_max: Duration::from_secs(600),
                 web: Some(sui::web::WebService::new(sui::web::load_cfg(None))),
                 canon_root: std::sync::OnceLock::new(),
+                ui: std::sync::OnceLock::new(),
             },
             Gate::new(true), // fixture workspace is disposable
             Journal::open_named(&self.run_dir, scenario)?,
@@ -84,6 +80,7 @@ impl Ctx {
                 max_turns: 8,
                 context_budget: 120_000,
                 context_reserve: 8_192,
+                compact_context: false,
                 request_timeout: Duration::from_secs(300),
             },
             Identity {
@@ -128,51 +125,8 @@ fn retryable(e: &anyhow::Error) -> bool {
     !(m.contains("provider http 4") || m.contains("provider http 3"))
 }
 
-/// Rebuild the model-visible message history from a scenario journal,
-/// stopping after `max_users` user turns — this is what restart/replay
-/// tests: persisted events must serialize back to the identical prefix.
 fn replay_history(path: &Path, max_users: usize) -> Result<Vec<Message>> {
-    let mut out = Vec::new();
-    let mut users = 0;
-    for line in std::fs::read_to_string(path)?.lines() {
-        let e: Value = serde_json::from_str(line)?;
-        if e["type"] == "user" {
-            users += 1;
-            if users > max_users {
-                break;
-            }
-        }
-        match e["type"].as_str() {
-            Some("user") => out.push(Message::User {
-                content: e["data"]["content"].as_str().unwrap_or("").into(),
-            }),
-            Some("assistant") => {
-                let c = e["data"]["content"].as_str().unwrap_or("");
-                out.push(Message::Assistant {
-                    content: if c.is_empty() {
-                        None
-                    } else {
-                        Some(c.to_string())
-                    },
-                    // empty [] must round-trip to None — the field is absent
-                    // in the original serialization
-                    tool_calls: serde_json::from_value::<Vec<sui::types::ToolCall>>(
-                        e["data"]["tool_calls"].clone(),
-                    )
-                    .ok()
-                    .filter(|v| !v.is_empty()),
-                    reasoning_content: e["data"]["reasoning_content"].as_str().map(String::from),
-                    response_items: Vec::new(),
-                })
-            }
-            Some("tool") => out.push(Message::Tool {
-                tool_call_id: e["data"]["tool_call_id"].as_str().unwrap_or("").into(),
-                content: e["data"]["result"].as_str().unwrap_or("").into(),
-            }),
-            _ => {}
-        }
-    }
-    Ok(out)
+    sui::journal::replay_history(path, max_users)
 }
 
 /// Collect all `request` events from a scenario journal.
@@ -427,25 +381,45 @@ fn report(ctx: &Ctx, run_dir: &Path, prof: &Profile) -> Result<()> {
     p!("- requests: {n} (cap {})", ctx.max);
     p!("- telemetry complete: {telemetry_ok}/{n}");
     p!("- errored requests: {errors}");
+    let paired: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            let usage = &r["usage"];
+            if usage["complete"] != true || usage["estimated"] == true {
+                return None;
+            }
+            Some((
+                usage["input_tokens"].as_u64()?,
+                usage["cache_read_tokens"].as_u64()?,
+            ))
+        })
+        .collect();
+    let input: u64 = paired.iter().map(|(i, _)| *i).sum();
+    let cached: u64 = paired.iter().map(|(_, c)| *c).sum();
+    if input > 0 && cached <= input {
+        p!(
+            "- token cache rate: {:.2}% ({} / {} tokens; paired coverage {}/{n} requests)",
+            cached as f64 * 100.0 / input as f64,
+            cached,
+            input,
+            paired.len()
+        );
+    } else {
+        p!("- token cache rate: unknown (no valid paired usage)");
+    }
 
     // estimated cost from profile pricing, if provided
     if let Some(pr) = &prof.pricing {
-        let mut cost = 0.0f64;
-        let mut priced = false;
-        for r in &rows {
-            let u = &r["usage"];
-            if u["complete"] != true {
-                continue;
-            }
-            priced = true;
-            let f = |k: &str| u[k].as_f64().unwrap_or(0.0);
-            cost += f("input_tokens") * pr.input.unwrap_or(0.0) / 1e6
-                + f("cache_read_tokens") * pr.cached.unwrap_or(0.0) / 1e6
-                + f("cache_write_tokens") * pr.cache_write.unwrap_or(0.0) / 1e6
-                + f("output_tokens") * pr.output.unwrap_or(0.0) / 1e6;
-        }
-        if priced {
-            p!("- estimated cost: ${:.4}", cost);
+        let costs: Option<Vec<f64>> = rows
+            .iter()
+            .map(|r| {
+                let usage = serde_json::from_value::<sui::types::Usage>(r["usage"].clone()).ok()?;
+                pr.estimate(&usage)
+            })
+            .collect();
+        match costs.filter(|c| !c.is_empty()) {
+            Some(costs) => p!("- estimated cost: ${:.6}", costs.iter().sum::<f64>()),
+            None => p!("- estimated cost: n/a (incomplete usage or pricing)"),
         }
     } else {
         p!("- estimated cost: n/a (no pricing in profile)");

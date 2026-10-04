@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod fs;
+pub mod ui;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -15,12 +16,13 @@ pub struct ToolContext {
     /// Lazily canonicalized workspace root — fs::resolve() realpath()s
     /// the root once per context instead of once per tool call.
     pub canon_root: std::sync::OnceLock<PathBuf>,
+    pub ui: std::sync::OnceLock<ui::UiService>,
 }
 
 /// Frozen tool schemas. Changing names/descriptions/order invalidates
 /// provider prompt caches — treat as a versioned interface.
 pub fn schemas() -> Vec<Value> {
-    vec![
+    let mut schemas = vec![
         json!({
             "type": "function",
             "function": {
@@ -127,7 +129,9 @@ pub fn schemas() -> Vec<Value> {
                 }
             }
         }),
-    ]
+    ];
+    schemas.extend(ui::schemas());
+    schemas
 }
 
 /// How a tool execution ended — typed at the source. `text` is the
@@ -153,6 +157,8 @@ pub struct ExecOut {
     pub truncated: bool,
     /// Live-preview chunks dropped because the UI tap was full.
     pub preview_dropped: u64,
+    /// In-memory image observation; never placed in journal/tool text.
+    pub image: Option<crate::types::UserContent>,
 }
 impl ExecOut {
     pub fn plain(text: String, kind: ExecKind) -> Self {
@@ -162,6 +168,7 @@ impl ExecOut {
             exit: None,
             truncated: false,
             preview_dropped: 0,
+            image: None,
         }
     }
 }
@@ -194,6 +201,8 @@ pub async fn execute(
             Ok(ExecOut::plain(text, kind))
         }
         "bash" => bash::run(ctx, args, cancel, obs).await,
+        "browser" | "terminal" => ui::service(ctx)?.execute(ctx, name, args, cancel).await,
+        "view_image" => ui::view_image(ctx, args).await,
         "skill" => {
             let _ = (cancel, obs);
             let n = args["name"].as_str().unwrap_or("").trim();
@@ -238,6 +247,7 @@ mod tests {
             bash_timeout_max: std::time::Duration::from_secs(2),
             web: None,
             canon_root: std::sync::OnceLock::new(),
+            ui: std::sync::OnceLock::new(),
         };
         let ok = super::execute(
             &ctx,

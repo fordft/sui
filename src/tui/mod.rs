@@ -116,18 +116,14 @@ pub fn spawn_solo(
     let al = crate::config::agent_limits(&workspace);
     tokio::spawn(async move {
         let mut agent = Agent::new(
-            Provider::new(
-                &prof.base_url,
-                prof.api_key.clone(),
-                prof.model.clone(),
-                prof.prompt_cache_key.clone(),
-            ),
+            Provider::from_profile(&prof),
             ToolContext {
                 workspace,
                 bash_timeout: Duration::from_millis(al.bash_timeout_ms),
                 bash_timeout_max: Duration::from_millis(al.bash_timeout_max_ms),
                 web,
                 canon_root: std::sync::OnceLock::new(),
+                ui: std::sync::OnceLock::new(),
             },
             Gate::new(false), // approvals via modal; session flag is live
             match Journal::open_named(&jdir, "solo") {
@@ -145,6 +141,7 @@ pub fn spawn_solo(
                 max_turns: al.max_turns,
                 context_budget: al.context_token_budget,
                 context_reserve: al.context_reserve_tokens,
+                compact_context: al.context_compaction,
                 request_timeout: Duration::from_millis(al.request_timeout_ms),
             },
             Identity {
@@ -218,12 +215,24 @@ pub fn spawn_solo(
 pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
     let (base_url, key, model) = app.resolve(name)?;
     Some(Profile {
+        transport: config::Transport::from_kind(
+            app.profiles.get(name).and_then(|p| p.kind.as_deref()),
+        )
+        .ok()?,
         name: name.into(),
+        image_input: app
+            .profiles
+            .get(name)
+            .and_then(|p| p.image_input)
+            .unwrap_or(base_url.starts_with("codex://")),
         base_url,
         model,
         api_key: key,
-        prompt_cache_key: None,
-        pricing: None,
+        prompt_cache_key: app
+            .profiles
+            .get(name)
+            .and_then(|p| p.prompt_cache_key.clone()),
+        pricing: app.profiles.get(name).and_then(|p| p.pricing.clone()),
     })
 }
 
@@ -613,6 +622,7 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                     });
                 }
                 Effect::Probe {
+                    transport,
                     name,
                     base_url,
                     model,
@@ -620,9 +630,14 @@ pub async fn run(force_mission: bool, yolo: bool) -> Result<()> {
                 } => {
                     let tx = ctl_tx.clone();
                     tokio::spawn(async move {
-                        let r = provider::probe(&base_url, key.as_deref(), &model)
-                            .await
-                            .map_err(|e| format!("{e:#}"));
+                        let r = provider::probe_with_transport(
+                            &base_url,
+                            key.as_deref(),
+                            &model,
+                            transport,
+                        )
+                        .await
+                        .map_err(|e| format!("{e:#}"));
                         let _ = tx.send(Ctl::ProbeDone(name, r));
                     });
                 }

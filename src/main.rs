@@ -164,6 +164,8 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("--profile {pname}: {e:#}"))?;
         cfg.base_url = flag_base.clone().unwrap_or(p.base_url);
         cfg.model = flag_model.clone().unwrap_or(p.model);
+        cfg.image_input = p.image_input;
+        cfg.transport = p.transport;
         cfg.api_key = flag_key.or(p.api_key);
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
@@ -197,13 +199,16 @@ async fn main() -> Result<()> {
         cfg.api_key.clone(),
         cfg.model.clone(),
         cfg.prompt_cache_key.clone(),
-    );
+    )
+    .with_transport(cfg.transport)
+    .with_image_input(cfg.image_input);
     let tools = tools::ToolContext {
         workspace: cfg.workspace.clone(),
         bash_timeout: Duration::from_millis(cfg.bash_timeout_ms),
         bash_timeout_max: Duration::from_millis(cfg.bash_timeout_max_ms),
         web: Some(web::WebService::new(web::load_cfg(None))),
         canon_root: std::sync::OnceLock::new(),
+        ui: std::sync::OnceLock::new(),
     };
     let mut agent = agent::Agent::new(
         provider,
@@ -214,6 +219,7 @@ async fn main() -> Result<()> {
             max_turns: cfg.max_turns,
             context_budget: cfg.context_token_budget,
             context_reserve: cfg.context_reserve_tokens,
+            compact_context: cfg.context_compaction,
             request_timeout: Duration::from_millis(cfg.request_timeout_ms),
         },
         agent::Identity {

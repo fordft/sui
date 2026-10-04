@@ -10,6 +10,13 @@ roles: [lead, worker, auditor]
 The terminal is the product surface. Verify through a real PTY, not just
 unit-mapped key enums.
 
+Use the built-in `terminal` tool to start the real program, send keys,
+resize, and read its interpreted screen. Capture a screenshot for layout
+and color review when the provider supports image input. `browser` tests
+web UI flows without a display. A screenshot is evidence of appearance;
+also assert the state change the user intended. Never claim visual review
+from a text snapshot or a screenshot the model could not receive.
+
 ## Interaction contract
 
 - Every advertised shortcut works with ONE physical keypress — including

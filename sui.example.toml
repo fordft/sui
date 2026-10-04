@@ -3,6 +3,9 @@
 # Precedence: CLI flags > env vars > project sui.toml > global config > defaults.
 
 [provider]
+# Trusted GLOBAL/--config only: "chat-completions" (default),
+# "openai-responses" (standard Responses API), or "codex-oauth".
+# kind = "openai-responses"
 # Any OpenAI-compatible endpoint:
 #   OpenAI      https://api.openai.com/v1
 #   DeepSeek    https://api.deepseek.com/v1
@@ -16,6 +19,12 @@ base_url = "https://api.openai.com/v1"
 
 # Model name passed verbatim to the endpoint.
 model = "gpt-5"
+
+# Declare image input only for a model/provider that actually supports it.
+# Trusted GLOBAL/--config only; project sui.toml cannot enable image uploads.
+# Without it, UI text snapshots work and screenshots can be saved, but the
+# runtime reports visual review as unverified. Codex OAuth defaults true.
+# image_input = true
 
 # Requested in the request body for providers that support cache accounting
 # (OpenAI prompt_cache_key). Harmless on providers that ignore it.
@@ -31,6 +40,11 @@ request_timeout_ms = 300000
 # Conservative context guard (estimated tokens, chars/4). Above this the
 # turn stops cleanly instead of growing until the provider rejects it.
 context_token_budget = 120000
+
+# Summarize proactively near 80% capacity using the existing prefix/tools.
+# A successful bounded summary starts a new context epoch; failures preserve
+# history. Oversized input that already exceeds the hard budget still stops.
+context_compaction = true
 
 # Default bash timeout; the model may request less, never more than bash_timeout_max.
 bash_timeout_ms = 120000
@@ -56,7 +70,17 @@ bash_timeout_max_ms = 600000
 # [profiles.strong]
 # base_url = "https://api.openai.com/v1"
 # model = "gpt-5"
+# image_input = true
 # key_env = "OPENAI_API_KEY"
+#
+# Responses-compatible API/gateway profile: preserves raw Responses usage and
+# encrypted reasoning. Useful with 9router routes that support /v1/responses;
+# some converted Chat routes alter token counts. Never globally adjust counts.
+# [profiles.gateway]
+# kind = "openai-responses"
+# base_url = "http://localhost:20128/v1"
+# model = "cx/gpt-6-sol(xhigh)"
+# key_env = "SUI_GATEWAY_KEY"
 #
 # Certify with: sui-certify --profile cheap --profile strong
 
@@ -111,6 +135,21 @@ bash_timeout_max_ms = 600000
 # endpoint = "https://mcp.exa.ai/mcp"
 #
 # Headless overrides: SUI_WEB_ACCESS=ask|auto, SUI_EXA_API_KEY=…
+
+# ── Built-in headless UI tools (GLOBAL config only) ──
+# AI calls browser/terminal/view_image directly; no separate Playwright or
+# ttyd command, display, Xvfb, or browser window required. Sui lazily installs
+# pinned Playwright/xterm packages and Chromium in the user cache on first
+# use after independent consent. Node.js 20+, npm and Chromium's OS libraries
+# must exist on the server; Sui never runs sudo/apt or edits project deps.
+#
+# [browser]
+# approved = false         # default: independent prompt; true for unattended use
+# auto_install = true      # download pinned packages/browser if cache is missing
+# allow_remote = false     # default: only localhost, 127.0.0.1, [::1] HTTP/WS
+#
+# Browser consent/remote access are independent of YOLO and web research.
+# Headless one-shot runs need approved=true in user config (EOF denies).
 
 # ── Persisted UI settings (GLOBAL config only — written by Settings → Save) ──
 # The TUI persists these under [ui]; you can also set them by hand.

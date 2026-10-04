@@ -67,7 +67,23 @@ impl Gate {
     /// Same gate as `check` but returns the typed decision — ACP permission
     /// requests need Once vs Session to pick the matching option kind.
     pub async fn decide(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
-        if self.open() {
+        self.decide_inner(summary, agent, run, false).await
+    }
+
+    /// Independent surface consent: local YOLO/session grants cannot authorize it.
+    /// A session response is owned by the caller, never raises the local gate.
+    pub async fn decide_surface(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
+        self.decide_inner(summary, agent, run, true).await
+    }
+
+    async fn decide_inner(
+        &mut self,
+        summary: &str,
+        agent: &str,
+        run: u64,
+        surface: bool,
+    ) -> GateChoice {
+        if !surface && self.open() {
             // Under a UI (sink set) raw writes would corrupt the alt screen.
             if self.sink.is_none() {
                 eprintln!("» allow (auto): {summary}");
@@ -92,7 +108,7 @@ impl Gate {
                 tokio::select! {
                     choice = reply_rx.recv() => match choice {
                         Some(c @ (GateChoice::Once | GateChoice::Session | GateChoice::Deny)) => {
-                            if matches!(c, GateChoice::Session) {
+                            if !surface && matches!(c, GateChoice::Session) {
                                 // Raise the shared session flag — revocable by
                                 // the UI toggle. Local session_allow stays for
                                 // the stdin path below.
@@ -122,16 +138,62 @@ impl Gate {
         eprint!("» allow {summary}? [y/n/a] ");
         let _ = std::io::stderr().flush();
         let mut line = String::new();
-        if std::io::stdin().lock().read_line(&mut line).is_err() {
-            return GateChoice::Deny;
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) | Err(_) => return GateChoice::Deny,
+            Ok(_) => {}
         }
         match line.trim().to_lowercase().as_str() {
             "y" | "yes" | "" => GateChoice::Once, // empty = yes, single-keystroke flow
             "a" | "all" => {
-                self.session_allow = true;
+                if !surface {
+                    self.session_allow = true;
+                }
                 GateChoice::Session
             }
             _ => GateChoice::Deny,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn yolo_does_not_skip_surface_consent() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut gate = Gate::new(true);
+        gate.set_ui(tx, Arc::new(AtomicBool::new(false)), None);
+        let task = tokio::spawn(async move { gate.decide_surface("browser", "worker", 1).await });
+        let UiEvent::Permission { reply, .. } = rx.recv().await.unwrap() else {
+            panic!("missing independent prompt");
+        };
+        reply.send(GateChoice::Deny).unwrap();
+        assert_eq!(task.await.unwrap(), GateChoice::Deny);
+    }
+
+    #[tokio::test]
+    async fn surface_session_consent_does_not_authorize_local_writes() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(AtomicBool::new(false));
+        let mut gate = Gate::new(false);
+        gate.set_ui(tx, Arc::new(AtomicBool::new(false)), Some(session.clone()));
+        let task = tokio::spawn(async move {
+            assert_eq!(
+                gate.decide_surface("browser", "worker", 1).await,
+                GateChoice::Session
+            );
+            gate.check("write_file", "worker", 1).await
+        });
+        let UiEvent::Permission { reply, .. } = rx.recv().await.unwrap() else {
+            panic!("missing browser prompt");
+        };
+        reply.send(GateChoice::Session).unwrap();
+        let UiEvent::Permission { reply, .. } = rx.recv().await.unwrap() else {
+            panic!("browser session leaked into local gate");
+        };
+        assert!(!session.load(Ordering::Relaxed));
+        reply.send(GateChoice::Deny).unwrap();
+        assert!(!task.await.unwrap());
     }
 }

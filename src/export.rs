@@ -424,6 +424,9 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                         d.as_object_mut().map(|m| m.remove("reasoning_content"));
                         red.bump("model reasoning (omitted)");
                     }
+                    if let Some(object) = d.as_object_mut() {
+                        object.remove("response_items_ref");
+                    }
                     agent.timeline.push(tl(ts, "assistant", d));
                 }
                 "request" => {
@@ -446,7 +449,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                         }
                     }
                     let u = &d["usage"];
-                    if u.is_object() {
+                    if u.is_object() && u["estimated"] != true {
                         if u["complete"] == true {
                             agent.telemetry_complete += 1;
                         }
@@ -479,7 +482,8 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                     ));
                 }
                 "tool" => agent.timeline.push(tl(ts, "tool", d.clone())),
-                "warn" | "budget_exceeded" | "interrupted" => {
+                "warn" | "budget_exceeded" | "interrupted" | "context_checkpoint"
+                | "compaction_failed" => {
                     agent
                         .timeline
                         .push(tl(ts, e["type"].as_str().unwrap(), d.clone()))
@@ -1191,7 +1195,7 @@ fn render_event(m: &mut String, e: &Value) {
                 num_or_unknown(&d["usage"]["output_tokens"]),
             ));
         }
-        "warn" | "budget_exceeded" | "interrupted" => {
+        "warn" | "budget_exceeded" | "interrupted" | "context_checkpoint" | "compaction_failed" => {
             m.push_str(&format!(
                 "**{}**: {}\n\n",
                 kind,

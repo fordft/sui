@@ -4,12 +4,35 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+/// Provider transport is trusted configuration, independent of agent-loop policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    #[default]
+    ChatCompletions,
+    OpenaiResponses,
+    CodexOauth,
+}
+
+impl Transport {
+    pub(crate) fn from_kind(kind: Option<&str>) -> Result<Self> {
+        match kind {
+            None | Some("chat-completions") => Ok(Self::ChatCompletions),
+            Some("openai-responses") => Ok(Self::OpenaiResponses),
+            Some("codex-oauth") => Ok(Self::CodexOauth),
+            Some(other) => bail!("unsupported provider kind: {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub transport: Transport,
     pub base_url: String,
     /// None = no key configured. Never sourced from project-level sui.toml.
     pub api_key: Option<String>,
     pub model: String,
+    pub image_input: bool,
     pub prompt_cache_key: Option<String>,
     pub workspace: PathBuf,
     pub run_dir: PathBuf,
@@ -23,6 +46,7 @@ pub struct Config {
     /// reserved completion capacity above this stops the turn cleanly.
     pub context_token_budget: usize,
     pub context_reserve_tokens: usize,
+    pub context_compaction: bool,
 }
 
 /// A named provider profile. Credentials live in the user's own config or
@@ -32,9 +56,10 @@ pub struct Config {
 pub struct ProfileCfg {
     pub base_url: Option<String>,
     pub model: Option<String>,
-    /// "codex-oauth" = ChatGPT-sign-in Responses backend (no API key —
-    /// reuses `codex login` or `sui auth`). Anything else = the
-    /// standard OpenAI-compatible chat-completions transport.
+    /// Explicit model capability; absent = text-only (Codex OAuth defaults true).
+    pub image_input: Option<bool>,
+    /// "codex-oauth" = ChatGPT sign-in; "openai-responses" = API/gateway
+    /// Responses transport. Absent = standard chat-completions.
     pub kind: Option<String>,
     /// Name of the env var holding this profile's API key.
     pub key_env: Option<String>,
@@ -53,11 +78,40 @@ pub struct PricingCfg {
     pub output: Option<f64>,
 }
 
+impl PricingCfg {
+    /// Total input includes both cache reads and writes. Missing buckets or
+    /// prices stay unknown; a zero-sized bucket needs no configured price.
+    pub fn estimate(&self, usage: &crate::types::Usage) -> Option<f64> {
+        if !usage.complete || usage.estimated {
+            return None;
+        }
+        let input = usage.input_tokens?;
+        let read = usage.cache_read_tokens?;
+        let write = usage.cache_write_tokens?;
+        let ordinary = input.checked_sub(read.checked_add(write)?)?;
+        let price = |tokens: u64, rate: Option<f64>| -> Option<f64> {
+            if tokens == 0 {
+                return Some(0.0);
+            }
+            let rate = rate.filter(|r| r.is_finite() && *r >= 0.0)?;
+            Some(tokens as f64 * rate / 1e6)
+        };
+        Some(
+            price(ordinary, self.input)?
+                + price(read, self.cached)?
+                + price(write, self.cache_write)?
+                + price(usage.output_tokens?, self.output)?,
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Profile {
+    pub transport: Transport,
     pub name: String,
     pub base_url: String,
     pub model: String,
+    pub image_input: bool,
     pub api_key: Option<String>,
     pub prompt_cache_key: Option<String>,
     pub pricing: Option<PricingCfg>,
@@ -104,6 +158,8 @@ struct FileConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct ProviderCfg {
+    kind: Option<String>,
+    image_input: Option<bool>,
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -119,6 +175,7 @@ struct AgentCfg {
     request_timeout_ms: Option<u64>,
     context_token_budget: Option<usize>,
     context_reserve_tokens: Option<usize>,
+    context_compaction: Option<bool>,
 }
 
 /// Resolved `[agent]` limits — the values every launcher sources
@@ -131,6 +188,7 @@ pub struct AgentLimits {
     pub request_timeout_ms: u64,
     pub context_token_budget: usize,
     pub context_reserve_tokens: usize,
+    pub context_compaction: bool,
 }
 
 /// flagged --config > project sui.toml > global config > defaults —
@@ -158,6 +216,11 @@ fn resolve_limits(fa: &AgentCfg, pa: &AgentCfg, ga: &AgentCfg) -> AgentLimits {
             .or(pa.context_token_budget)
             .or(ga.context_token_budget)
             .unwrap_or(120_000),
+        context_compaction: fa
+            .context_compaction
+            .or(pa.context_compaction)
+            .or(ga.context_compaction)
+            .unwrap_or(true),
         context_reserve_tokens: fa
             .context_reserve_tokens
             .or(pa.context_reserve_tokens)
@@ -349,7 +412,8 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
             }
         )
     })?;
-    let is_codex = p.kind.as_deref() == Some("codex-oauth");
+    let transport = Transport::from_kind(p.kind.as_deref())?;
+    let is_codex = transport == Transport::CodexOauth;
     let api_key = p
         .key_env
         .as_deref()
@@ -357,6 +421,7 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
         .filter(|v| !v.is_empty())
         .or_else(|| p.api_key.clone());
     Ok(Profile {
+        transport,
         name: name.to_string(),
         base_url: if is_codex {
             "codex://oauth".into()
@@ -364,6 +429,7 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
             norm_url(p.base_url.as_deref().unwrap_or("https://api.openai.com/v1"))
         },
         model: p.model.clone().unwrap_or_else(|| "gpt-5".into()),
+        image_input: p.image_input.unwrap_or(is_codex),
         api_key,
         prompt_cache_key: p.prompt_cache_key.clone(),
         pricing: p.pricing.clone(),
@@ -531,7 +597,23 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .join(&session_id);
     std::fs::create_dir_all(&run_dir).context("create run dir")?;
 
+    // Project files cannot switch credential-bearing provider transports.
+    let transport = if base_url.starts_with("codex://") {
+        Transport::CodexOauth
+    } else {
+        Transport::from_kind(fp.kind.as_deref().or(gp.kind.as_deref()))?
+    };
+    let base_url = if transport == Transport::CodexOauth {
+        "codex://oauth".into()
+    } else {
+        base_url
+    };
     Ok(Config {
+        transport,
+        image_input: fp
+            .image_input
+            .or(gp.image_input)
+            .unwrap_or(base_url.starts_with("codex://")),
         base_url,
         api_key,
         model,
@@ -549,6 +631,7 @@ pub fn load(ov: Overrides) -> Result<Config> {
         request_timeout_ms: al.request_timeout_ms,
         context_token_budget: al.context_token_budget,
         context_reserve_tokens: al.context_reserve_tokens,
+        context_compaction: al.context_compaction,
     })
 }
 
@@ -711,7 +794,8 @@ pub fn save_profile_at(
     // OAuth-backed kinds (codex-oauth) have no base_url or API key —
     // write the kind and strip the chat-completions fields entirely so
     // a stale endpoint can't shadow the OAuth backend.
-    if let Some(k) = kind {
+    if kind == Some("codex-oauth") {
+        let k = "codex-oauth";
         t.insert("kind".into(), toml::Value::String(k.to_string()));
         t.insert("model".into(), toml::Value::String(model.to_string()));
         t.remove("base_url");
@@ -722,7 +806,15 @@ pub fn save_profile_at(
         }
         return write_private(p, &toml::to_string_pretty(&doc)?);
     }
-    t.remove("kind");
+    match kind {
+        Some(k) => {
+            Transport::from_kind(Some(k))?;
+            t.insert("kind".into(), toml::Value::String(k.into()));
+        }
+        None => {
+            t.remove("kind");
+        }
+    }
     t.insert("base_url".into(), toml::Value::String(base_url.to_string()));
     t.insert("model".into(), toml::Value::String(model.to_string()));
     match key_env {

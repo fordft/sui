@@ -53,7 +53,7 @@ DOMAIN control (frontier model)     DOMAIN worker (cheap model)
 ## Per-agent prompt layout
 
 ```
-[static contract + 7 tool schemas]   lowest mutation
+[static contract + 10 tool schemas]  lowest mutation
 [frozen repo epoch / map]
 [mission contract | task spec]
 ── cache breakpoint ──
@@ -76,9 +76,35 @@ rolling truncation.
 | `web_search(query)` | bounded results + source IDs; needs `[web]` key |
 | `web_fetch(url)` | public http(s) only, SSRF-checked, markdown text |
 | `skill(name)` | loads an engineering lens from the prompt index |
+| `browser(action, ...)` | managed headless Playwright; loopback-only by default; typed actions |
+| `terminal(action, ...)` | real workspace PTY + xterm screen; bounded input/output and lifecycle |
+| `view_image(path)` | workspace-confined, bounded image observation for image-capable profiles |
 
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
+
+UI sessions initialize lazily per native agent. Trusted global `[browser]`
+config owns UI consent, package bootstrap, and remote-browser policy;
+YOLO/session grants never enable that surface. The embedded JSON-lines
+driver takes typed operations, not agent-supplied JavaScript. Pinned npm
+dependencies (scripts disabled) live outside repos, including mission
+worktrees. Chromium always runs headless. HTTP redirect destinations and
+WebSocket endpoints share the browser policy; service workers are blocked.
+PTY programs inherit an explicit environment allowlist and have their own
+process group. Cancellation/timeouts reset the driver and PTY to prevent
+stale responses; agent drop also kills the process groups.
+
+Text user messages retain their old JSON-string shape. Image observations
+use standard chat-completions content parts, converted to `input_image`
+by the Codex Responses adapter. All sibling tool responses are appended
+before image observations. Existing history is never rewritten. Image
+bytes are memory-only by default and excluded from journals/exports;
+optional screenshot paths are workspace-confined. A trusted profile's
+`image_input` capability gates attachment; unsupported profiles receive
+an honest unverified-visual result. Image context reservations are
+conservative estimates, never fabricated provider usage or cost. Journals
+do not reconstruct image history: image-bearing runs cannot claim an
+identical replay prefix from text-only journal data.
 
 ## Conflict control (mission mode)
 
@@ -274,7 +300,8 @@ reuse (tool schemas are cache-relevant; the report measures, not infers).
 Fresh repair sessions trade prior-history reuse for bounded context — kept
 deliberately; repair cost/success is measured before any second strategy.
 
-Deferred: auto mode-selection, pools >2, indexing, compaction.
+Deferred: auto mode-selection, pools >2, indexing. Native proactive compaction
+uses an append-only summary request and an explicit checkpoint epoch transition.
 
 ## TUI
 
@@ -365,7 +392,7 @@ prefixes are unchanged).
 
 ## Build order
 
-- **v0** fast path: worker loop + 7 tools + journal + context compiler +
+- **v0** fast path: worker loop + 10 tools + journal + context compiler +
   OpenAI-compatible provider + permission gate — done
 - **v0.1** certification runner, endpoint trust gate, execution invariants —
   done
@@ -380,3 +407,28 @@ No per-worker premium auditor. No dynamically rewritten shared prefix. No
 orchestration files inside the repo. No model-per-specialty explosion. No
 generic sticky-GPU abstraction. No keep-alive pings. No full worker histories
 to the auditor. No frontier model typing boilerplate. No embeddings in v1.
+
+### Implemented cache/replay boundaries
+
+`ProfileCfg.kind` selects Chat Completions, standard `openai-responses`, or
+`codex-oauth`; `Backend::Native` carries the resolved transport through every
+launcher. Standard and OAuth Responses share a decoder that preserves opaque
+reasoning and known cache-read/write zeros. Session identity is frozen on each
+provider instance; configured cache-group keys take precedence. Cache options
+are not inferred from model names or advertised without backend verification.
+
+Native compaction starts proactively at 80% of the context budget, including
+tool schema estimates and completion reserve. It appends a bounded summary
+instruction using identical tools and provider settings. A completed text-only
+summary must free enough context before a `context_checkpoint` is persisted;
+only then is the active projection replaced by the checkpoint and latest text
+task. Old journal events remain intact. Failed/interrupted summaries never
+execute tools or alter history. The summary is untrusted context, not contract
+proof. An already-oversized request cannot be safely compacted through that
+same full-context request and still hits the hard guard.
+
+Opaque replay items stay in bounded 0600 content-addressed sidecars in the
+0700 run directory. Journals reference their hash/name; exports omit contents.
+Replay verifies path, hash and size, and refuses missing or altered state.
+Cost estimates partition total input into ordinary, cache-read and cache-write
+buckets; estimated or incomplete telemetry/pricing cannot imply zero cost.

@@ -15,15 +15,13 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::provider::StreamOutcome;
-use crate::types::{FunctionCall, Message, ToolCall, Usage};
-use futures_util::StreamExt;
+use crate::types::Message;
 use rand::Rng;
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -374,7 +372,7 @@ impl CodexAuth {
 /// Chat-completions `Message` list → Responses-API `input` items +
 /// `instructions`. Reasoning items captured on prior turns replay verbatim
 /// (store:false requires it); ids/status are stripped.
-fn build_input(messages: &crate::context::Compiled<'_>) -> (String, Vec<Value>) {
+pub(crate) fn build_input(messages: &crate::context::Compiled<'_>) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
     for m in messages.iter() {
@@ -388,7 +386,7 @@ fn build_input(messages: &crate::context::Compiled<'_>) -> (String, Vec<Value>) 
             Message::User { content } => input.push(json!({
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": content}],
+                "content": content.responses_parts(),
             })),
             Message::Assistant {
                 content,
@@ -443,7 +441,7 @@ fn build_input(messages: &crate::context::Compiled<'_>) -> (String, Vec<Value>) 
 }
 
 /// Flatten chat-completions tool specs into the flat Responses shape.
-fn build_tools(tools: &[Value]) -> Vec<Value> {
+pub(crate) fn build_tools(tools: &[Value]) -> Vec<Value> {
     tools
         .iter()
         .filter_map(|t| {
@@ -466,6 +464,7 @@ pub struct CodexReq<'a> {
     pub client: &'a reqwest::Client,
     pub model: &'a str,
     pub prompt_cache_key: Option<&'a str>,
+    pub session_id: &'a str,
 }
 
 /// One streaming Responses-API request against the Codex backend.
@@ -473,8 +472,8 @@ pub async fn stream_responses(
     req: CodexReq<'_>,
     messages: &crate::context::Compiled<'_>,
     tools: &[Value],
-    mut on_delta: impl FnMut(&str),
-    mut on_reasoning: impl FnMut(&str),
+    on_delta: impl FnMut(&str),
+    on_reasoning: impl FnMut(&str),
 ) -> Result<StreamOutcome> {
     let start = Instant::now();
     let (instructions, input) = build_input(messages);
@@ -492,10 +491,7 @@ pub async fn stream_responses(
         "prompt_cache_key": req.prompt_cache_key,
     });
     let (token, account_id) = req.auth.access_token().await?;
-    let session_id = req
-        .prompt_cache_key
-        .map(String::from)
-        .unwrap_or_else(|| format!("sui-{}", now_secs()));
+    let session_id = req.prompt_cache_key.unwrap_or(req.session_id);
 
     let mut http = req
         .client
@@ -506,7 +502,7 @@ pub async fn stream_responses(
         // The backend gates models on a minimum Codex-CLI version — we
         // report a current baseline so newly-released models work.
         .header("version", "0.153.0")
-        .header("session_id", &session_id)
+        .header("session_id", session_id)
         .header("accept", "text/event-stream")
         .json(&body);
     if let Some(a) = &account_id {
@@ -522,185 +518,7 @@ pub async fn stream_responses(
         );
     }
 
-    let mut stream = resp.bytes_stream();
-    // Byte buffer: '\n' can never appear inside a UTF-8 multibyte char,
-    // so byte-scanning for newlines and decoding complete LINES is
-    // corruption-free — unlike lossy-decoding each raw chunk, which
-    // splits a multibyte char across a boundary into two U+FFFDs.
-    let mut buf: Vec<u8> = Vec::new();
-    let mut content = String::new();
-    let mut reasoning: Option<String> = None;
-    let mut calls: BTreeMap<u64, ToolCall> = BTreeMap::new();
-    let mut replay_items: Vec<Value> = Vec::new();
-    let mut usage: Option<Usage> = None;
-    let mut returned_model: Option<String> = None;
-    let mut first_delta_ms: Option<u128> = None;
-    let mut call_ord = 0u64;
-
-    // Returns Ok(true) when the terminal response.completed/done event
-    // arrived — kept outside the closure so the scan can check it.
-    let mut handle_line = |line: &str| -> Result<bool> {
-        let Some(data) = line.strip_prefix("data:") else {
-            return Ok(false);
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            return Ok(false);
-        }
-        let Ok(ev) = serde_json::from_str::<Value>(data) else {
-            return Ok(false);
-        };
-        match ev["type"].as_str().unwrap_or("") {
-            "response.output_text.delta" => {
-                if let Some(t) = ev["delta"].as_str() {
-                    if first_delta_ms.is_none() {
-                        first_delta_ms = Some(start.elapsed().as_millis());
-                    }
-                    content.push_str(t);
-                    on_delta(t);
-                }
-            }
-            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                if let Some(t) = ev["delta"].as_str() {
-                    if first_delta_ms.is_none() {
-                        first_delta_ms = Some(start.elapsed().as_millis());
-                    }
-                    reasoning.get_or_insert_with(String::new).push_str(t);
-                    on_reasoning(t);
-                }
-            }
-            "response.output_item.done" => {
-                let item = &ev["item"];
-                match item["type"].as_str().unwrap_or("") {
-                    "function_call" => {
-                        if first_delta_ms.is_none() {
-                            first_delta_ms = Some(start.elapsed().as_millis());
-                        }
-                        let call_id = item["call_id"]
-                            .as_str()
-                            .or_else(|| item["id"].as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        calls.insert(
-                            call_ord,
-                            ToolCall {
-                                id: call_id,
-                                kind: "function".into(),
-                                function: FunctionCall {
-                                    name: item["name"].as_str().unwrap_or_default().to_string(),
-                                    arguments: item["arguments"]
-                                        .as_str()
-                                        .unwrap_or("{}")
-                                        .to_string(),
-                                },
-                            },
-                        );
-                        call_ord += 1;
-                    }
-                    // Replay verbatim next turn (store:false stateless
-                    // mode) — strip id/status once here so replay is a
-                    // clone, not a mutate, on every later request.
-                    "reasoning" => {
-                        let mut item = item.clone();
-                        if let Some(o) = item.as_object_mut() {
-                            o.remove("id");
-                            o.remove("status");
-                        }
-                        replay_items.push(item);
-                    }
-                    _ => {}
-                }
-            }
-            "response.completed" | "response.done" => {
-                let r = &ev["response"];
-                if let Some(m) = r["model"].as_str() {
-                    returned_model = Some(m.to_string());
-                }
-                if let Some(u) = r.get("usage") {
-                    usage = Some(Usage {
-                        input_tokens: u["input_tokens"].as_u64(),
-                        cache_read_tokens: u["input_tokens_details"]["cached_tokens"].as_u64(),
-                        cache_write_tokens: None,
-                        output_tokens: u["output_tokens"].as_u64(),
-                        complete: true,
-                    });
-                }
-                return Ok(true);
-            }
-            "response.incomplete" => {
-                let why = ev["response"]["incomplete_details"]["reason"]
-                    .as_str()
-                    .unwrap_or("unknown");
-                bail!("codex response incomplete: {why}");
-            }
-            "response.failed" | "error" => {
-                let msg = ev["response"]["error"]["message"]
-                    .as_str()
-                    .or_else(|| ev["error"]["message"].as_str())
-                    .or_else(|| ev["message"].as_str())
-                    .unwrap_or("unknown codex error");
-                bail!(
-                    "codex stream error: {}",
-                    crate::provider::truncate(msg, 300)
-                );
-            }
-            _ => {}
-        }
-        Ok(false)
-    };
-
-    let mut terminal = false;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("codex stream read failed (interrupted)")?;
-        buf.extend_from_slice(&chunk);
-        // scan by index — drain once per chunk, no per-line alloc
-        let mut pos = 0usize;
-        while let Some(nl) = buf[pos..].iter().position(|&b| b == b'\n') {
-            let end = pos + nl;
-            let line = String::from_utf8_lossy(&buf[pos..end]);
-            pos = end + 1;
-            if handle_line(line.trim_end_matches('\r'))? {
-                terminal = true;
-                break;
-            }
-        }
-        buf.drain(..pos);
-        if terminal {
-            break;
-        }
-    }
-    // A truncated stream can end mid-line — still parse what arrived
-    // (a complete response.completed line without its newline counts).
-    if !terminal && !buf.is_empty() {
-        let line = String::from_utf8_lossy(&buf);
-        terminal = handle_line(line.trim_end_matches('\r'))?;
-    }
-
-    let tool_calls: Vec<ToolCall> = calls.into_values().collect();
-    // Honest finish reason: only a terminal event can claim the response
-    // completed. A stream that just stops (drop, truncate, RST) is NOT
-    // a clean "stop" — reporting None lets the caller refuse to treat
-    // partial output as a finished turn.
-    let finish_reason = if terminal {
-        Some(if tool_calls.is_empty() {
-            "stop".to_string()
-        } else {
-            "tool_calls".to_string()
-        })
-    } else {
-        None
-    };
-    Ok(StreamOutcome {
-        content,
-        reasoning_content: reasoning,
-        tool_calls,
-        finish_reason,
-        returned_model,
-        usage,
-        first_delta_ms: first_delta_ms.unwrap_or(0),
-        total_ms: start.elapsed().as_millis(),
-        response_items: replay_items,
-    })
+    crate::provider::responses::read(resp, start, on_delta, on_reasoning).await
 }
 
 // ── Login flows ─────────────────────────────────────────────────────
@@ -922,6 +740,7 @@ fn wait_for_callback(expect_state: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::types::FunctionCall;
+    use crate::types::ToolCall;
 
     #[test]
     fn system_becomes_instructions() {
@@ -936,6 +755,23 @@ mod tests {
         assert_eq!(inst, "sys");
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn image_observation_maps_to_responses_input_image() {
+        let messages = [Message::User {
+            content: crate::types::UserContent::image(
+                "screenshot".into(),
+                "data:image/png;base64,abc".into(),
+            ),
+        }];
+        let (_, input) = build_input(&crate::context::Compiled::view(&messages));
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,abc"
+        );
     }
 
     #[test]

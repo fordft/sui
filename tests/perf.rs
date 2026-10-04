@@ -15,7 +15,8 @@ fn push_turn(h: &mut Vec<Message>, i: usize) {
         content: format!(
             "task step {i}: please update the module and verify the build {}",
             "x".repeat(160)
-        ),
+        )
+        .into(),
     });
     h.push(Message::Assistant {
         content: Some(format!("I'll read the file first. {}", "y".repeat(300))),
@@ -113,6 +114,7 @@ fn resolve_cost() {
         bash_timeout_max: std::time::Duration::from_secs(1),
         web: None,
         canon_root: std::sync::OnceLock::new(),
+        ui: std::sync::OnceLock::new(),
     };
     let n = 200;
     let t = Instant::now();
