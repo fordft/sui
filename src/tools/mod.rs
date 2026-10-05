@@ -3,6 +3,7 @@ pub mod code_context;
 pub mod code_intel;
 pub mod fs;
 pub mod inventory;
+pub mod tool_output;
 pub mod ui;
 
 use anyhow::Result;
@@ -25,6 +26,8 @@ pub struct ToolContext {
     /// Bounded syntax facts, owned by this agent/worktree; fresh source is
     /// checked on every context query.
     pub code_context: std::sync::OnceLock<std::sync::Arc<code_context::CodeContextService>>,
+    /// Ephemeral originals of compacted command results, never shared or journaled.
+    pub tool_outputs: std::sync::OnceLock<tool_output::OutputStore>,
 }
 
 /// Frozen tool schemas. Changing names/descriptions/order invalidates
@@ -126,12 +129,13 @@ pub fn schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a shell command in the workspace. Prefer rg for search. Output is bounded; long output is truncated head+tail.",
+                "description": "Run a shell command in the workspace. Prefer rg for search. Output is bounded head+tail. Successful Cargo progress/pass records may be compacted with a read_tool_output handle; output=raw preserves the captured text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command":    { "type": "string", "description": "Shell command (bash -c)" },
-                        "timeout_ms": { "type": "integer", "description": "Wall-clock timeout in ms (default 120000)" }
+                        "timeout_ms": { "type": "integer", "description": "Wall-clock timeout in ms (default 120000)" },
+                        "output": { "type": "string", "enum": ["auto", "raw"], "description": "auto (default): compact recognized successful Cargo output; raw: return original bounded capture" }
                     },
                     "required": ["command"]
                 }
@@ -139,10 +143,12 @@ pub fn schemas() -> Vec<Value> {
         }),
     ];
     schemas.extend(ui::schemas());
-    // Append new tools so existing schema bytes/order remain unchanged.
+    // Append new names to preserve existing order. Deliberate schema changes
+    // require a new session signature.
     schemas.push(inventory::schema());
     schemas.push(code_intel::schema());
     schemas.push(code_context::schema());
+    schemas.push(tool_output::schema());
     schemas
 }
 
@@ -165,7 +171,8 @@ pub struct ExecOut {
     pub text: String,
     pub kind: ExecKind,
     pub exit: Option<i32>,
-    /// The captured result itself was truncated at the capture cap.
+    /// Observation bytes were omitted by capture limits, incomplete pipe
+    /// capture or a paged view. Compaction alone does not set this flag.
     pub truncated: bool,
     /// Live-preview chunks dropped because the UI tap was full.
     pub preview_dropped: u64,
@@ -226,6 +233,7 @@ pub async fn execute(
         "inventory" => inventory::execute(ctx, args, cancel).await,
         "code_intel" => code_intel::execute(ctx, args, cancel).await,
         "code_context" => code_context::execute(ctx, args, cancel).await,
+        "read_tool_output" => tool_output::execute(ctx, args, cancel).await,
         "browser" | "terminal" => ui::service(ctx)?.execute(ctx, name, args, cancel).await,
         "view_image" => ui::view_image(ctx, args).await,
         "skill" => {
@@ -275,6 +283,7 @@ mod tests {
             ui: std::sync::OnceLock::new(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         };
         let ok = super::execute(
             &ctx,

@@ -409,6 +409,49 @@ Adding `code_context` changes the native tool/system signature. Start a new
 session after updating Sui; older sessions remain inspectable/exportable,
 and Resume requires their recorded signature.
 
+## Native output compaction
+
+Sui reduces recognized Cargo output before appending it to model history;
+no RTK binary, shell hook, separate service or model request is needed.
+The Bash tool defaults to `output: "auto"`. For a simple `cargo test`,
+`build`, `check` or `clippy` invocation, completed, untruncated exit-zero
+captures can collapse validated passing-test records and compilation
+progress. Test totals, ignored tests, warnings and unrecognized text stay
+in their original order. Failures, timeouts, cancellation, structured output
+and shell compositions keep the existing capture behavior. A compact view
+is used only when its complete envelope is smaller than the original.
+Pipe read failures or unfinished drains mark the capture truncated and
+bypass compaction; timed-out reader tasks are aborted and joined.
+
+```json
+{"command":"cargo test","output":"auto"}
+```
+
+Compacted results report `output_compacted`, collapsed line counts,
+`original_bytes`, `rendered_bytes` and `raw_output_id`. These are captured
+text measurements, not provider token savings, billing or prompt-cache hits.
+Use `bash` with `output: "raw"` to bypass compaction, or recover the existing
+capture without rerunning a command:
+
+```json
+{"id":"<raw_output_id>","offset":0,"max_bytes":12000}
+```
+
+`read_tool_output` returns exact UTF-8 pages with byte offsets and `more` /
+`next_offset`; the whole page envelope is bounded to `max_bytes` (1,024–24,000).
+Original captures are held only in the owning agent's memory: at most eight
+entries and 512 KiB of stored text, with a 128 KiB per-entry limit. Eviction
+or a session restart expires handles and returns an explicit error. Existing
+head/tail capture limits still apply; omitted process bytes cannot be recovered.
+The initial Bash journal entry stores the compact view. Requested recovery
+pages become ordinary tool history and journal entries.
+
+The stable native prompt also asks for concise prose while retaining
+negation, conditions, identifiers, units, errors, evidence and uncertainty.
+Source code, public documentation and structured deliverable shapes stay exact.
+This changes the native tool/system signature; start a new session after
+updating. History is never rewritten by output compaction.
+
 ## Rust code intelligence
 
 Native agents can call `code_intel` for Rust definitions, references and

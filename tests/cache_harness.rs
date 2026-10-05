@@ -189,6 +189,7 @@ fn agent(endpoint: &str, root: &std::path::Path, history: Vec<Message>) -> Agent
             ui: Default::default(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         },
         Gate::new(true),
         Journal::open(root).unwrap(),

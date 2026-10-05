@@ -31,6 +31,7 @@ impl Fixture {
                 ui: Default::default(),
                 code_intel: Default::default(),
                 code_context: Default::default(),
+                tool_outputs: Default::default(),
             },
             "inventory",
             &json!({"action":"symbols","path":path,"limit":200}),

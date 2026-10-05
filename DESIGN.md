@@ -72,7 +72,7 @@ rolling truncation.
 | `read_file(path, offset, limit)` | line-numbered, bounded (≤100 default) |
 | `write_file(path, content)` | atomic tmp+rename, workspace-confined |
 | `edit_file(path, old_str, new_str)` | exact match; 0→fail, >1→fail ambiguous |
-| `bash(command, timeout_ms)` | workspace cwd, hard timeout, head+tail bound |
+| `bash(command, timeout_ms, output)` | workspace cwd, hard timeout, head+tail bound; auto compact recognized successful Cargo output or raw capture |
 | `web_search(query)` | bounded results + source IDs; needs `[web]` key |
 | `web_fetch(url)` | public http(s) only, SSRF-checked, markdown text |
 | `skill(name)` | loads an engineering lens from the prompt index |
@@ -82,9 +82,34 @@ rolling truncation.
 | `inventory(action, query, path, limit)` | read-only current files or Tree-sitter definition locations; bounded, ignore-aware, per-worktree |
 | `code_intel(action, path, line, column, limit)` | native Rust definitions/references/diagnostics over managed stdio LSP; local execution gate, workspace-filtered output |
 | `code_context(action, query, path, line, limit, max_bytes)` | lexical ranked source candidates or syntax-aware contextual read; current numbered excerpts, hashes, explicit omissions, per-worktree parse cache |
+| `read_tool_output(id, offset, max_bytes)` | read-only exact pages of an agent-owned ephemeral original command capture; no command rerun |
 
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
+
+Native output compaction is a one-time view transformation after approved
+Bash execution and before journaling/history append. Literal Cargo
+test/build/check/clippy invocations qualify only on completed exit zero and
+untruncated capture. Validated libtest pass records and recognized compilation
+progress may be collapsed; diagnostics, totals, ignored records and unknown
+lines remain exact. Command execution, live preview, typed outcomes and mission
+acceptance gates continue to use the original process behavior. Unsupported
+syntax/output formats and every unsuccessful or incomplete capture fall back
+to the original envelope. A compact envelope must be strictly smaller including
+its own metadata; storage failure also falls back to raw.
+Pipe readers report actual EOF; errors and drain deadlines mark the capture
+truncated. Reader tasks abort on future drop and are joined on drain timeout,
+so unfinished streams cannot masquerade as complete recovery observations.
+
+Each ToolContext owns a lazy memory-only original-output store, bounded to
+eight entries / 512 KiB text / 128 KiB per entry. Random context nonce and
+checked monotonic IDs prevent handle reuse across agents or restarts. Original
+bounded envelopes can be paged with UTF-8 byte offsets without executing any
+command. Eviction and restart make handles unavailable; the compact journal
+view remains replayable. Whole read responses obey the caller's byte cap.
+Byte measurements identify local output reduction only: provider usage and
+cache telemetry retain their existing measured/unknown semantics. Stable
+concise-prose guidance never rewrites source, user input or existing history.
 
 Inventory walks current files on demand and parses definitions with embedded
 Rust, JS/JSX, TS/TSX, Python and Go grammars. It requires no shell/server,

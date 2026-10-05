@@ -907,6 +907,7 @@ mod tests {
             ui: Default::default(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         };
         let service = UiService::new(BrowserCfg::default());
         service.approve_once();

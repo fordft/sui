@@ -12,6 +12,8 @@ use tokio::time::timeout;
 
 use super::ToolContext;
 
+mod compact;
+
 /// Max bytes of a stream that may enter model-visible history.
 /// Over the limit: keep head 60% + tail 40% with an omission marker.
 /// Enforced DURING collection — the pipe is always drained (a full buffer
@@ -143,20 +145,16 @@ impl CapBuf {
 
 /// Read a pipe to EOF: retained bytes go into `cap` (bounded), a bounded
 /// preview copy goes to `obs` (best-effort, drop-counted).
-fn pipe_task<R>(
-    mut r: R,
-    cap: Arc<Mutex<CapBuf>>,
-    obs: Option<Observer>,
-    err: bool,
-) -> tokio::task::JoinHandle<()>
+fn pipe_task<R>(mut r: R, cap: Arc<Mutex<CapBuf>>, obs: Option<Observer>, err: bool) -> PipeTask
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    PipeTask(tokio::spawn(async move {
         let mut chunk = [0u8; 8192];
         loop {
             match r.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => return true,
+                Err(_) => return false,
                 Ok(n) => {
                     let b = &chunk[..n];
                     cap.lock().unwrap().append(b);
@@ -174,8 +172,31 @@ where
                 }
             }
         }
-        // rendering happens in spawn_bounded after both pipes hit EOF
-    })
+    }))
+}
+
+/// Reader tasks must not detach if a drain times out or the caller drops its
+/// future. A read error is incomplete capture, never successful EOF.
+struct PipeTask(tokio::task::JoinHandle<bool>);
+
+impl PipeTask {
+    async fn finish(&mut self, deadline: Duration) -> bool {
+        match timeout(deadline, &mut self.0).await {
+            Ok(Ok(eof)) => eof,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                self.0.abort();
+                let _ = (&mut self.0).await;
+                false
+            }
+        }
+    }
+}
+
+impl Drop for PipeTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Spawn `bash -c <cmd>` in `dir` with filtered env, own process group,
@@ -219,8 +240,8 @@ pub async fn spawn_bounded(
     let so = child.stdout.take().expect("piped stdout");
     let se = child.stderr.take().expect("piped stderr");
     let dropped = obs.as_ref().map(|o| o.dropped.clone());
-    let out_h = pipe_task(so, out_cap.clone(), obs.clone(), false);
-    let err_h = pipe_task(se, err_cap.clone(), obs, true);
+    let mut out_h = pipe_task(so, out_cap.clone(), obs.clone(), false);
+    let mut err_h = pipe_task(se, err_cap.clone(), obs, true);
 
     enum End {
         Done(std::io::Result<std::process::ExitStatus>),
@@ -260,15 +281,15 @@ pub async fn spawn_bounded(
     // Bounded drain: a descendant that escaped via setsid still holds
     // the pipes — without a cap the tool call hangs forever.
     let drain_deadline = Duration::from_secs(5);
-    let _ = tokio::time::timeout(drain_deadline, out_h).await;
-    let _ = tokio::time::timeout(drain_deadline, err_h).await;
+    let (out_eof, err_eof) =
+        tokio::join!(out_h.finish(drain_deadline), err_h.finish(drain_deadline));
     let (stdout, t1) = out_cap.lock().unwrap().render();
     let (stderr, t2) = err_cap.lock().unwrap().render();
     Ok(ProcOut {
         code: status.and_then(|s| s.ok()).and_then(|s| s.code()),
         stdout,
         stderr,
-        truncated: t1 || t2,
+        truncated: t1 || t2 || !out_eof || !err_eof,
         timed_out,
         cancelled,
         preview_dropped: dropped.map(|d| d.load(Ordering::Relaxed)).unwrap_or(0),
@@ -282,6 +303,17 @@ pub async fn run(
     obs: Option<Observer>,
 ) -> Result<super::ExecOut> {
     use super::ExecKind;
+    let raw_output = match args.get("output") {
+        None => false,
+        Some(Value::String(mode)) if mode == "auto" => false,
+        Some(Value::String(mode)) if mode == "raw" => true,
+        _ => {
+            return Ok(super::ExecOut::plain(
+                "status: error\nerror: output must be auto or raw".into(),
+                ExecKind::Error,
+            ));
+        }
+    };
     let cmd = args["command"].as_str().unwrap_or("").to_string();
     if cmd.trim().is_empty() {
         return Ok(super::ExecOut::plain(
@@ -322,23 +354,16 @@ pub async fn run(
         });
     }
     let code = out.code.unwrap_or(-1);
+    let original = render_capture(code, &out.stdout, &out.stderr, out.truncated);
+    // Transform once, before the agent appends its result to history. Runtime
+    // facts, live preview and mission gate capture remain untouched.
+    let text = if !raw_output && code == 0 && !out.truncated {
+        compact_result(ctx, &cmd, &out.stdout, &out.stderr, &original).unwrap_or(original)
+    } else {
+        original
+    };
     Ok(super::ExecOut {
-        text: format!(
-            "status: {}\nexit_code: {}\nstdout: {}\nstderr: {}\ntruncated: {}",
-            if code == 0 { "success" } else { "failed" },
-            code,
-            if out.stdout.is_empty() {
-                "<empty>".into()
-            } else {
-                out.stdout
-            },
-            if out.stderr.is_empty() {
-                "<empty>".into()
-            } else {
-                out.stderr
-            },
-            out.truncated
-        ),
+        text,
         kind: if code == 0 {
             ExecKind::Success
         } else {
@@ -349,6 +374,51 @@ pub async fn run(
         preview_dropped: dropped,
         image: None,
     })
+}
+
+fn render_capture(code: i32, stdout: &str, stderr: &str, truncated: bool) -> String {
+    format!(
+        "status: {}\nexit_code: {}\nstdout: {}\nstderr: {}\ntruncated: {}",
+        if code == 0 { "success" } else { "failed" },
+        code,
+        if stdout.is_empty() { "<empty>" } else { stdout },
+        if stderr.is_empty() { "<empty>" } else { stderr },
+        truncated
+    )
+}
+
+fn compact_result(
+    ctx: &ToolContext,
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    original: &str,
+) -> Option<String> {
+    let reduced = compact::reduce(command, stdout, stderr)?;
+    let body = render_capture(0, &reduced.stdout, &reduced.stderr, false);
+    let render = |id: &str| {
+        // rendered_bytes includes this metadata. Its decimal width converges
+        // without estimates of provider tokens, costs or cache hits.
+        let mut rendered_bytes = 0;
+        loop {
+            let text = format!(
+                "{body}\noutput_compacted: true\nstrategy: cargo-success\npassed_lines_collapsed: {}\nprogress_lines_collapsed: {}\noriginal_bytes: {}\nrendered_bytes: {rendered_bytes}\nraw_output_id: {id}",
+                reduced.passed_lines, reduced.progress_lines, original.len()
+            );
+            if text.len() == rendered_bytes {
+                break text;
+            }
+            rendered_bytes = text.len();
+        }
+    };
+    let placeholder = "0".repeat(super::tool_output::ID_LEN);
+    if render(&placeholder).len() >= original.len() {
+        return None;
+    }
+    // Storage failure keeps the complete original result. No command rerun or
+    // discarded evidence is needed to recover the compacted view.
+    let id = super::tool_output::retain(ctx, original).ok()??;
+    Some(render(&id))
 }
 
 /// Kills the spawned process group when dropped — the backstop for
@@ -394,7 +464,27 @@ mod tests {
             ui: std::sync::OnceLock::new(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn pipe_read_error_is_incomplete_capture_while_eof_is_complete() {
+        struct BrokenPipe;
+        impl AsyncRead for BrokenPipe {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Err(std::io::Error::other("fixture pipe error")))
+            }
+        }
+        let cap = Arc::new(Mutex::new(CapBuf::new()));
+        let mut broken = pipe_task(BrokenPipe, cap.clone(), None, false);
+        assert!(!broken.finish(Duration::from_secs(1)).await);
+        let mut empty = pipe_task(tokio::io::empty(), cap, None, false);
+        assert!(empty.finish(Duration::from_secs(1)).await);
     }
 
     #[tokio::test]

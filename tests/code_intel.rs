@@ -23,7 +23,9 @@ impl Fixture {
             rand::random::<u128>()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let fixture = Self(root);
+        // macOS aliases /var to /private/var. Mock metadata and production
+        // workspace guards must use the same canonical root.
+        let fixture = Self(root.canonicalize().unwrap());
         fixture.write(
             "Cargo.toml",
             "[package]\nname = \"code_intel_fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
@@ -63,6 +65,7 @@ fn base_context(root: &Path) -> ToolContext {
         ui: Default::default(),
         code_intel: Default::default(),
         code_context: Default::default(),
+        tool_outputs: Default::default(),
     }
 }
 

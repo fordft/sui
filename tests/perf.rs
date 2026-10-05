@@ -117,6 +117,7 @@ fn resolve_cost() {
         ui: std::sync::OnceLock::new(),
         code_intel: Default::default(),
         code_context: Default::default(),
+        tool_outputs: Default::default(),
     };
     let n = 200;
     let t = Instant::now();

@@ -183,6 +183,7 @@ fn mk_agent(
             ui: std::sync::OnceLock::new(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply
         journal,

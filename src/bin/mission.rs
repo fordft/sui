@@ -141,6 +141,7 @@ async fn solo(
             ui: std::sync::OnceLock::new(),
             code_intel: Default::default(),
             code_context: Default::default(),
+            tool_outputs: Default::default(),
         },
         Gate::new(true),
         Journal::open_named(run_dir, journal_name)?,

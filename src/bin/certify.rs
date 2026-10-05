@@ -75,6 +75,7 @@ impl Ctx {
                 ui: std::sync::OnceLock::new(),
                 code_intel: Default::default(),
                 code_context: Default::default(),
+                tool_outputs: Default::default(),
             },
             Gate::new(true), // fixture workspace is disposable
             Journal::open_named(&self.run_dir, scenario)?,

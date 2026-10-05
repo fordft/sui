@@ -51,6 +51,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "inventory",
     "code_intel",
     "code_context",
+    "read_tool_output",
 ];
 
 /// Result of an intercepted tool call (e.g. orchestrator plan submission).
@@ -1213,6 +1214,7 @@ fn summarize(name: &str, args: &str, v: &Value) -> String {
             v["path"].as_str().unwrap_or("."),
             v["query"].as_str().unwrap_or("")
         ),
+        "read_tool_output" => format!("tool output {}", v["id"].as_str().unwrap_or("")),
         _ => format!("{name} {args}"),
     }
 }
