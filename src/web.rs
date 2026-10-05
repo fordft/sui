@@ -44,7 +44,7 @@ pub enum WebAccess {
     /// Never send anything out. YOLO does not change this.
     #[default]
     Off,
-    /// Ask through the normal permission gate (session grants apply).
+    /// Ask for independent consent; web session grants belong to each agent.
     Ask,
     /// Allowed without prompting.
     Auto,

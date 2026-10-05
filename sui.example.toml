@@ -105,6 +105,8 @@ bash_timeout_max_ms = 600000
 # machine — the access policy below is INDEPENDENT of tool auto-approve
 # (YOLO never turns web access on). [web] in a project sui.toml is
 # ignored: project files may not raise network egress.
+# Ask ignores local AUTO/YOLO; its session grant applies only to web
+# requests from the current native agent and resets when web settings change.
 #
 # [web]
 # access = "ask"           # "off" (default) | "ask" | "auto"

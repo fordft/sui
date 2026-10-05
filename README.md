@@ -214,6 +214,7 @@ terminal selection. Toggle capture in Settings → mouse.
 
 Mutating tool calls ask first: `y` approves once, `a` approves for the
 session (`AUTO` in the header), `n`/Esc denies. Enter never approves.
+Browser, terminal and web consent do not enable local `AUTO`.
 Permission previews scroll with `↑↓`, PageUp/PageDown, or the wheel;
 decision buttons remain fixed and clickable. `Ctrl+S` and `Ctrl+Q` work
 inside prompts. An ask arriving while you type in a dialog is queued;
@@ -232,7 +233,11 @@ Search results come back as source IDs (`[S1]`, title, URL, snippet) —
 snippets are labeled snippets, not fetched pages. `web_fetch(url)` reads
 one source as bounded Markdown; cached hits are labeled with their age.
 The policy is independent of tool auto-approve: **YOLO never turns web
-access on**, and queries/requested URLs leave the machine. Unsafe
+access on** or bypasses `ask`. In `ask` mode, `y` permits one request and
+`a` grants web access to the current native agent, separately from local
+tools. Changing web settings revokes that grant; the next Solo task uses
+the current settings while keeping its conversation. Queries/requested
+URLs leave the machine. Unsafe
 targets — private/link-local/metadata IPs, credential-bearing or
 secret-shaped URLs, non-http(s) schemes — are refused before anything is
 sent. Per-run request caps apply across all workers in a mission.
@@ -411,8 +416,9 @@ and Resume requires their recorded signature.
 
 ## Native output compaction
 
-Sui reduces recognized Cargo and Git diffstat output before appending it to model history;
-no RTK binary, shell hook, separate service or model request is needed.
+Sui's Rust Bash result renderer reduces recognized Cargo and Git diffstat output
+before appending it to model history. Compaction needs no extra executable,
+package, shell hook, service or model request.
 The Bash tool defaults to `output: "auto"`. For a simple `cargo test`,
 `build`, `check` or `clippy` invocation, completed, untruncated exit-zero
 captures can collapse validated passing-test records and compilation

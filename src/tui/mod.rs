@@ -92,12 +92,43 @@ fn run_dir() -> PathBuf {
 /// A long-lived solo agent: one conversation session (append-only
 /// history keeps the provider cache warm across chat turns).
 pub struct Solo {
-    tx: UnboundedSender<(u64, String)>, // (activity run id, task text)
-    sig: String,                        // profile+model signature; change → respawn
+    tx: UnboundedSender<SoloTask>,
+    sig: String, // profile+model signature; change → respawn
+}
+struct SoloTask {
+    run: u64,
+    msg: String,
+    web: WebUpdate,
+}
+enum WebUpdate {
+    Keep,
+    Replace(Option<Arc<crate::web::WebService>>),
 }
 impl Solo {
     pub fn send(&self, run: u64, msg: String) -> bool {
-        self.tx.send((run, msg)).is_ok()
+        self.tx
+            .send(SoloTask {
+                run,
+                msg,
+                web: WebUpdate::Keep,
+            })
+            .is_ok()
+    }
+
+    /// Apply current UI web policy without replacing the conversation.
+    pub fn send_with_web(
+        &self,
+        run: u64,
+        msg: String,
+        web: Option<Arc<crate::web::WebService>>,
+    ) -> bool {
+        self.tx
+            .send(SoloTask {
+                run,
+                msg,
+                web: WebUpdate::Replace(web),
+            })
+            .is_ok()
     }
 }
 
@@ -155,7 +186,7 @@ pub fn start_solo(
 ) -> Result<Solo> {
     config::validate_native_config(None, &workspace)?;
     let lock = crate::session::SessionLock::acquire(&jdir)?;
-    let (tx, mut rx) = unbounded_channel::<(u64, String)>();
+    let (tx, mut rx) = unbounded_channel::<SoloTask>();
     let sig = solo_signature(&prof);
     let workspace_for_log = workspace.canonicalize()?.display().to_string();
     let al = crate::config::agent_limits(&workspace);
@@ -218,7 +249,10 @@ pub fn start_solo(
                 "sui_version": env!("CARGO_PKG_VERSION"),
             }),
         );
-        while let Some((run, msg)) = rx.recv().await {
+        while let Some(SoloTask { run, msg, web }) = rx.recv().await {
+            if let WebUpdate::Replace(web) = web {
+                agent.set_web_service(web);
+            }
             agent.set_run_id(run);
             agent.jlog("task", serde_json::json!({
                 "task": msg,
@@ -564,7 +598,11 @@ pub async fn run_with_resume(
                                             app.web.clone(),
                                         ));
                                     }
-                                    if !solo.as_ref().unwrap().send(run, task) {
+                                    if !solo.as_ref().unwrap().send_with_web(
+                                        run,
+                                        task,
+                                        app.web.clone(),
+                                    ) {
                                         app.apply_event(UiEvent::RunDone {
                                             run,
                                             outcome: "error: session unavailable".into(),

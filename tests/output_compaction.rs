@@ -434,6 +434,61 @@ async fn timeouts_and_cancellation_keep_typed_outcomes_and_kill_the_original_chi
 }
 
 #[tokio::test]
+async fn invalid_cargo_version_diagnostics_remain_exact() {
+    let fixture = Fixture::new();
+    let ctx = fixture.ctx();
+    let command = fixture.command("check");
+    let mut diagnostics = String::new();
+    for index in 0..8 {
+        for version in ["v1.2.3++++", "v1.2.3+...", "v1.2.3-alpha..1", "v01.2.3"] {
+            diagnostics.push_str(&format!(
+                "    Checking diagnostic_{index:02} {version} (not built)\n"
+            ));
+        }
+    }
+    fixture.set_output("", &diagnostics, 0);
+    let auto = execute(&ctx, "bash", json!({"command":command})).await;
+    let raw = execute(&ctx, "bash", json!({"command":command,"output":"raw"})).await;
+    assert_eq!(auto.kind, ExecKind::Success);
+    assert_eq!(auto.exit, Some(0));
+    assert!(!auto.truncated);
+    assert_eq!(
+        auto.text, raw.text,
+        "malformed versions are unknown diagnostics"
+    );
+    assert!(!auto.text.contains("output_compacted:"));
+    assert!(!auto.text.contains("raw_output_id:"));
+    assert_eq!(fixture.runs(), 2);
+
+    let valid: String = (0..24)
+        .map(|index| {
+            let version = if index % 2 == 0 {
+                "v1.2.3-alpha.1+build.7"
+            } else {
+                "v1.2.3+001"
+            };
+            format!("    Checking valid_dependency_{index:02} {version}\n")
+        })
+        .collect();
+    let mixed = format!("{valid}{diagnostics}{valid}warning: exact final diagnostic\n");
+    fixture.set_output("", &mixed, 0);
+    let compact = execute(&ctx, "bash", json!({"command":command})).await;
+    assert_eq!(compact.kind, ExecKind::Success);
+    assert_eq!(compact.exit, Some(0));
+    assert!(!compact.truncated);
+    assert_eq!(field(&compact.text, "output_compacted"), "true");
+    assert_eq!(count(&compact.text, "progress_lines_collapsed"), 48);
+    assert!(compact.text.contains(&diagnostics));
+    assert!(compact.text.contains("warning: exact final diagnostic\n"));
+    let id = field(&compact.text, "raw_output_id").to_owned();
+    let recovered = recover(&ctx, &id, 1024).await;
+    assert_eq!(fixture.runs(), 3, "recovery must not execute the command");
+    let raw = execute(&ctx, "bash", json!({"command":command,"output":"raw"})).await;
+    assert_eq!(recovered, raw.text);
+    assert_eq!(fixture.runs(), 4);
+}
+
+#[tokio::test]
 async fn recovery_pagination_is_utf8_exact_and_rejects_bad_bounds_foreign_and_moved_contexts() {
     let fixture = Fixture::new();
     let unicode = format!("UNKNOWN Unicode: {}\n", "Ω🦀".repeat(900));
@@ -477,6 +532,63 @@ async fn recovery_pagination_is_utf8_exact_and_rejects_bad_bounds_foreign_and_mo
     assert!(!moved.text.contains("UNKNOWN Unicode:"));
     assert_eq!(fixture.runs(), 1);
     assert_eq!(other.runs(), 0);
+}
+
+#[tokio::test]
+async fn populated_agent_stores_on_the_same_workspace_reject_each_others_handles() {
+    let fixture = Fixture::new();
+    let first_ctx = fixture.ctx();
+    let second_ctx = fixture.ctx();
+    let first_stdout = passing_suite(30, false, "UNKNOWN first agent observation\n");
+    let second_stdout = passing_suite(30, false, "UNKNOWN second agent observation\n");
+    fixture.set_output(&first_stdout, "", 0);
+    let first = execute(
+        &first_ctx,
+        "bash",
+        json!({"command":fixture.command("test")}),
+    )
+    .await;
+    assert_eq!(first.kind, ExecKind::Success);
+    assert_eq!(first.exit, Some(0));
+    assert_eq!(field(&first.text, "output_compacted"), "true");
+    let first_id = field(&first.text, "raw_output_id").to_owned();
+    fixture.set_output(&second_stdout, "", 0);
+    let second = execute(
+        &second_ctx,
+        "bash",
+        json!({"command":fixture.command("test")}),
+    )
+    .await;
+    assert_eq!(second.kind, ExecKind::Success);
+    assert_eq!(second.exit, Some(0));
+    assert_eq!(field(&second.text, "output_compacted"), "true");
+    let second_id = field(&second.text, "raw_output_id").to_owned();
+    for id in [&first_id, &second_id] {
+        assert_eq!(id.len(), 49);
+        assert_eq!(id.rsplit_once('-').unwrap().1, "0000000000000001");
+    }
+    assert_ne!(
+        first_id, second_id,
+        "independent populated stores need distinct handles"
+    );
+    assert_eq!(fixture.runs(), 2);
+    for (ctx, foreign_id) in [(&first_ctx, &second_id), (&second_ctx, &first_id)] {
+        let denied = execute(ctx, "read_tool_output", json!({"id":foreign_id})).await;
+        assert_eq!(denied.kind, ExecKind::Error, "{}", denied.text);
+        assert!(!denied.text.contains("content:\n"));
+        assert!(!denied.text.contains("UNKNOWN first agent observation"));
+        assert!(!denied.text.contains("UNKNOWN second agent observation"));
+        assert!(!denied.text.contains(foreign_id));
+    }
+    assert_eq!(
+        recover(&first_ctx, &first_id, 1024).await,
+        format!("status: success\nexit_code: 0\nstdout: {first_stdout}\nstderr: <empty>\ntruncated: false")
+    );
+    assert_eq!(
+        recover(&second_ctx, &second_id, 1024).await,
+        format!("status: success\nexit_code: 0\nstdout: {second_stdout}\nstderr: <empty>\ntruncated: false")
+    );
+    assert_eq!(fixture.runs(), 2, "foreign and own reads never rerun Bash");
 }
 
 #[tokio::test]

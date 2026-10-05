@@ -4,12 +4,19 @@ mod common;
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
+use sui::agent::{Agent, Identity, Limits};
+use sui::events::{GateChoice, UiEvent};
 use sui::tools::{
     self,
     ui::{BrowserCfg, UiService},
     ExecKind, ToolContext,
 };
+use sui::web::{WebAccess, WebCfg, WebService};
 
 fn workspace() -> PathBuf {
     let tag = format!(
@@ -47,6 +54,126 @@ fn context(path: PathBuf, approved: bool) -> ToolContext {
 fn png() -> Vec<u8> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==").unwrap()
+}
+
+fn consent_response(call: Option<Value>) -> String {
+    let response = if let Some(mut call) = call {
+        call["index"] = json!(0);
+        json!({"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[call]},"finish_reason":"tool_calls"}]})
+    } else {
+        json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"consent flow finished"},"finish_reason":"stop"}]})
+    };
+    format!("data: {response}\n\ndata: [DONE]\n\n")
+}
+
+fn rejected_web_call(id: &str) -> Value {
+    // The production URL guard rejects this before opening the web backend.
+    common::tc(
+        id,
+        "web_fetch",
+        &json!({"url":"http://127.0.0.1/consent-proof"}).to_string(),
+    )
+}
+
+fn consent_web(access: WebAccess) -> Arc<WebService> {
+    WebService::new(WebCfg {
+        access,
+        api_key: None,
+        endpoint: "not-a-network-endpoint".into(),
+    })
+}
+
+fn consent_agent(
+    path: &std::path::Path,
+    journal_name: &str,
+    port: u16,
+    auto: bool,
+    web: Arc<WebService>,
+    session: Arc<AtomicBool>,
+) -> (Agent, tokio::sync::mpsc::UnboundedReceiver<UiEvent>) {
+    let mut ctx = context(path.to_path_buf(), false);
+    ctx.web = Some(web);
+    let mut agent = Agent::new(
+        sui::provider::Provider::new(
+            &format!("http://127.0.0.1:{port}"),
+            None,
+            "consent-mock".into(),
+            None,
+        ),
+        ctx,
+        sui::permission::Gate::new(auto),
+        sui::journal::Journal::open(&path.join(journal_name)).unwrap(),
+        Limits {
+            max_turns: 8,
+            context_budget: 50000,
+            context_reserve: 1000,
+            compact_context: false,
+            request_timeout: Duration::from_secs(5),
+        },
+        Identity {
+            session_id: journal_name.into(),
+            agent_id: journal_name.into(),
+            role: "worker".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            model: "consent-mock".into(),
+            cache_key_fingerprint: None,
+        },
+    );
+    agent.set_quiet(true);
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+    agent.wire_ui(
+        events,
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(AtomicBool::new(false)),
+        Some(session),
+    );
+    (agent, receiver)
+}
+
+async fn consent_turn(
+    agent: &mut Agent,
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    task: &str,
+    choices: &[GateChoice],
+) -> Vec<String> {
+    let mut prompts = Vec::new();
+    let drive = agent.run_turn(task);
+    tokio::pin!(drive);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            tokio::select! {
+                result = &mut drive => {
+                    result.unwrap();
+                    return;
+                }
+                event = receiver.recv() => {
+                    let event = event.expect("native Agent event channel remains live");
+                    if let UiEvent::Permission { summary, reply, .. } = event {
+                        let choice = choices.get(prompts.len()).copied().unwrap_or(GateChoice::Deny);
+                        prompts.push(summary);
+                        reply.send(choice).unwrap();
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("bounded consent flow");
+    prompts
+}
+
+fn consent_tool_result<'a>(agent: &'a Agent, id: &str) -> &'a str {
+    agent
+        .history()
+        .iter()
+        .find_map(|message| match message {
+            sui::types::Message::Tool {
+                tool_call_id,
+                content,
+            } if tool_call_id == id => Some(content.as_str()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing tool result {id}"))
 }
 
 #[tokio::test]
@@ -123,6 +250,374 @@ async fn ui_requires_independent_consent_before_any_setup() {
         assert!(out.image.is_none());
     }
     std::fs::remove_dir_all(ctx.workspace).unwrap();
+}
+
+#[tokio::test]
+async fn native_web_ask_still_prompts_under_yolo() {
+    let path = workspace();
+    let port = common::serve(|_, messages| {
+        let call = (!messages.iter().any(|message| message["role"] == "tool"))
+            .then(|| rejected_web_call("web-yolo"));
+        consent_response(call)
+    });
+    let session = Arc::new(AtomicBool::new(false));
+    let web = consent_web(WebAccess::Ask);
+    let (mut agent, mut receiver) =
+        consent_agent(&path, "web-yolo", port, true, web.clone(), session.clone());
+    let prompts = consent_turn(
+        &mut agent,
+        &mut receiver,
+        "Check web consent under local auto approval.",
+        &[GateChoice::Deny],
+    )
+    .await;
+    assert_eq!(prompts.len(), 1, "YOLO must not authorize web Ask");
+    assert!(prompts[0].starts_with("web — leaves this machine:"));
+    assert!(consent_tool_result(&agent, "web-yolo").starts_with("status: denied\n"));
+    assert!(!session.load(Ordering::Relaxed));
+    assert!(web.sources().is_empty());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn native_local_session_approval_does_not_skip_web_ask() {
+    let path = workspace();
+    let port = common::serve(|_, messages| {
+        let tools = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count();
+        let call = match tools {
+            0 => Some(common::tc(
+                "local-session",
+                "write_file",
+                &json!({"path":"local-approved.txt","content":"legitimate local approval"})
+                    .to_string(),
+            )),
+            1 => Some(rejected_web_call("web-after-local")),
+            _ => None,
+        };
+        consent_response(call)
+    });
+    let session = Arc::new(AtomicBool::new(false));
+    let (mut agent, mut receiver) = consent_agent(
+        &path,
+        "local-before-web",
+        port,
+        false,
+        consent_web(WebAccess::Ask),
+        session.clone(),
+    );
+    let prompts = consent_turn(
+        &mut agent,
+        &mut receiver,
+        "Approve a local session, then check independent web consent.",
+        &[GateChoice::Session, GateChoice::Deny],
+    )
+    .await;
+    assert_eq!(prompts.len(), 2, "local Session must not authorize web Ask");
+    assert_eq!(prompts[0], "write local-approved.txt");
+    assert!(prompts[1].starts_with("web — leaves this machine:"));
+    assert!(
+        session.load(Ordering::Relaxed),
+        "legitimate local Session persists"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("local-approved.txt")).unwrap(),
+        "legitimate local approval"
+    );
+    assert!(consent_tool_result(&agent, "web-after-local").starts_with("status: denied\n"));
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn native_web_session_is_agent_owned_and_does_not_approve_local_writes() {
+    let path = workspace();
+    let port = common::serve(|_, messages| {
+        let tools = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count();
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .and_then(|message| message["content"].as_str())
+            .unwrap();
+        let call = if last_user.contains("reuse same agent") {
+            (tools == 3).then(|| rejected_web_call("web-later-turn"))
+        } else {
+            match tools {
+                0 => Some(rejected_web_call("web-session-first")),
+                1 => Some(rejected_web_call("web-session-second")),
+                2 => Some(common::tc(
+                    "local-after-web",
+                    "write_file",
+                    &json!({"path":"must-not-be-written.txt","content":"unapproved"}).to_string(),
+                )),
+                _ => None,
+            }
+        };
+        consent_response(call)
+    });
+    let session = Arc::new(AtomicBool::new(false));
+    let web = consent_web(WebAccess::Ask);
+    let (mut agent, mut receiver) = consent_agent(
+        &path,
+        "web-session-owner",
+        port,
+        false,
+        web.clone(),
+        session.clone(),
+    );
+    let prompts = consent_turn(
+        &mut agent,
+        &mut receiver,
+        "Grant web session consent, then check a local write.",
+        &[GateChoice::Session, GateChoice::Deny],
+    )
+    .await;
+    assert_eq!(prompts.len(), 2, "web Session applies only to web requests");
+    assert!(prompts[0].starts_with("web — leaves this machine:"));
+    assert_eq!(prompts[1], "write must-not-be-written.txt");
+    assert!(
+        !session.load(Ordering::Relaxed),
+        "web Session must not raise local AUTO"
+    );
+    assert!(!path.join("must-not-be-written.txt").exists());
+    for id in ["web-session-first", "web-session-second"] {
+        assert!(consent_tool_result(&agent, id).contains("error: rejected:"));
+    }
+    assert!(consent_tool_result(&agent, "local-after-web").starts_with("status: denied\n"));
+    let earlier_history = serde_json::to_value(agent.history()).unwrap();
+    let later_prompts = consent_turn(
+        &mut agent,
+        &mut receiver,
+        "reuse same agent web consent in a later turn",
+        &[],
+    )
+    .await;
+    assert!(
+        later_prompts.is_empty(),
+        "same native agent keeps web Session"
+    );
+    assert!(consent_tool_result(&agent, "web-later-turn").contains("error: rejected:"));
+    let current_history = serde_json::to_value(agent.history()).unwrap();
+    let earlier = earlier_history.as_array().unwrap();
+    assert_eq!(
+        &current_history.as_array().unwrap()[..earlier.len()],
+        earlier
+    );
+
+    let other_port = common::serve(|_, messages| {
+        let call = (!messages.iter().any(|message| message["role"] == "tool"))
+            .then(|| rejected_web_call("web-other-agent"));
+        consent_response(call)
+    });
+    let (mut other, mut other_receiver) = consent_agent(
+        &path,
+        "web-session-other",
+        other_port,
+        false,
+        web.clone(),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let other_prompts = consent_turn(
+        &mut other,
+        &mut other_receiver,
+        "An independent agent must obtain its own web consent.",
+        &[GateChoice::Deny],
+    )
+    .await;
+    assert_eq!(
+        other_prompts.len(),
+        1,
+        "shared WebService must not share consent"
+    );
+    assert!(other_prompts[0].starts_with("web — leaves this machine:"));
+    assert!(consent_tool_result(&other, "web-other-agent").starts_with("status: denied\n"));
+    assert!(web.sources().is_empty());
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn persistent_solo_web_policy_revocation_preserves_history_and_requires_fresh_consent() {
+    async fn collect_run(
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+        expected_run: u64,
+        choices: &[GateChoice],
+    ) -> (Vec<String>, Vec<(String, sui::events::ToolStatus, String)>) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut prompts = Vec::new();
+            let mut results = Vec::new();
+            loop {
+                match receiver.recv().await.expect("persistent Solo remains live") {
+                    UiEvent::Permission {
+                        run,
+                        summary,
+                        reply,
+                        ..
+                    } => {
+                        assert_eq!(run, expected_run);
+                        let choice = choices
+                            .get(prompts.len())
+                            .copied()
+                            .unwrap_or(GateChoice::Deny);
+                        prompts.push(summary);
+                        reply.send(choice).unwrap();
+                    }
+                    UiEvent::ToolDone {
+                        run,
+                        call,
+                        status,
+                        result,
+                        ..
+                    } => {
+                        assert_eq!(run, expected_run);
+                        results.push((call, status, result));
+                    }
+                    UiEvent::RunDone { run, outcome, .. } => {
+                        assert_eq!(run, expected_run);
+                        assert_eq!(outcome, "done");
+                        return (prompts, results);
+                    }
+                    UiEvent::Error { msg, .. } => panic!("Solo error: {msg}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("bounded Solo consent run")
+    }
+
+    let path = workspace();
+    std::fs::write(
+        path.join("sui.toml"),
+        "[agent]\ncontext_compaction = false\nmax_turns = 4\n",
+    )
+    .unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    let port = common::serve(move |body, messages| {
+        captured
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(body).unwrap());
+        let task = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .and_then(|message| message["content"].as_str())
+            .unwrap();
+        let id = if task.contains("revoked") {
+            "solo-web-off"
+        } else if task.contains("restored") {
+            "solo-web-restored"
+        } else {
+            "solo-web-first"
+        };
+        let answered = messages
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
+        consent_response((!answered).then(|| rejected_web_call(id)))
+    });
+    let profile = sui::config::Profile {
+        transport: Default::default(),
+        name: "solo-consent-mock".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        model: "consent-mock".into(),
+        api_key: None,
+        prompt_cache_key: None,
+        pricing: None,
+        image_input: false,
+    };
+    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let session = Arc::new(AtomicBool::new(false));
+    let initial_web = consent_web(WebAccess::Ask);
+    let solo = sui::tui::spawn_solo(
+        profile,
+        path.clone(),
+        path.join("solo-run"),
+        events,
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(AtomicBool::new(false)),
+        session.clone(),
+        Some(initial_web.clone()),
+    );
+    assert!(solo.send_with_web(1, "initial web consent".into(), Some(initial_web)));
+    let (initial_prompts, initial_results) =
+        collect_run(&mut receiver, 1, &[GateChoice::Session]).await;
+    assert_eq!(initial_prompts.len(), 1);
+    assert!(initial_prompts[0].starts_with("web — leaves this machine:"));
+    assert_eq!(initial_results.len(), 1);
+    assert_eq!(initial_results[0].0, "solo-web-first");
+    assert_eq!(initial_results[0].1, sui::events::ToolStatus::Error);
+    assert!(initial_results[0].2.contains("error: rejected:"));
+    assert!(!session.load(Ordering::Relaxed));
+
+    assert!(solo.send_with_web(
+        2,
+        "web access revoked between turns".into(),
+        Some(consent_web(WebAccess::Off)),
+    ));
+    let (off_prompts, off_results) = collect_run(&mut receiver, 2, &[]).await;
+    assert!(
+        off_prompts.is_empty(),
+        "Off denies without opening a prompt"
+    );
+    assert_eq!(off_results.len(), 1);
+    assert_eq!(off_results[0].0, "solo-web-off");
+    assert_eq!(off_results[0].1, sui::events::ToolStatus::Denied);
+    assert!(off_results[0].2.contains("web research is Off"));
+
+    assert!(solo.send_with_web(
+        3,
+        "web access restored as Ask".into(),
+        Some(consent_web(WebAccess::Ask)),
+    ));
+    let (restored_prompts, restored_results) =
+        collect_run(&mut receiver, 3, &[GateChoice::Deny]).await;
+    assert_eq!(
+        restored_prompts.len(),
+        1,
+        "replacement Ask needs fresh consent"
+    );
+    assert!(restored_prompts[0].starts_with("web — leaves this machine:"));
+    assert_eq!(restored_results.len(), 1);
+    assert_eq!(restored_results[0].0, "solo-web-restored");
+    assert_eq!(restored_results[0].1, sui::events::ToolStatus::Denied);
+    assert!(!session.load(Ordering::Relaxed));
+
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        6,
+        "each turn has a call and its final response"
+    );
+    for pair in requests.windows(2) {
+        assert_eq!(pair[0]["tools"], pair[1]["tools"], "schemas remain frozen");
+        let earlier = pair[0]["messages"].as_array().unwrap();
+        let later = pair[1]["messages"].as_array().unwrap();
+        assert_eq!(
+            &later[..earlier.len()],
+            earlier,
+            "policy updates preserve history"
+        );
+    }
+    for id in ["solo-web-first", "solo-web-off", "solo-web-restored"] {
+        assert!(requests.last().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_call_id"] == id));
+    }
+    drop(solo);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while receiver.recv().await.is_some() {}
+    })
+    .await
+    .expect("Solo worker closes after its sender is dropped");
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[tokio::test]

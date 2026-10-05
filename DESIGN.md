@@ -84,6 +84,12 @@ rolling truncation.
 | `code_context(action, query, path, line, limit, max_bytes)` | lexical ranked source candidates or syntax-aware contextual read; current numbered excerpts, hashes, explicit omissions, per-worktree parse cache |
 | `read_tool_output(id, offset, max_bytes)` | read-only exact pages of an agent-owned ephemeral original command capture; no command rerun |
 
+The local Gate owns session AUTO grants; the TUI only forwards choices.
+Stop rejects queued grants before dispatch. Web Ask ignores local AUTO;
+its session grant belongs to one native Agent. Each Solo task applies the
+current web service before running; replacing it revokes web consent without
+rewriting history or changing tool schemas. UI consent stays independent.
+
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
 

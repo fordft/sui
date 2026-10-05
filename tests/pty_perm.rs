@@ -13,8 +13,11 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn write_file_call(id: &str, path: &str) -> String {
     sse(
@@ -55,16 +58,18 @@ fn mock() -> u16 {
 
 fn fixture() -> (PathBuf, PathBuf) {
     let tag = format!(
-        "sui-pty-{}-{}",
+        "sui-pty-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let repo = std::env::temp_dir().join(format!("{tag}-repo"));
     let home = std::env::temp_dir().join(format!("{tag}-home"));
-    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
     std::fs::create_dir_all(home.join(".config/sui")).unwrap();
     let git = |a: &[&str]| {
         std::process::Command::new("git")
@@ -84,6 +89,7 @@ fn fixture() -> (PathBuf, PathBuf) {
 }
 
 struct Pty {
+    repo: PathBuf,
     buf: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -92,13 +98,17 @@ struct Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            let bytes = self.buf.lock().unwrap();
-            let tail = &bytes[bytes.len().saturating_sub(2500)..];
-            eprintln!("PTY output tail: {:?}", String::from_utf8_lossy(tail));
-        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if std::thread::panicking() {
+            let bytes = self.buf.lock().unwrap_or_else(|error| error.into_inner());
+            let tail = &bytes[bytes.len().saturating_sub(2500)..];
+            eprintln!(
+                "PTY fixture {} output tail: {:?}",
+                self.repo.display(),
+                String::from_utf8_lossy(tail)
+            );
+        }
     }
 }
 
@@ -140,6 +150,7 @@ fn spawn(port: u16, repo: &PathBuf, home: &PathBuf) -> Pty {
         }
     });
     Pty {
+        repo: repo.clone(),
         buf,
         writer,
         child,
@@ -273,11 +284,14 @@ fn pty_ctrl_s_stops_during_permission() {
     if repo.join("out/perm1.txt").exists() {
         // forensic: dump the transcript tail — an approve path would be
         // visible as the decision or the tool result text
-        let b = p.buf.lock().unwrap();
-        let s = String::from_utf8_lossy(&b);
+        let transcript = {
+            let bytes = p.buf.lock().unwrap_or_else(|error| error.into_inner());
+            String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(3000)..]).into_owned()
+        };
         panic!(
-            "perm1.txt written despite stop — transcript tail:\n{}",
-            &s[s.len().saturating_sub(3000)..]
+            "perm1.txt written despite stop in fixture {} — transcript tail:\n{}",
+            repo.display(),
+            transcript
         );
     }
     let _ = p.child.kill();

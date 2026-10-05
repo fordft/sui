@@ -2897,12 +2897,10 @@ impl App {
 
     // ── modal keys ──────────────────────────────────────────────────
     /// Handlers consume the modal and return the next modal state.
-    /// Apply a permission decision (key or click): session approvals
-    /// raise the live auto flag; the next parked ask becomes the modal.
+    /// Forward a permission decision (key or click). Gate owns local
+    /// session grants; surface consent must not raise the local auto flag.
+    /// The next parked ask becomes the modal.
     fn decide_perm(&mut self, c: GateChoice, reply: UnboundedSender<GateChoice>) -> Option<Modal> {
-        if c == GateChoice::Session {
-            self.auto.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
         self.dialog_scroll.set(0);
         let _ = reply.send(c);
         self.pending_perms

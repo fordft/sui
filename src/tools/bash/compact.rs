@@ -239,19 +239,43 @@ fn version(value: &str) -> bool {
     let Some(value) = value.strip_prefix('v') else {
         return false;
     };
-    let boundary = value.find(['-', '+']).unwrap_or(value.len());
-    let mut pieces = value[..boundary].split('.');
-    if !(0..3).all(|_| pieces.next().is_some_and(|p| number(p).is_some()))
-        || pieces.next().is_some()
-    {
-        return false;
-    }
-    let suffix = &value[boundary..];
-    suffix.is_empty()
-        || (suffix.len() > 1
-            && suffix
+    let core_and_prerelease = if let Some((before, build)) = value.split_once('+') {
+        if !version_identifiers(build, false) {
+            return false;
+        }
+        before
+    } else {
+        value
+    };
+    let core = if let Some((core, prerelease)) = core_and_prerelease.split_once('-') {
+        if !version_identifiers(prerelease, true) {
+            return false;
+        }
+        core
+    } else {
+        core_and_prerelease
+    };
+    let mut pieces = core.split('.');
+    (0..3).all(|_| {
+        pieces.next().is_some_and(|piece| {
+            number(piece).is_some() && (piece.len() == 1 || !piece.starts_with('0'))
+        })
+    }) && pieces.next().is_none()
+}
+
+/// SemVer identifiers are nonempty ASCII alphanumerics/hyphens. Numeric
+/// prerelease identifiers cannot have leading zeros; build metadata can.
+fn version_identifiers(value: &str, prerelease: bool) -> bool {
+    value.split('.').all(|identifier| {
+        !identifier.is_empty()
+            && identifier
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'+' | b'.')))
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && !(prerelease
+                && identifier.len() > 1
+                && identifier.starts_with('0')
+                && identifier.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 fn progress(line: &str) -> bool {
@@ -328,7 +352,46 @@ fn collapse(lines: &[&str], selected: &[bool], label: &str) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::reduce;
+    use super::{reduce, version};
+
+    #[test]
+    fn cargo_version_recognition_requires_valid_core_and_identifiers() {
+        for valid in [
+            "v0.0.0",
+            "v1.2.3",
+            "v1.2.3-alpha.1",
+            "v1.2.3-0.3.7",
+            "v1.2.3-x-y-z.--",
+            "v1.2.3--",
+            "v1.2.3+001",
+            "v1.2.3-alpha.1+build.007",
+            "v1.2.3-999999999999999999999999999999",
+        ] {
+            assert!(version(valid), "valid Cargo version: {valid}");
+        }
+        for invalid in [
+            "v1.2.3++++",
+            "v1.2.3+...",
+            "v1.2.3-alpha..1",
+            "v01.2.3",
+            "v1.02.3",
+            "v1.2.03",
+            "v1.2.3-01",
+            "v1.2.3-alpha.01",
+            "v1.2.3+build+other",
+            "v1.2.3-",
+            "v1.2.3+",
+            "v1.2.3-alpha.",
+            "v1.2.3+build.",
+            "v1.2.3-α",
+            "v1.2.3+meta_tag",
+            "v1.2",
+            "v1.2.3.4",
+            "1.2.3",
+        ] {
+            assert!(!version(invalid), "unknown Cargo version: {invalid}");
+        }
+    }
 
     fn progress_records() -> String {
         (0..20)

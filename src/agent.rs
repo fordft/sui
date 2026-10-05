@@ -121,6 +121,8 @@ pub struct Agent {
     events: Option<Sink>,
     cancel: Option<Arc<tokio::sync::Notify>>,
     stop: Arc<AtomicBool>,
+    /// Web session consent belongs to this agent, separate from local AUTO.
+    web_approved: bool,
 }
 
 impl Agent {
@@ -160,6 +162,21 @@ impl Agent {
             events: None,
             cancel: None,
             stop: Arc::new(AtomicBool::new(false)),
+            web_approved: false,
+        }
+    }
+
+    /// Apply current web settings between turns without rewriting history.
+    /// Replacing the service revokes any consent for the previous settings.
+    pub fn set_web_service(&mut self, web: Option<Arc<crate::web::WebService>>) {
+        let unchanged = match (&self.tools.web, &web) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            self.web_approved = false;
+            self.tools.web = web;
         }
     }
 
@@ -656,9 +673,23 @@ impl Agent {
                         .check(&summary, &self.ident.agent_id, self.run_id)
                         .await
                 {
+                    if self.stop.load(Ordering::Relaxed) {
+                        Disp::new(
+                            "status: cancelled\nerror: interrupted by user".to_string(),
+                            crate::events::ToolStatus::Cancelled,
+                        )
+                    } else {
+                        Disp::new(
+                            "status: denied\nerror: user rejected the action".to_string(),
+                            crate::events::ToolStatus::Denied,
+                        )
+                    }
+                } else if self.stop.load(Ordering::Relaxed) {
+                    // A grant can be followed by Stop before dispatch. Do not
+                    // start synchronous file tools (or any other tool) then.
                     Disp::new(
-                        "status: denied\nerror: user rejected the action".to_string(),
-                        crate::events::ToolStatus::Denied,
+                        "status: cancelled\nerror: interrupted by user".to_string(),
+                        crate::events::ToolStatus::Cancelled,
                     )
                 } else {
                     if !self.quiet {
@@ -1110,9 +1141,8 @@ impl Agent {
 
     /// Web-research policy gate — Off/Ask/Auto, independent of tool
     /// auto-approve. Some(Disp) = terminal result; None = proceed to exec.
-    /// Ask routes through the same permission modal as local tools; a
-    /// session grant satisfies it like any other approval. YOLO never
-    /// turns an Off policy on.
+    /// Ask uses an independent gate; its session grant belongs to this
+    /// agent and never authorizes local tools. YOLO cannot bypass Ask.
     async fn web_gate(&mut self, name: &str, summary: &str) -> Option<Disp> {
         if !is_web(name) {
             return None;
@@ -1129,21 +1159,30 @@ impl Agent {
                 "status: denied\nerror: web research is Off (Settings → Web research)".into(),
                 crate::events::ToolStatus::Denied,
             )),
+            crate::web::WebAccess::Ask if self.web_approved => None,
             crate::web::WebAccess::Ask => {
                 let c = self
                     .gate
-                    .decide(
+                    .decide_surface(
                         &format!("web — leaves this machine: {summary}"),
                         &self.ident.agent_id,
                         self.run_id,
                     )
                     .await;
-                if c == crate::events::GateChoice::Deny {
+                if self.stop.load(Ordering::Relaxed) {
+                    Some(Disp::new(
+                        "status: cancelled\nerror: interrupted by user".into(),
+                        crate::events::ToolStatus::Cancelled,
+                    ))
+                } else if c == crate::events::GateChoice::Deny {
                     Some(Disp::new(
                         "status: denied\nerror: user rejected the web request".to_string(),
                         crate::events::ToolStatus::Denied,
                     ))
                 } else {
+                    if c == crate::events::GateChoice::Session {
+                        self.web_approved = true;
+                    }
                     None
                 }
             }

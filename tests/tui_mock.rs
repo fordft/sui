@@ -627,6 +627,90 @@ fn tui_paste_targets_modal_field() {
 
 // ── permission modal key semantics ────────────────────────────────────
 
+async fn surface_session_does_not_approve_local_writes(summary: &'static str) {
+    let mut app = app_with_mock(Path::new("."), 1);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut gate = sui::permission::Gate::new(false);
+    gate.set_ui(tx, app.stop_flag.clone(), Some(app.auto.clone()));
+    let task = tokio::spawn(async move {
+        assert_eq!(
+            gate.decide_surface(summary, "solo", 1).await,
+            GateChoice::Session
+        );
+        gate.check("write_file: out/x.txt", "solo", 1).await
+    });
+    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("surface gate did not prompt")
+        .expect("surface gate closed before prompting");
+    assert!(matches!(&event, UiEvent::Permission { summary: s, .. } if s == summary));
+    app.apply_event(event);
+    app.key(key('a'));
+
+    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("surface session consent stranded the local write")
+        .expect("surface session consent incorrectly auto-approved the local write");
+    assert!(
+        matches!(&event, UiEvent::Permission { summary, .. } if summary == "write_file: out/x.txt")
+    );
+    app.apply_event(event);
+    assert!(
+        !app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "surface consent must not raise local Auto"
+    );
+    app.key(key('n'));
+    assert!(!task.await.unwrap(), "unapproved local write was allowed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tui_browser_session_consent_does_not_approve_local_writes() {
+    surface_session_does_not_approve_local_writes("browser: open").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tui_terminal_session_consent_does_not_approve_local_writes() {
+    surface_session_does_not_approve_local_writes("terminal: start").await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tui_local_session_badge_is_owned_by_gate() {
+    let mut app = app_with_mock(Path::new("."), 1);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut gate = sui::permission::Gate::new(false);
+    gate.set_ui(tx, app.stop_flag.clone(), Some(app.auto.clone()));
+    let task = tokio::spawn(async move {
+        assert_eq!(
+            gate.decide("write_file: out/x.txt", "solo", 1).await,
+            GateChoice::Session
+        );
+        gate.check("write_file: out/y.txt", "solo", 1).await
+    });
+    let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("local gate did not prompt")
+        .expect("local gate closed before prompting");
+    app.apply_event(event);
+    app.key(key('a'));
+    // One runtime thread keeps Gate parked until task.await below.
+    assert!(
+        !app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "the UI must not grant session approval before Gate consumes the reply"
+    );
+    assert!(
+        task.await.unwrap(),
+        "local session did not allow the next write"
+    );
+    assert!(
+        app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "accepted local session must raise the Auto badge"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "local session unnecessarily re-prompted"
+    );
+}
+
 fn perm_app(
     repo: &Path,
 ) -> (
@@ -661,8 +745,8 @@ fn perm_uppercase_variants_decide() {
         sui::events::GateChoice::Session
     ));
     assert!(
-        app.auto.load(std::sync::atomic::Ordering::Relaxed),
-        "[a] must raise the Auto badge"
+        !app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "the UI forwards [a]; Gate owns the local Auto grant"
     );
 
     let (mut app, mut rx) = perm_app(&repo);
@@ -878,7 +962,6 @@ async fn tui_session_policy_live_revocation() {
 
     // [a] → session flag up → tool 1 runs; tool 2's call waits on the latch
     app.key(key('a'));
-    assert!(app.auto.load(Relaxed));
     let t1 = repo.join("out/tui1.txt");
     let t0 = std::time::Instant::now();
     while !t1.exists() && t0.elapsed() < Duration::from_secs(15) {
@@ -888,6 +971,7 @@ async fn tui_session_policy_live_revocation() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(t1.exists());
+    assert!(app.auto.load(Relaxed), "accepted local session raises Auto");
 
     // Ask→Auto was live: release the latch — tool 2 must run unprompted
     g2.store(true, Relaxed);
@@ -2380,7 +2464,7 @@ fn mouse_perm_buttons_decide() {
     );
     assert!(app.modal.is_none(), "modal consumed by the decision");
 
-    // session button raises the live auto flag like 'a' does
+    // Session buttons forward the same choice as 'a'; Gate owns Auto.
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
         run: 1,
@@ -2396,8 +2480,8 @@ fn mouse_perm_buttons_decide() {
     click(&mut app, cx, cy);
     assert_eq!(rx2.try_recv().unwrap(), sui::events::GateChoice::Session);
     assert!(
-        app.auto.load(std::sync::atomic::Ordering::Relaxed),
-        "session approve sets auto like 'a'"
+        !app.auto.load(std::sync::atomic::Ordering::Relaxed),
+        "session click must not grant local Auto independently of Gate"
     );
 }
 

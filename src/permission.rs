@@ -58,6 +58,13 @@ impl Gate {
                 .unwrap_or(false)
     }
 
+    fn stopped(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    }
+
     /// Returns true if the action may proceed. `run` ties the prompt to
     /// the activity group that spawned it.
     pub async fn check(&mut self, summary: &str, agent: &str, run: u64) -> bool {
@@ -82,6 +89,9 @@ impl Gate {
         run: u64,
         surface: bool,
     ) -> GateChoice {
+        if self.stopped() {
+            return GateChoice::Deny;
+        }
         if !surface && self.open() {
             // Under a UI (sink set) raw writes would corrupt the alt screen.
             if self.sink.is_none() {
@@ -107,6 +117,12 @@ impl Gate {
                 tokio::select! {
                     choice = reply_rx.recv() => match choice {
                         Some(c @ (GateChoice::Once | GateChoice::Session | GateChoice::Deny)) => {
+                            // An approval can already be queued when Stop
+                            // closes the modal. Check before consuming it or
+                            // raising the session flag.
+                            if self.stopped() {
+                                return GateChoice::Deny;
+                            }
                             if !surface && matches!(c, GateChoice::Session) {
                                 // Raise the shared session flag — revocable by
                                 // the UI toggle. Local session_allow stays for
@@ -122,12 +138,7 @@ impl Gate {
                         None => return GateChoice::Deny, // UI gone
                     },
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if self
-                            .cancel
-                            .as_ref()
-                            .map(|c| c.load(Ordering::Relaxed))
-                            .unwrap_or(false)
-                        {
+                        if self.stopped() {
                             return GateChoice::Deny;
                         }
                     }
@@ -157,6 +168,81 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn queued_approval_after_stop(
+        approval: GateChoice,
+        surface: bool,
+        shared_session: bool,
+    ) -> (GateChoice, bool, bool) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let session = Arc::new(AtomicBool::new(false));
+        let mut gate = Gate::new(false);
+        gate.set_ui(tx, cancel.clone(), shared_session.then(|| session.clone()));
+        let task = tokio::spawn(async move {
+            let choice = if surface {
+                gate.decide_surface("browser", "worker", 1).await
+            } else {
+                gate.decide("write_file", "worker", 1).await
+            };
+            (choice, gate.session_allow)
+        });
+        let UiEvent::Permission { reply, .. } = rx.recv().await.unwrap() else {
+            panic!("missing permission prompt");
+        };
+        // These tests use one runtime thread: without an await between these
+        // operations, Stop is set before the parked gate consumes approval.
+        reply.send(approval).unwrap();
+        cancel.store(true, Ordering::Relaxed);
+        let (choice, local_session) = task.await.unwrap();
+        (choice, session.load(Ordering::Relaxed), local_session)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_denies_queued_once_approval() {
+        let (choice, shared_session, local_session) =
+            queued_approval_after_stop(GateChoice::Once, false, true).await;
+        assert!(!shared_session);
+        assert!(!local_session);
+        assert_eq!(choice, GateChoice::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_denies_queued_session_without_granting_auto() {
+        for shared in [true, false] {
+            let (choice, shared_session, local_session) =
+                queued_approval_after_stop(GateChoice::Session, false, shared).await;
+            assert!(!shared_session, "Stop must not raise shared auto approval");
+            assert!(!local_session, "Stop must not grant local session approval");
+            assert_eq!(choice, GateChoice::Deny);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stop_denies_queued_surface_approval() {
+        for approval in [GateChoice::Once, GateChoice::Session] {
+            let (choice, shared_session, local_session) =
+                queued_approval_after_stop(approval, true, true).await;
+            assert!(!shared_session);
+            assert!(!local_session);
+            assert_eq!(choice, GateChoice::Deny);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_denies_preexisting_auto_approval() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut gate = Gate::new(true);
+        gate.set_ui(tx, Arc::new(AtomicBool::new(true)), None);
+        assert_eq!(
+            gate.decide("write_file", "worker", 1).await,
+            GateChoice::Deny
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "stopped gate must not open a prompt"
+        );
+    }
 
     #[tokio::test]
     async fn yolo_does_not_skip_surface_consent() {
