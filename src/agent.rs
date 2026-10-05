@@ -49,6 +49,8 @@ const KNOWN_TOOLS: &[&str] = &[
     "terminal",
     "view_image",
     "inventory",
+    "code_intel",
+    "code_context",
 ];
 
 /// Result of an intercepted tool call (e.g. orchestrator plan submission).
@@ -180,6 +182,14 @@ impl Agent {
     fn emit(&self, e: UiEvent) {
         if let Some(tx) = &self.events {
             let _ = tx.send(e);
+        }
+    }
+
+    async fn invalidate_code_intel(&mut self) {
+        // Solo keeps this agent alive between turns. Interrupting a later
+        // provider/tool operation must also close its idle language backend.
+        if let Some(service) = self.tools.code_intel.get() {
+            service.invalidate().await;
         }
     }
 
@@ -447,6 +457,7 @@ impl Agent {
                         Some("cancelled"), if compacting { "compaction" } else { "agent" });
                     self.emit_usage(&trace, None);
                     self.journal.log("request", trace);
+                    self.invalidate_code_intel().await;
                     return Ok(());
                 }
             };
@@ -821,6 +832,7 @@ impl Agent {
                         "status: skipped\nerror: turn interrupted",
                     );
                     self.append_images(&mut images);
+                    self.invalidate_code_intel().await;
                     return Ok(());
                 }
                 if finish_after {
@@ -849,6 +861,7 @@ impl Agent {
                         "status: skipped\nerror: run stopped",
                     );
                     self.append_images(&mut images);
+                    self.invalidate_code_intel().await;
                     return Ok(());
                 }
             }
@@ -1154,7 +1167,10 @@ async fn cancel_wait(notify: Option<Arc<tokio::sync::Notify>>) {
 }
 
 fn needs_approval(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "bash" | "terminal")
+    matches!(
+        name,
+        "write_file" | "edit_file" | "bash" | "terminal" | "code_intel"
+    )
 }
 
 fn is_web(name: &str) -> bool {
@@ -1182,6 +1198,17 @@ fn summarize(name: &str, args: &str, v: &Value) -> String {
         "skill" => format!("lens: {}", v["name"].as_str().unwrap_or("")),
         "inventory" => format!(
             "inventory {} {} {}",
+            v["action"].as_str().unwrap_or(""),
+            v["path"].as_str().unwrap_or("."),
+            v["query"].as_str().unwrap_or("")
+        ),
+        "code_intel" => format!(
+            "code intelligence {} {}",
+            v["action"].as_str().unwrap_or(""),
+            v["path"].as_str().unwrap_or("")
+        ),
+        "code_context" => format!(
+            "code context {} {} {}",
             v["action"].as_str().unwrap_or(""),
             v["path"].as_str().unwrap_or("."),
             v["query"].as_str().unwrap_or("")

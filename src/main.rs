@@ -239,6 +239,8 @@ async fn main() -> Result<()> {
         web: Some(web::WebService::new(web::load_cfg(None))),
         canon_root: std::sync::OnceLock::new(),
         ui: std::sync::OnceLock::new(),
+        code_intel: Default::default(),
+        code_context: Default::default(),
     };
     let mut agent = agent::Agent::new(
         provider,

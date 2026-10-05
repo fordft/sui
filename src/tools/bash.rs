@@ -392,6 +392,8 @@ mod tests {
             web: None,
             canon_root: std::sync::OnceLock::new(),
             ui: std::sync::OnceLock::new(),
+            code_intel: Default::default(),
+            code_context: Default::default(),
         }
     }
 

@@ -32,6 +32,8 @@ fn context(path: PathBuf, approved: bool) -> ToolContext {
         web: None,
         canon_root: std::sync::OnceLock::new(),
         ui: std::sync::OnceLock::new(),
+        code_intel: Default::default(),
+        code_context: Default::default(),
     };
     ctx.ui
         .set(UiService::new(BrowserCfg {

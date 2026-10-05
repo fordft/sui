@@ -1,4 +1,6 @@
 pub mod bash;
+pub mod code_context;
+pub mod code_intel;
 pub mod fs;
 pub mod inventory;
 pub mod ui;
@@ -18,6 +20,11 @@ pub struct ToolContext {
     /// the root once per context instead of once per tool call.
     pub canon_root: std::sync::OnceLock<PathBuf>,
     pub ui: std::sync::OnceLock<ui::UiService>,
+    /// Lazy language server, owned by this agent/worktree only.
+    pub code_intel: std::sync::OnceLock<code_intel::CodeIntelService>,
+    /// Bounded syntax facts, owned by this agent/worktree; fresh source is
+    /// checked on every context query.
+    pub code_context: std::sync::OnceLock<std::sync::Arc<code_context::CodeContextService>>,
 }
 
 /// Frozen tool schemas. Changing names/descriptions/order invalidates
@@ -134,6 +141,8 @@ pub fn schemas() -> Vec<Value> {
     schemas.extend(ui::schemas());
     // Append new tools so existing schema bytes/order remain unchanged.
     schemas.push(inventory::schema());
+    schemas.push(code_intel::schema());
+    schemas.push(code_context::schema());
     schemas
 }
 
@@ -188,6 +197,16 @@ pub async fn execute(
     cancel: impl std::future::Future<Output = ()>,
     obs: Option<bash::Observer>,
 ) -> Result<ExecOut> {
+    // Disk mutations invalidate the language process before execution. Failed
+    // commands may also have changed files; never reuse their old observations.
+    if matches!(name, "write_file" | "edit_file" | "bash")
+        || (name == "terminal"
+            && matches!(args["action"].as_str(), Some("start" | "type" | "press")))
+    {
+        if let Some(service) = ctx.code_intel.get() {
+            service.invalidate().await;
+        }
+    }
     match name {
         "read_file" | "write_file" | "edit_file" => {
             let _ = (cancel, obs);
@@ -205,6 +224,8 @@ pub async fn execute(
         }
         "bash" => bash::run(ctx, args, cancel, obs).await,
         "inventory" => inventory::execute(ctx, args, cancel).await,
+        "code_intel" => code_intel::execute(ctx, args, cancel).await,
+        "code_context" => code_context::execute(ctx, args, cancel).await,
         "browser" | "terminal" => ui::service(ctx)?.execute(ctx, name, args, cancel).await,
         "view_image" => ui::view_image(ctx, args).await,
         "skill" => {
@@ -252,6 +273,8 @@ mod tests {
             web: None,
             canon_root: std::sync::OnceLock::new(),
             ui: std::sync::OnceLock::new(),
+            code_intel: Default::default(),
+            code_context: Default::default(),
         };
         let ok = super::execute(
             &ctx,

@@ -181,6 +181,8 @@ fn mk_agent(
             web: cfg.web.clone(),
             canon_root: std::sync::OnceLock::new(),
             ui: std::sync::OnceLock::new(),
+            code_intel: Default::default(),
+            code_context: Default::default(),
         },
         Gate::new(true), // worktrees are disposable; bounds still apply
         journal,

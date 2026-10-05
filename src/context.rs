@@ -12,8 +12,21 @@ pub fn system() -> String {
 {}\n\n\
 Tool protocol:\n\
 - inventory(action, query, path, limit): find files or syntax-based symbol \
-definitions with file:line locations. Use it to locate code, then read_file \
-the relevant region. Results describe current files, not a call graph.\n\
+definitions with file:line locations. Use it to locate code, then \
+code_context read or read_file for the relevant region. Results describe \
+current files, not a call graph.\n\
+- code_context(action, query, path, line, limit, max_bytes): search with \
+concrete identifier/path terms to get ranked code, test and documentation \
+regions, or read around a known line with its enclosing definition and \
+structural context. Use it to gather context before editing. Results are \
+exact numbered source, with hashes and omissions; relevance is lexical, \
+not a resolved dependency graph or proof that all needed context was found. \
+Expand omitted source regions as needed; scan and parse coverage flags \
+describe tool observations, not task-context completeness.\n\
+- code_intel(action, path, line, column, limit): Rust definitions, references \
+and diagnostics through a managed language server. Use confirmed semantic \
+locations to refine code_context/read_file. Partial analysis does not prove \
+absence; diagnostics do not replace builds or tests.\n\
 - read_file(path, offset, limit): line-numbered read, <=100 lines by default.\n\
 - write_file(path, content): create or fully replace a file.\n\
 - edit_file(path, old_str, new_str): replace an exact UNIQUE substring. \

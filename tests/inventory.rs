@@ -40,6 +40,8 @@ fn context(path: &Path) -> ToolContext {
         web: None,
         canon_root: Default::default(),
         ui: Default::default(),
+        code_intel: Default::default(),
+        code_context: Default::default(),
     }
 }
 async fn inventory(ctx: &ToolContext, args: Value) -> ExecOut {

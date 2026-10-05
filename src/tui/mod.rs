@@ -168,6 +168,8 @@ pub fn start_solo(
             web,
             canon_root: std::sync::OnceLock::new(),
             ui: std::sync::OnceLock::new(),
+            code_intel: Default::default(),
+            code_context: Default::default(),
         },
         Gate::new(false), // approvals via modal; session flag is live
         Journal::open_named(&jdir, "solo")?,

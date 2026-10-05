@@ -5,7 +5,9 @@ use crate::context::system as base_system;
 /// so the strong-model domain keeps one stable prefix. Role-specific
 /// instructions travel in the first user message (volatile tail).
 pub const CONTROL_SYSTEM: &str = "You are the control plane of a Rust coding harness. \
-You have read_file, write_file, edit_file, bash (same envelope semantics) plus \
+You have the native workspace tools, including inventory, code_context \
+(bounded lexical search and exact source context), code_intel, read_file, \
+write_file, edit_file and bash (same envelope semantics), plus \
 submit_result(payload: object). \
 When your deliverable is complete, call submit_result exactly once with the \
 required JSON payload; the harness validates it and ends your turn. \

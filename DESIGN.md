@@ -53,7 +53,7 @@ DOMAIN control (frontier model)     DOMAIN worker (cheap model)
 ## Per-agent prompt layout
 
 ```
-[static contract + 11 tool schemas]  lowest mutation
+[static contract + 12 tool schemas]  lowest mutation
 [frozen repo epoch / map]
 [mission contract | task spec]
 ── cache breakpoint ──
@@ -80,21 +80,150 @@ rolling truncation.
 | `terminal(action, ...)` | real workspace PTY + xterm screen; bounded input/output and lifecycle |
 | `view_image(path)` | workspace-confined, bounded image observation for image-capable profiles |
 | `inventory(action, query, path, limit)` | read-only current files or Tree-sitter definition locations; bounded, ignore-aware, per-worktree |
+| `code_intel(action, path, line, column, limit)` | native Rust definitions/references/diagnostics over managed stdio LSP; local execution gate, workspace-filtered output |
+| `code_context(action, query, path, line, limit, max_bytes)` | lexical ranked source candidates or syntax-aware contextual read; current numbered excerpts, hashes, explicit omissions, per-worktree parse cache |
 
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
 
 Inventory walks current files on demand and parses definitions with embedded
 Rust, JS/JSX, TS/TSX, Python and Go grammars. It requires no shell/server,
-external index, model inference or repository writes. Worktree roots confine
-each worker's observations; ignore rules, dependency/output exclusions and
-no-follow traversal limit discovery. Cooperative cancellation, time/input/
-entry/node/output budgets keep scans bounded. Coverage counters distinguish
-unsupported/skipped/broken files from a complete scan. Results enter only
-append-only tool history; the epoch prefix is never rebuilt after edits.
+external index, local parse cache, model inference or repository writes.
+Definition extraction covers common syntax, including trait signatures,
+aliases and direct function/class bindings; full names are bounded by the
+row output budget. Worktree roots confine each worker's observations.
+Ignore loading uses bounded regular non-symlink files, with `.ignore` over
+`.gitignore` over in-workspace `.git/info/exclude`; unsafe rules prune the
+affected subtree and report partial coverage. Global rules and Git metadata
+outside the workspace are not loaded, including worktree `.git` pointers.
+Root `target`/`build`/`dist`/`coverage` exclusions can be bypassed by an
+explicit scope, subject to workspace ignore rules and safety checks;
+identically named source subdirectories remain visible.
+Credential, dependency and metadata exclusions remain mandatory.
+
+Enumeration is charged before filtering/sorting; all source/ignore bytes
+read, including rejected input, count toward the input budget and are
+reported as `bytes_read`. Oversized source files are rejected by metadata.
+The three-second time budget and cancellation are cooperative; cancel
+awaits worker completion, with no hard timeout for stalled remote filesystems.
+Entry/node/output budgets bound processing and output. Coverage counters
+report unsupported/skipped/broken files and incomplete scans separately.
+Results enter only append-only tool history; the epoch prefix is never
+rebuilt after edits.
 This is syntactic navigation, not semantic references or a resolved call graph.
 The tool schema is appended after the original ten and frozen for a session;
-adding it intentionally invalidates older resume signatures.
+adding it intentionally invalidates older resume signatures. Inventory fixes
+preserve the tool/system signature and its existing resume behavior.
+
+Code context reuses inventory's traversal and guarded source readers,
+including fresh ignore policy and mandatory exclusions. It runs no model,
+process or network service. A credential-content heuristic withholds whole
+files before hashing, parsing, caching or output; accepted excerpts remain
+exact. Known token formats and line-local credential assignments are
+recognized; incomplete credential literals are withheld. False positives
+and missed unusual secrets remain possible.
+Search ranks literal term matches in paths,
+syntax names and source; these are candidate relevance signals, not resolved
+semantic edges or proof of task-context completeness. Read starts from a
+file and line, selecting its enclosing definition and bounded structural
+context. Unsupported text falls back to line windows. Exact source excerpts
+carry 1-based positions and observed-content hashes, with omissions and
+coverage flags. The whole output is capped by the caller's byte budget.
+
+Syntax facts can be reused in a bounded in-memory cache owned by one
+ToolContext, keyed by canonical workspace, path, language and fresh source
+content identity. Enumeration and source/ignore reads remain current on
+every call. Cache hits return exact excerpts again: prior observations may
+have left the active history during compaction. Local parse counters are
+not provider prompt-cache hits. Source hashes identify individual reads,
+not an atomic workspace snapshot. The tool schema is appended after
+code_intel and frozen per session; results append to history and never
+rewrite the repository epoch or stable prefix. Its addition intentionally
+changes the Resume signature.
+
+Rust code intelligence uses a Sui-owned stdio client and an installed
+`rust-analyzer`/`rust-src` toolchain, without an editor, display, external
+agent harness, runtime download or new configuration surface. Each native
+agent's canonical workspace/worktree owns a lazy process; no global semantic
+cache crosses worktrees. Arguments and output locations use 1-based lines
+and Unicode scalar columns, converted to/from LSP UTF-16 internally.
+Definition/reference targets are workspace-filtered, and omitted or invalid
+locations make the result incomplete. Native analyzer diagnostics are
+observations, never compiler/test acceptance proof.
+
+Results expose `project_mode: cargo` for a regular root `Cargo.toml`, or
+`project_mode: detached` otherwise. Detached initialization builds one
+standalone file's crate graph. Changing that source stops the current
+backend and initializes a new graph under the same cancellation and
+initialization deadline. Detached results always report incomplete analysis
+because coverage across files is unknown. Nested manifests are not selected
+automatically; the queried project must be part of the root Cargo workspace
+or Sui must run from its Cargo root for project semantics.
+
+Launching the language server passes through the normal local execution
+gate. Its fixed initialization and configuration replies disable build
+scripts, proc macros and check-on-save; Cargo metadata is locked and offline.
+Sui sends no save/execute/format commands, uses private server configuration,
+and checks configuration before every launch/use. A descriptor-anchored,
+presence-only scan reads no configuration contents and ignores `.gitignore`
+and `.ignore`. It counts at most 10,000 entries before filtering, descends
+at most 128 levels, and uses a cooperative three-second budget. Inventory's
+mandatory metadata, dependency and credential exclusions plus root
+`target`/`build`/`dist`/`coverage` directories are skipped; similarly named
+nested source directories are inspected. Any visible `rust-analyzer.toml`,
+including a symlink or nonregular file, produces `UnsafeConfiguration`.
+Other visible symlinks, filesystem errors, exceeded limits or unsupported
+safe inspection produce `ConfigCoverageUnknown`; the cached backend closes.
+This guard covers the inspected tree between calls, not continuous external
+filesystem changes. Rust/Cargo tooling runs with user privileges: guarded
+output and disabled build features are not an OS sandbox or a guarantee
+that project compiler configuration cannot execute.
+
+Initialization/readiness is limited to 60 seconds, individual queries to
+30 seconds, and explicit kill/reap cleanup to three seconds. A valid
+`ContentModified` response (`-32801`), or `ServerCancelled` (`-32802`) with
+`data.retriggerRequest: true`, retries the same LSP query at most three
+additional times with 25-millisecond delays. All attempts share the original
+query deadline and cancellation; they add no model/provider request or
+document update. Cancellation, timeout or protocol failure discards the
+process; a later call initializes afresh. Agent interruption also invalidates
+an idle backend during provider waits, cancelled tools and stops between
+tools, while successful turns retain the session. Owned-client drop also
+kills the process group. Mutating file/shell/terminal tools invalidate the
+backend before execution, including mutations
+from commands that subsequently fail. Tool source/location reads are capped
+at 512 KiB per file and 32 MiB per call; rows at 24 KiB and at most 200.
+These limits do not bound rust-analyzer's internal workspace indexing.
+Cancellation is registered before initial filesystem reads. Initial source
+and result-processing workers share cooperative stop/deadline checks and
+are joined on explicit cancellation; pre-LSP cancellation closes an idle
+cached backend without interrupting another owner of the service.
+Result processing has a cooperative three-second deadline and examines at
+most 4,096 records; all remaining records count as omitted. Cancellation
+signals the blocking worker, joins it and invalidates the backend; dropping
+the caller also signals its worker. Filesystem calls must return before
+cooperative cleanup finishes. Source line offsets and Unicode boundaries
+are indexed once per call rather than rescanned for each result. Processed
+records require valid diagnostic messages/full reports or Location/Link
+shapes and ranges; malformed semantic payloads error and reset the backend.
+
+`file_in_project` reports `true`, `false` or `unknown` from a per-file
+semantic graph observation. The installed RA `experimental/openCargoToml`
+query confirms membership only through a valid regular Cargo manifest inside
+the workspace, with ancestors opened without following links. Detached or
+unlinked files report false; unsupported membership queries remain unknown.
+Membership and the semantic query share the same 30-second deadline and
+cancellation. Complete analysis requires Cargo mode, confirmed file
+membership, healthy/quiescent server state and no omitted results.
+Unlinked files and unknown membership remain partial even when the server
+is healthy. Unknown health and empty results cannot establish verified
+absence; diagnostics do not replace compiler/test proof.
+
+`code_intel` is appended after inventory and frozen in the native schema
+list even when its backend is unavailable. Observations enter appended tool
+history, never the stable repository prefix. Its addition changes tool/system
+signatures; existing inspection/export remain available, while Resume rejects
+older signatures through the existing compatibility check.
 
 UI sessions initialize lazily per native agent. Trusted global `[browser]`
 config owns UI consent, package bootstrap, and remote-browser policy;
@@ -310,7 +439,7 @@ reuse (tool schemas are cache-relevant; the report measures, not infers).
 Fresh repair sessions trade prior-history reuse for bounded context — kept
 deliberately; repair cost/success is measured before any second strategy.
 
-Deferred: auto mode-selection, pools >2, indexing. Native proactive compaction
+Deferred: auto mode-selection, pools >2, persistent repository-wide indexing. Native proactive compaction
 uses an append-only summary request and an explicit checkpoint epoch transition.
 
 ## TUI

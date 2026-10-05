@@ -1,7 +1,6 @@
 //! Read-only code locations. Every call walks current workspace files; no
 //! persistent index, repo writes, shell, model call or prompt-prefix mutation.
 use anyhow::{bail, Context, Result};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -11,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tree_sitter::{Language, Node, ParseOptions, Parser};
+use tree_sitter::{Language, ParseOptions, Parser};
+
+mod symbols;
+mod walk;
 
 use super::{ExecKind, ExecOut, ToolContext};
 
@@ -68,8 +70,8 @@ fn default_limit() -> usize {
     50
 }
 
-/// A dropped tool future stops its blocking worker too. Parser progress and
-/// traversal check this flag; nothing survives as a background index service.
+/// Dropping the tool signals cooperative cancellation. An explicit cancel
+/// also joins the worker; regular-file reads and traversal check this flag.
 struct Stop(Arc<AtomicBool>);
 impl Drop for Stop {
     fn drop(&mut self) {
@@ -111,11 +113,15 @@ pub async fn execute(
     }
     let stop = Stop(Arc::new(AtomicBool::new(false)));
     let flag = stop.0.clone();
-    let task = tokio::task::spawn_blocking(move || scan(root, rel, args, &flag));
+    let mut task = tokio::task::spawn_blocking(move || scan(root, rel, args, &flag));
     tokio::select! {
         biased;
-        _ = cancel => Ok(ExecOut::plain("status: cancelled\nerror: inventory cancelled".into(), ExecKind::Cancelled)),
-        result = task => result.context("inventory worker failed")?,
+        _ = cancel => {
+            stop.0.store(true, Ordering::Relaxed);
+            let _ = task.await; // Cooperatively stop AND reap the blocking work.
+            Ok(cancelled())
+        },
+        result = &mut task => result.context("inventory worker failed")?,
     }
 }
 
@@ -123,20 +129,43 @@ fn error(message: &str) -> ExecOut {
     ExecOut::plain(format!("status: error\nerror: {message}"), ExecKind::Error)
 }
 
-#[derive(Default)]
-struct Scan {
-    entries: usize,
-    files: usize,
-    parsed: usize,
-    bytes: usize,
-    nodes: usize,
-    skipped: usize,
-    unsupported: usize,
-    syntax_errors: usize,
+pub(crate) struct Scan {
+    entry_limit: usize,
+    byte_limit: usize,
+    pub(crate) ignore_errors: usize,
+    pub(crate) entries: usize,
+    pub(crate) files: usize,
+    pub(crate) parsed: usize,
+    pub(crate) bytes: usize,
+    pub(crate) nodes: usize,
+    pub(crate) skipped: usize,
+    pub(crate) unsupported: usize,
+    pub(crate) syntax_errors: usize,
     matches: usize,
     rows: Vec<String>,
     row_bytes: usize,
-    stopped: Option<&'static str>,
+    pub(crate) stopped: Option<&'static str>,
+}
+impl Default for Scan {
+    fn default() -> Self {
+        Self {
+            entry_limit: MAX_ENTRIES,
+            byte_limit: MAX_SCAN_BYTES,
+            ignore_errors: 0,
+            entries: 0,
+            files: 0,
+            parsed: 0,
+            bytes: 0,
+            nodes: 0,
+            skipped: 0,
+            unsupported: 0,
+            syntax_errors: 0,
+            matches: 0,
+            rows: Vec::new(),
+            row_bytes: 0,
+            stopped: None,
+        }
+    }
 }
 impl Scan {
     fn add(&mut self, row: String, limit: usize) {
@@ -148,23 +177,19 @@ impl Scan {
     }
 }
 
-fn excluded(path: &Path) -> bool {
+pub(crate) fn excluded(path: &Path) -> bool {
     path.components().any(|c| {
         let name = c.as_os_str().to_string_lossy();
         matches!(
             name.as_ref(),
             ".git"
                 | ".sui"
-                | "target"
                 | "node_modules"
                 | "vendor"
-                | "dist"
-                | "build"
                 | "__pycache__"
                 | ".venv"
                 | "venv"
                 | ".next"
-                | "coverage"
         ) || name.starts_with(".env")
             || matches!(name.as_ref(), "auth.json" | "credentials.json")
     }) || path
@@ -174,53 +199,17 @@ fn excluded(path: &Path) -> bool {
 
 fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Result<ExecOut> {
     let deadline = Instant::now() + SCAN_TIME;
-    let filter_root = root.clone();
-    let filter_scope = scope.clone();
-    let mut walk = WalkBuilder::new(&root);
-    walk.hidden(false)
-        .parents(false)
-        .git_global(false)
-        .require_git(false)
-        .follow_links(false)
-        .sort_by_file_path(|a, b| a.cmp(b))
-        .filter_entry(move |entry| {
-            let Ok(rel) = entry.path().strip_prefix(&filter_root) else {
-                return false;
-            };
-            !excluded(rel) && (rel.starts_with(&filter_scope) || filter_scope.starts_with(rel))
-        });
     let query = args.query.to_lowercase();
     let mut stats = Scan::default();
+    let files = walk::collect(&root, &scope, &mut stats, cancel, deadline);
+    let traversal_stop = stats.stopped.take();
     let mut parser = Parser::new();
-    for entry in walk.build() {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(ExecOut::plain(
-                "status: cancelled\nerror: inventory cancelled".into(),
-                ExecKind::Cancelled,
-            ));
-        }
-        if stats.entries >= MAX_ENTRIES || Instant::now() >= deadline {
-            stats.stopped = Some(if stats.entries >= MAX_ENTRIES {
-                "entry_limit"
-            } else {
-                "time_limit"
-            });
+    for path in files {
+        if !checkpoint(&mut stats, cancel, deadline) {
             break;
         }
-        stats.entries += 1;
-        let entry = match entry {
-            Ok(v) if v.error().is_none() => v,
-            _ => {
-                stats.skipped += 1;
-                continue;
-            }
-        };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        let path = entry.path();
+        let path = path.as_path();
         let rel = path.strip_prefix(&root)?;
-        // Re-use the native path guard before reading; the walker never follows links.
         let Some(display) = rel.to_str() else {
             stats.skipped += 1;
             continue;
@@ -243,18 +232,13 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
             stats.unsupported += 1;
             continue;
         };
-        let text = match read_source(path) {
+        let text = match read_source(&root, path, &mut stats, cancel, deadline) {
             Ok(v) => v,
             Err(_) => {
                 stats.skipped += 1;
                 continue;
             }
         };
-        if stats.bytes + text.len() > MAX_SCAN_BYTES {
-            stats.stopped = Some("byte_limit");
-            break;
-        }
-        stats.bytes += text.len();
         parser.set_language(&language)?;
         let mut progress = |_: &tree_sitter::ParseState| {
             if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -291,7 +275,7 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
             }
             stats.nodes += 1;
             let node = cursor.node();
-            if let Some((kind, name)) = definition(node, text.as_bytes()) {
+            if let Some((kind, name)) = symbols::definition(node, text.as_bytes()) {
                 if name.to_lowercase().contains(&query) || display.to_lowercase().contains(&query) {
                     stats.add(
                         format!(
@@ -321,6 +305,9 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
             break;
         }
     }
+    if stats.stopped.is_none() {
+        stats.stopped = traversal_stop;
+    }
     if cancel.load(Ordering::Relaxed) {
         return Ok(ExecOut::plain(
             "status: cancelled\nerror: inventory cancelled".into(),
@@ -332,8 +319,8 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
         || stats.skipped > 0
         || stats.syntax_errors > 0;
     let mut text = format!(
-        "status: success\naction: {}\npath: {}\nquery: {}\nsupported_symbols: Rust, JS/JSX, TS/TSX, Python, Go\nscan_complete: {}\nentries_scanned: {}\nfiles_scanned: {}\nfiles_parsed: {}\nfiles_skipped: {}\nfiles_unsupported: {}\nsyntax_error_files: {}\nmatches_seen: {}\nshowing: {}\ntruncated: {truncated}\nstop_reason: {}\ncontent:\n",
-        if matches!(args.action, Action::Files) { "files" } else { "symbols" }, escaped(&args.path), escaped(&args.query), stats.stopped.is_none() && stats.skipped == 0 && stats.syntax_errors == 0, stats.entries, stats.files, stats.parsed, stats.skipped, stats.unsupported, stats.syntax_errors, stats.matches, stats.rows.len(), stats.stopped.unwrap_or("none")
+        "status: success\naction: {}\npath: {}\nquery: {}\nsupported_symbols: Rust, JS/JSX, TS/TSX, Python, Go\nscan_complete: {}\nentries_scanned: {}\nfiles_scanned: {}\nfiles_parsed: {}\nbytes_read: {}\nfiles_skipped: {}\nfiles_unsupported: {}\nsyntax_error_files: {}\nmatches_seen: {}\nshowing: {}\ntruncated: {truncated}\nstop_reason: {}\ncontent:\n",
+        if matches!(args.action, Action::Files) { "files" } else { "symbols" }, escaped(&args.path), escaped(&args.query), stats.stopped.is_none() && stats.skipped == 0 && stats.syntax_errors == 0, stats.entries, stats.files, stats.parsed, stats.bytes, stats.skipped, stats.unsupported, stats.syntax_errors, stats.matches, stats.rows.len(), stats.stopped.unwrap_or("none")
     );
     if stats.rows.is_empty() {
         text.push_str("<empty>\n");
@@ -347,6 +334,9 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
             "hint: narrow path/query or use read_file; partial results do not prove absence\n",
         );
     }
+    if stats.ignore_errors > 0 {
+        text.push_str("hint: ignore rules unavailable; affected subtree skipped\n");
+    }
     if stats.unsupported > 0 {
         text.push_str(
             "hint: symbols cover only supported languages; use files/bash for unsupported files\n",
@@ -357,7 +347,68 @@ fn scan(root: PathBuf, scope: PathBuf, args: Args, cancel: &AtomicBool) -> Resul
     Ok(out)
 }
 
-fn read_source(path: &Path) -> Result<String> {
+fn cancelled() -> ExecOut {
+    ExecOut::plain(
+        "status: cancelled\nerror: inventory cancelled".into(),
+        ExecKind::Cancelled,
+    )
+}
+
+pub(crate) fn checkpoint(stats: &mut Scan, cancel: &AtomicBool, deadline: Instant) -> bool {
+    if cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+    if Instant::now() >= deadline {
+        stats.stopped = Some("time_limit");
+        return false;
+    }
+    !matches!(
+        stats.stopped,
+        Some("time_limit" | "byte_limit" | "node_limit")
+    )
+}
+
+/// Probe each component without following symlinks, including control-file
+/// ancestors. This remains a native path guard, not an OS filesystem sandbox.
+fn guarded_metadata(
+    root: &Path,
+    path: &Path,
+    stats: &mut Scan,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<Option<std::fs::Metadata>> {
+    let rel = path.strip_prefix(root)?;
+    let mut probe = root.to_path_buf();
+    let mut components = rel.components().peekable();
+    while let Some(component) = components.next() {
+        anyhow::ensure!(checkpoint(stats, cancel, deadline), "scan stopped");
+        probe.push(component);
+        let metadata = match probe.symlink_metadata() {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        anyhow::ensure!(!metadata.file_type().is_symlink(), "symlink excluded");
+        if components.peek().is_none() {
+            return Ok(Some(metadata));
+        }
+        anyhow::ensure!(metadata.is_dir(), "non-directory ancestor");
+    }
+    Ok(Some(root.symlink_metadata()?))
+}
+
+fn read_regular(
+    root: &Path,
+    path: &Path,
+    per_file_limit: usize,
+    stats: &mut Scan,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let metadata =
+        guarded_metadata(root, path, stats, cancel, deadline)?.context("file disappeared")?;
+    anyhow::ensure!(metadata.is_file(), "not a regular file");
+    anyhow::ensure!(metadata.len() <= per_file_limit as u64, "oversize file");
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -365,20 +416,90 @@ fn read_source(path: &Path) -> Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
-        bail!("not a regular file");
+    anyhow::ensure!(checkpoint(stats, cancel, deadline), "scan stopped");
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "not a regular file");
+    anyhow::ensure!(metadata.len() <= per_file_limit as u64, "oversize file");
+    if metadata.len() > stats.byte_limit.saturating_sub(stats.bytes) as u64 {
+        stats.stopped = Some("byte_limit");
+        bail!("input budget exhausted");
     }
     let mut bytes = Vec::new();
-    file.take((MAX_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
-        bail!("oversize or binary source");
+    let mut buffer = [0u8; 8192];
+    loop {
+        anyhow::ensure!(checkpoint(stats, cancel, deadline), "scan stopped");
+        let remaining = stats.byte_limit.saturating_sub(stats.bytes);
+        if remaining == 0 {
+            if file.metadata()?.len() == bytes.len() as u64 {
+                break;
+            }
+            stats.stopped = Some("byte_limit");
+            bail!("input budget exhausted");
+        }
+        let capacity = buffer
+            .len()
+            .min(remaining)
+            .min(per_file_limit + 1 - bytes.len());
+        let count = file.read(&mut buffer[..capacity])?;
+        stats.bytes += count; // Charge actual bytes even if validation fails.
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        anyhow::ensure!(bytes.len() <= per_file_limit, "oversize file");
     }
+    Ok(bytes)
+}
+
+pub(crate) fn read_source(
+    root: &Path,
+    path: &Path,
+    stats: &mut Scan,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<String> {
+    let bytes = read_regular(root, path, MAX_FILE_BYTES, stats, cancel, deadline)?;
+    anyhow::ensure!(!bytes.contains(&0), "binary source");
     Ok(String::from_utf8(bytes)?)
 }
 
-fn language_name(path: &Path) -> &'static str {
+/// Shared native guard for bounded language-analysis inputs. Charge even
+/// rejected bytes so callers cannot bypass their aggregate input budget.
+pub(crate) fn read_for_analysis(
+    root: &Path,
+    path: &Path,
+    byte_budget: usize,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> (Result<String>, usize) {
+    let mut stats = Scan {
+        byte_limit: byte_budget,
+        ..Scan::default()
+    };
+    let result = read_source(root, path, &mut stats, cancel, deadline);
+    (result, stats.bytes)
+}
+
+/// Reuse inventory traversal without caching ignore decisions or file contents.
+pub(crate) fn collect_for_analysis(
+    root: &Path,
+    scope: &Path,
+    stats: &mut Scan,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Vec<PathBuf> {
+    walk::collect(root, scope, stats, cancel, deadline)
+}
+
+pub(crate) fn syntax_definition<'a>(
+    node: tree_sitter::Node<'_>,
+    source: &'a [u8],
+) -> Option<(&'static str, &'a str)> {
+    symbols::definition(node, source)
+}
+
+pub(crate) fn language_name(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("rs") => "rust",
         Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
@@ -390,7 +511,7 @@ fn language_name(path: &Path) -> &'static str {
     }
 }
 
-fn language(path: &Path) -> Option<Language> {
+pub(crate) fn language(path: &Path) -> Option<Language> {
     Some(match language_name(path) {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "javascript" => tree_sitter_javascript::LANGUAGE.into(),
@@ -402,55 +523,133 @@ fn language(path: &Path) -> Option<Language> {
     })
 }
 
-fn definition<'a>(node: Node<'_>, source: &'a [u8]) -> Option<(&'static str, &'a str)> {
-    let kind = match node.kind() {
-        "function_item"
-        | "function_signature"
-        | "function_declaration"
-        | "function_definition"
-        | "generator_function_declaration" => "function",
-        "method_definition"
-        | "method_declaration"
-        | "method_signature"
-        | "abstract_method_signature" => "method",
-        "struct_item" => "struct",
-        "union_item" => "union",
-        "enum_item" | "enum_declaration" => "enum",
-        "trait_item" | "interface_declaration" => "interface",
-        "class_definition" | "class_declaration" | "abstract_class_declaration" => "class",
-        "type_item" | "type_spec" | "type_alias_declaration" => "type",
-        "mod_item" | "module" | "internal_module" => "module",
-        "macro_definition" => "macro",
-        "const_item" | "const_spec" | "static_item" => "constant",
-        "variable_declarator"
-            if node.child_by_field_name("value").is_some_and(|v| {
-                matches!(
-                    v.kind(),
-                    "arrow_function" | "function_expression" | "generator_function"
-                )
-            }) =>
-        {
-            "function"
-        }
-        _ => return None,
-    };
-    let name = node.child_by_field_name("name")?;
-    if name.is_missing()
-        || !matches!(
-            name.kind(),
-            "identifier" | "type_identifier" | "property_identifier" | "field_identifier"
-        )
-    {
-        return None;
-    }
-    let text = name.utf8_text(source).ok()?;
-    (text.len() <= 256).then_some((kind, text))
-}
-
 fn escaped(text: &str) -> String {
     if text.chars().any(char::is_control) {
         serde_json::to_string(text).expect("string serialization")
     } else {
         text.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sui-inventory-budget-{}-{:x}",
+                std::process::id(),
+                rand::random::<u128>()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn ignored_entries_consume_the_enumeration_budget_before_sorting() {
+        let fixture = Fixture::new();
+        fixture.write(".gitignore", b"*.tmp\n");
+        for index in 0..20 {
+            fixture.write(&format!("{index:02}.tmp"), b"");
+        }
+        let mut stats = Scan {
+            entry_limit: 4,
+            ..Scan::default()
+        };
+        let files = walk::collect(
+            &fixture.0,
+            Path::new(""),
+            &mut stats,
+            &AtomicBool::new(false),
+            Instant::now() + SCAN_TIME,
+        );
+        assert_eq!(stats.entries, 4);
+        assert_eq!(stats.stopped, Some("entry_limit"));
+        assert!(files
+            .iter()
+            .all(|p| p.extension().is_none_or(|e| e != "tmp")));
+        assert!(files.len() < stats.entries);
+    }
+
+    #[test]
+    fn rejected_source_bytes_reduce_the_remaining_read_allowance() {
+        let fixture = Fixture::new();
+        let invalid = fixture.write("invalid.rs", b"\0xx");
+        let valid = fixture.write("valid.rs", b"fn ok() {}\n");
+        let mut stats = Scan {
+            byte_limit: 8,
+            ..Scan::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + SCAN_TIME;
+        assert!(read_source(&fixture.0, &invalid, &mut stats, &cancel, deadline).is_err());
+        assert_eq!(stats.bytes, 3);
+        assert!(read_source(&fixture.0, &valid, &mut stats, &cancel, deadline).is_err());
+        assert_eq!(
+            stats.bytes, 3,
+            "the next file must be rejected BEFORE reading"
+        );
+        assert_eq!(stats.stopped, Some("byte_limit"));
+    }
+
+    #[test]
+    fn exact_byte_allowance_can_finish_a_regular_file() {
+        let fixture = Fixture::new();
+        let path = fixture.write("last.rs", b"// last\n");
+        let mut stats = Scan {
+            byte_limit: 8,
+            ..Scan::default()
+        };
+        let bytes = read_regular(
+            &fixture.0,
+            &path,
+            MAX_FILE_BYTES,
+            &mut stats,
+            &AtomicBool::new(false),
+            Instant::now() + SCAN_TIME,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"// last\n");
+        assert_eq!(stats.bytes, 8);
+        assert!(stats.stopped.is_none());
+    }
+
+    #[test]
+    fn control_reads_share_the_source_byte_allowance_and_fail_closed() {
+        let fixture = Fixture::new();
+        fixture.write(".ignore", b"#1234\n");
+        fixture.write(".gitignore", b"#abc\n");
+        fixture.write("visible.rs", b"fn visible() {}\n");
+        let mut stats = Scan {
+            byte_limit: 8,
+            ..Scan::default()
+        };
+        let files = walk::collect(
+            &fixture.0,
+            Path::new(""),
+            &mut stats,
+            &AtomicBool::new(false),
+            Instant::now() + SCAN_TIME,
+        );
+        assert!(
+            files.is_empty(),
+            "unavailable rules must prune their subtree"
+        );
+        assert_eq!(stats.bytes, 6);
+        assert_eq!(stats.stopped, Some("byte_limit"));
+        assert_eq!(stats.ignore_errors, 1);
     }
 }

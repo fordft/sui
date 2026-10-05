@@ -302,25 +302,192 @@ methods, types and other declarations using Tree-sitter, with file and
 Queries are literal, case-insensitive substrings of names or paths.
 Symbol extraction supports Rust, JavaScript/JSX, TypeScript/TSX, Python
 and Go. Other languages remain discoverable through `files` and shell
-search. This is a syntax inventory; it does not resolve references,
-dynamic dispatch, macro expansion or a semantic call graph.
+search. Common forms include trait signatures, type aliases and direct
+function/class bindings, including parentheses and TypeScript assertions.
+Names are retained in full when they fit the output budget. This is a
+syntax inventory; it does not resolve references, dynamic dispatch,
+macro expansion or a semantic call graph.
 
 Each call scans current files, including uncommitted edits and new files,
-inside that agent's workspace/worktree. It respects `.gitignore` and
-`.ignore`, skips symlinks, generated/dependency directories and known
-credential-file names, and writes nothing to the repository. Results stay
-in appended tool history; no changing repo map is inserted into the stable
-prompt. Scans have a three-second cooperative budget, 10,000-entry,
-32 MiB input and 500,000-node limits; source files over 512 KiB are skipped.
-Output defaults to 50 rows (max 200) with a 24 KiB row budget. Skipped
-files, syntax errors, unsupported files and truncation are reported;
-partial results never prove a symbol is absent. Narrow `path` or `query`
-when needed.
+inside that agent's workspace/worktree. Ignore rules are loaded only from
+bounded, regular, non-symlink files within that workspace: `.ignore` takes
+precedence over `.gitignore`, then in-workspace `.git/info/exclude`.
+Each control file is limited to 64 KiB and each rule line to 4 KiB.
+Unsafe, oversized, unreadable, non-UTF-8, NUL-containing or malformed rules
+prune the affected subtree and mark the scan partial with an ignore warning.
+Global excludes and outside-workspace Git metadata are not read;
+a worktree's `.git` pointer is not followed, while its workspace ignore
+files still apply.
+
+Symlinks, dependency/metadata directories and known credential-file names
+are always excluded. Root `target`, `build`, `dist` and `coverage`
+directories are skipped by default; an explicit `path` bypasses this default
+exclusion while still respecting workspace ignore rules and safety checks.
+Source directories such as `src/build` and `src/target` remain visible.
+No files are written, and no local parse cache or index is maintained.
+Results stay in appended tool history; no changing repo map is inserted
+into the stable prompt.
+
+Scans have a three-second cooperative budget, a 10,000-entry enumeration
+budget before filtering, 32 MiB of source/ignore input and 500,000-node
+limits. `bytes_read` includes rejected input; source files over 512 KiB
+are skipped using metadata before reading. Cancel waits for the worker
+to observe cancellation and finish; these limits do not impose a hard
+timeout on stalled remote filesystems. Output defaults to 50 rows (max
+200) with a 24 KiB row budget. Skipped files, syntax errors, unsupported
+files and truncation are reported; partial results never prove a symbol
+is absent. Narrow `path` or `query` when needed.
 
 Adding this tool changes the native tool/system signature. Sessions from
 v0.5.0 and earlier remain inspectable/exportable, but Resume requires the
 same recorded signature and therefore a matching older binary. Start a
 new session to use inventory.
+
+## Code context
+
+Native agents can call `code_context` in Solo and Mission roles to collect
+bounded source regions in one tool result. It runs inside Sui on headless
+servers, using the embedded parsers; there is no separate command, language
+server, model call or network service to start.
+
+```json
+{"action":"search","query":"cache usage tokens","path":".","limit":5,"max_bytes":12000}
+```
+
+Search uses concrete terms from the task: identifiers, paths and source
+text. Whitespace-separated terms match case-insensitively; more covered
+terms and name/path matches rank higher. Results are lexical candidates,
+with one selected region per file (default five files, maximum twenty),
+including eligible tests, documentation and configuration. They contain
+numbered source excerpts,
+selection reasons and source hashes. Matching names or text does not prove
+that two symbols refer to each other or that every relevant file was found.
+For a task in another language, the agent can supply identifiers or terms
+used in the codebase.
+
+```json
+{"action":"read","path":"src/tui/usage.rs","line":50,"max_bytes":12000}
+```
+
+Read selects the enclosing syntax definition around a known 1-based line,
+with nearby documentation, attributes, enclosing type headers and bounded
+imports where recognized. Plain text and unsupported syntax use a line
+window. Follow the output's source locations to expand with another
+`code_context` read or `read_file`; use `code_intel` separately when Rust
+semantic definitions or references are needed.
+
+The complete tool result is bounded by `max_bytes` (default 12,000, range
+1,024–24,000). This is a byte budget; actual provider tokens still come from
+provider usage. Omitted regions and incomplete scans are explicit. Source is
+observed from current files and hashed, rather than summarized by a second
+model. Hashes identify the bytes read; they do not establish an atomic
+repository snapshot or prove that the task has enough context.
+`omitted` counts matching files that were not returned;
+`omitted_source_lines` counts gaps within returned excerpts. Scan coverage,
+parser coverage and excerpt completeness are reported separately.
+
+The tool shares inventory's bounded traversal, ignore policy, credential
+exclusions and regular-file checks. Files containing recognized credential
+formats or credential-like literal assignments are withheld before hashing,
+parsing, caching or returning source. Incomplete credential literals are
+also withheld. This is a heuristic: unusual or
+dynamically assembled secrets can evade it, and realistic example tokens
+can cause a file to be withheld. Accepted excerpts remain exact source.
+A per-agent in-memory cache reuses
+syntax facts only after checking freshly read source content. Ignore rules
+are rechecked on each call; worktrees do not share the cache. Local parse
+cache counters are separate from provider prompt-cache usage. Every call
+returns actual excerpts, including cache hits and calls after compaction.
+Results append to tool history; the stable prompt is not rewritten.
+The shared scan budgets are three cooperative seconds, 10,000 entries,
+32 MiB of source/ignore input, 512 KiB per source and 500,000 syntax nodes.
+The cache holds at most 128 entries and 2 MiB of accounted syntax/key data;
+this is not a process-memory limit. Cancellation joins the worker, while
+stalled filesystem calls must return before cooperative cleanup can finish.
+
+Adding `code_context` changes the native tool/system signature. Start a new
+session after updating Sui; older sessions remain inspectable/exportable,
+and Resume requires their recorded signature.
+
+## Rust code intelligence
+
+Native agents can call `code_intel` for Rust definitions, references and
+file diagnostics in Solo or Mission worktrees. Sui starts and owns a
+language-server process on demand, over stdio. It works on headless servers
+without an editor, display, separate server command or external agent harness.
+The installed Rust toolchain must include the `rust-analyzer` and `rust-src`
+components; Sui does not download or install them at runtime. No additional
+Sui configuration is needed.
+
+```json
+{"action":"definition","path":"src/lib.rs","line":12,"column":9}
+{"action":"references","path":"src/lib.rs","line":12,"column":9,"limit":20}
+{"action":"diagnostics","path":"src/lib.rs"}
+```
+
+`line` and `column` are 1-based. Columns count Unicode scalar characters,
+rather than bytes or LSP UTF-16 units; returned locations use the same
+convention. Definition and reference queries require both coordinates.
+Results stay within the agent's workspace, exclude unsafe paths and symlinks,
+and report omitted locations. Read the relevant region before editing.
+
+This tool uses the normal **local execution approval**, like `bash`;
+session approval and Auto/YOLO apply. Build scripts, procedural macros and
+check-on-save are disabled, and Cargo metadata runs with `--offline` and
+`--locked`. `rust-analyzer.toml` in the inspected workspace tree, including
+nested files, is unsupported because it can override server policy.
+Before each call, a presence-only scan ignores Git ignore rules, examines
+at most 10,000 entries and 128 directory levels, and uses a cooperative
+three-second budget. It skips inventory's mandatory metadata, dependency
+and credential exclusions plus root `target`, `build`, `dist` and `coverage`
+directories. Visible symlinks, inaccessible paths or exhausted scan limits
+make configuration coverage unknown and close the session. This check is
+scoped to that tree and runs between calls; local Rust/Cargo tooling still
+runs with user privileges, and these settings are not an OS sandbox.
+
+Each agent's workspace owns its own lazy session. Sui invalidates it before
+file edits, shell commands and terminal actions that may change files;
+the next query starts a fresh session. Results report `project_mode: cargo`
+when the workspace root contains a regular `Cargo.toml`. Otherwise,
+`project_mode: detached` analyzes one standalone file at a time, and
+switching files reinitializes the language server. Standalone results are
+always partial because coverage across files is unknown. Nested Cargo
+projects are not discovered from the repository root; start Sui in their
+Cargo root, or include them in the root Cargo workspace.
+
+Initialization/readiness has a 60-second deadline and each query a
+30-second deadline. Transient `ContentModified` or retriggerable
+`ServerCancelled` responses receive at most three additional attempts,
+25 milliseconds apart, within that query deadline. These retries stay
+inside the same tool call and add no model/provider request. Cancellation,
+timeouts and protocol failures close the session, kill its process group
+and attempt to reap it within three seconds. An unavailable server or
+unsupported operation produces an explicit error; Sui does not substitute
+syntax matches for semantic results. Stopping an agent also closes its idle
+language backend; successful turns can reuse the workspace session.
+
+Source files read for queries and returned positions are limited to 512 KiB
+each and 32 MiB total per call. Output defaults to 50 rows, with a maximum
+of 200 and a 24 KiB row budget; these limits do not cap the server's internal
+workspace indexing. Result processing examines at most 4,096 records under
+a cooperative three-second budget; remaining records count as omitted.
+Cancellation waits for the processing worker to stop and closes the backend.
+Filesystem calls must return before cooperative cleanup can finish. Invalid
+semantic responses produce an error and reset the backend.
+
+Check `file_in_project` (`true`, `false` or `unknown`), `analysis_health`,
+`analysis_complete` and `results_omitted`. Complete analysis requires a
+healthy Cargo backend, confirmed membership of the queried file and no
+omitted results. Unlinked files and unknown membership remain partial.
+Loading or missing dependencies can also make observations partial.
+Empty results do not prove absence.
+Diagnostics are native analyzer observations, not `cargo check` or test
+acceptance proof.
+
+The schema is appended after inventory and remains frozen for each run.
+Adding code intelligence changes the tool/system signature: older sessions
+remain inspectable/exportable, but Resume rejects a mismatched signature.
+Start a new session to use the new tool.
 
 ## Engineering lenses
 
