@@ -6,10 +6,12 @@ use std::path::Path;
 pub(crate) struct Reduction {
     pub stdout: String,
     pub stderr: String,
+    pub strategy: &'static str,
     /// Passing test records actually replaced by explicit omission markers.
     pub passed_lines: usize,
     /// Cargo progress records actually replaced by explicit omission markers.
     pub progress_lines: usize,
+    pub stat_graphs_removed: usize,
 }
 
 /// Recognize a literal Cargo invocation and remove only validated routine output.
@@ -28,8 +30,10 @@ pub(crate) fn reduce(command: &str, stdout: &str, stderr: &str) -> Option<Reduct
     Some(Reduction {
         stdout,
         stderr,
+        strategy: "cargo-success",
         passed_lines,
         progress_lines,
+        stat_graphs_removed: 0,
     })
 }
 
@@ -251,10 +255,9 @@ fn version(value: &str) -> bool {
 }
 
 fn progress(line: &str) -> bool {
-    let line = body(line).trim_start_matches(' ');
-    let Some(rest) = line
-        .strip_prefix("Compiling ")
-        .or_else(|| line.strip_prefix("Checking "))
+    let Some(rest) = body(line)
+        .strip_prefix("   Compiling ")
+        .or_else(|| body(line).strip_prefix("    Checking "))
     else {
         return false;
     };
@@ -321,4 +324,57 @@ fn collapse(lines: &[&str], selected: &[bool], label: &str) -> (String, usize) {
         }
     }
     (rendered, collapsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reduce;
+
+    fn progress_records() -> String {
+        (0..20)
+            .map(|index| format!("    Checking crate_{index} v1.2.3\n"))
+            .collect()
+    }
+
+    #[test]
+    fn cargo_progress_preserves_unindented_lookalike_diagnostics() {
+        let unknown: String = (0..20)
+            .map(|index| {
+                format!("Checking diagnostic_{index} v1.2.3 (missing required observation)\n")
+            })
+            .collect();
+        assert!(reduce("cargo check", "", &unknown).is_none());
+
+        let stderr = format!(
+            "{}{unknown}warning: keep this warning exactly\n",
+            progress_records()
+        );
+        let reduced = reduce("cargo check", "opaque stdout\n", &stderr).unwrap();
+        assert_eq!(reduced.stdout, "opaque stdout\n");
+        assert_eq!(reduced.strategy, "cargo-success");
+        assert_eq!(reduced.stat_graphs_removed, 0);
+        assert_eq!(reduced.progress_lines, 20);
+        assert_eq!(reduced.passed_lines, 0);
+        assert!(reduced
+            .stderr
+            .ends_with(&format!("{unknown}warning: keep this warning exactly\n")));
+    }
+
+    #[test]
+    fn malformed_later_suite_preserves_all_stdout() {
+        let stdout = concat!(
+            "running 3 tests\n",
+            "test first::alpha ... ok\n",
+            "test first::beta ... ok\n",
+            "test first::gamma ... ok\n",
+            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            "\nrunning 2 tests\n",
+            "test second::alpha ... ok\n",
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        );
+        let reduced = reduce("cargo test", stdout, &progress_records()).unwrap();
+        assert_eq!(reduced.stdout, stdout);
+        assert_eq!(reduced.passed_lines, 0);
+        assert_eq!(reduced.progress_lines, 20);
+    }
 }

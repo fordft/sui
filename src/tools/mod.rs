@@ -129,13 +129,13 @@ pub fn schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "bash",
-                "description": "Run a shell command in the workspace. Prefer rg for search. Output is bounded head+tail. Successful Cargo progress/pass records may be compacted with a read_tool_output handle; output=raw preserves the captured text.",
+                "description": "Run a shell command in the workspace. Prefer rg for search. Output is bounded head+tail. Successful Cargo progress/pass records and Git diff --stat graphs may be compacted with a read_tool_output handle; output=raw preserves the captured text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command":    { "type": "string", "description": "Shell command (bash -c)" },
                         "timeout_ms": { "type": "integer", "description": "Wall-clock timeout in ms (default 120000)" },
-                        "output": { "type": "string", "enum": ["auto", "raw"], "description": "auto (default): compact recognized successful Cargo output; raw: return original bounded capture" }
+                        "output": { "type": "string", "enum": ["auto", "raw"], "description": "auto (default): compact recognized successful Cargo or Git diff --stat output; raw: return original bounded capture" }
                     },
                     "required": ["command"]
                 }

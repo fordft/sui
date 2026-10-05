@@ -72,7 +72,7 @@ rolling truncation.
 | `read_file(path, offset, limit)` | line-numbered, bounded (≤100 default) |
 | `write_file(path, content)` | atomic tmp+rename, workspace-confined |
 | `edit_file(path, old_str, new_str)` | exact match; 0→fail, >1→fail ambiguous |
-| `bash(command, timeout_ms, output)` | workspace cwd, hard timeout, head+tail bound; auto compact recognized successful Cargo output or raw capture |
+| `bash(command, timeout_ms, output)` | workspace cwd, hard timeout, head+tail bound; auto compact recognized successful Cargo/Git diffstat output or raw capture |
 | `web_search(query)` | bounded results + source IDs; needs `[web]` key |
 | `web_fetch(url)` | public http(s) only, SSRF-checked, markdown text |
 | `skill(name)` | loads an engineering lens from the prompt index |
@@ -97,6 +97,14 @@ acceptance gates continue to use the original process behavior. Unsupported
 syntax/output formats and every unsuccessful or incomplete capture fall back
 to the original envelope. A compact envelope must be strictly smaller including
 its own metadata; storage failure also falls back to raw.
+Literal Git diffstat commands use a separate strict parser. Optional staged,
+no-color/no-ext-diff and literal path scopes qualify; other syntax stays raw.
+Every row and the complete footer must parse, with matching file and line-change
+totals. Only histogram suffixes are removed. Displayed names (possibly abbreviated
+by Git), total changes per file, binary byte counts, stderr and the footer remain
+exact. `per_file_counts: total_changes_only` signals that approximate per-file
+addition/deletion proportions from the graphs are omitted. Patches and numstat
+are never transformed. Both reducers use the same success/capture/sizing gates.
 Pipe readers report actual EOF; errors and drain deadlines mark the capture
 truncated. Reader tasks abort on future drop and are joined on drain timeout,
 so unfinished streams cannot masquerade as complete recovery observations.
@@ -110,6 +118,10 @@ view remains replayable. Whole read responses obey the caller's byte cap.
 Byte measurements identify local output reduction only: provider usage and
 cache telemetry retain their existing measured/unknown semantics. Stable
 concise-prose guidance never rewrites source, user input or existing history.
+The static prompt retains workflow, permissions and evidence constraints while
+frozen tool schemas own arguments/defaults. Net byte evaluations must count this
+shared prefix plus all requests and recovery pages; smaller individual tool
+responses alone do not establish feature-wide savings or provider token savings.
 
 Inventory walks current files on demand and parses definitions with embedded
 Rust, JS/JSX, TS/TSX, Python and Go grammars. It requires no shell/server,

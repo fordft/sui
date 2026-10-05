@@ -13,6 +13,7 @@ use tokio::time::timeout;
 use super::ToolContext;
 
 mod compact;
+mod git_stat;
 
 /// Max bytes of a stream that may enter model-visible history.
 /// Over the limit: keep head 60% + tail 40% with an omission marker.
@@ -394,16 +395,36 @@ fn compact_result(
     stderr: &str,
     original: &str,
 ) -> Option<String> {
-    let reduced = compact::reduce(command, stdout, stderr)?;
+    let reduced = compact::reduce(command, stdout, stderr).or_else(|| {
+        git_stat::reduce(command, stdout).map(|stat| compact::Reduction {
+            strategy: "git-diff-stat",
+            stdout: stat.stdout,
+            stderr: stderr.to_owned(),
+            passed_lines: 0,
+            progress_lines: 0,
+            stat_graphs_removed: stat.graphs_removed,
+        })
+    })?;
     let body = render_capture(0, &reduced.stdout, &reduced.stderr, false);
+    let counts = if reduced.stat_graphs_removed > 0 {
+        format!(
+            "stat_graphs_removed: {}\nper_file_counts: total_changes_only",
+            reduced.stat_graphs_removed
+        )
+    } else {
+        format!(
+            "passed_lines_collapsed: {}\nprogress_lines_collapsed: {}",
+            reduced.passed_lines, reduced.progress_lines
+        )
+    };
     let render = |id: &str| {
         // rendered_bytes includes this metadata. Its decimal width converges
         // without estimates of provider tokens, costs or cache hits.
         let mut rendered_bytes = 0;
         loop {
             let text = format!(
-                "{body}\noutput_compacted: true\nstrategy: cargo-success\npassed_lines_collapsed: {}\nprogress_lines_collapsed: {}\noriginal_bytes: {}\nrendered_bytes: {rendered_bytes}\nraw_output_id: {id}",
-                reduced.passed_lines, reduced.progress_lines, original.len()
+                "{body}\noutput_compacted: true\nstrategy: {}\n{counts}\noriginal_bytes: {}\nrendered_bytes: {rendered_bytes}\nraw_output_id: {id}",
+                reduced.strategy, original.len()
             );
             if text.len() == rendered_bytes {
                 break text;

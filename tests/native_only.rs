@@ -41,15 +41,15 @@ fn failure(output: Output) -> String {
 }
 
 #[test]
-fn tool_schemas_preserve_legacy_order_and_pin_v08_extension() {
-    // v0.8 deliberately extends Bash. Pin its new wire representation, then
+fn tool_schemas_preserve_legacy_order_and_pin_v09_extension() {
+    // v0.9 deliberately extends Bash. Pin its new wire representation, then
     // normalize only that extension to prove every other v0.4.7 byte is stable.
     // preserve_order must remain native-owned after SDK removal.
     let schemas = sui::tools::schemas();
     let schema = serde_json::to_string(&schemas[..10]).unwrap();
     assert_eq!(
         sui::context::sha256_hex(schema.as_bytes()),
-        "9da7d7bc6a3c15b870d60b37c5344d6d339422f751195b00ed7d74baa7e498c2"
+        "5ab9aaac078453d6bfad431474f4c09d30b27eda3cff5cbc714cb49f632991d3"
     );
     let mut legacy = schemas[..10].to_vec();
     assert_eq!(legacy[6]["function"]["name"], "bash");

@@ -411,7 +411,7 @@ and Resume requires their recorded signature.
 
 ## Native output compaction
 
-Sui reduces recognized Cargo output before appending it to model history;
+Sui reduces recognized Cargo and Git diffstat output before appending it to model history;
 no RTK binary, shell hook, separate service or model request is needed.
 The Bash tool defaults to `output: "auto"`. For a simple `cargo test`,
 `build`, `check` or `clippy` invocation, completed, untruncated exit-zero
@@ -423,6 +423,17 @@ is used only when its complete envelope is smaller than the original.
 Pipe read failures or unfinished drains mark the capture truncated and
 bypass compaction; timed-out reader tasks are aborted and joined.
 
+For literal `git diff --stat` commands (optionally `--cached`/`--staged`,
+`--no-color`, `--no-ext-diff` and literal paths after `--`), Sui removes only
+the `+`/`-` histogram suffixes of a complete validated stat. Displayed file
+names, including Git's abbreviations/quoting, per-file total changes, binary
+byte counts and the insertion/deletion footer stay exact. The removed graphs
+can convey approximate per-file proportions; `per_file_counts:
+total_changes_only` makes that limitation explicit. Use raw output to inspect
+those graphs; `--numstat` remains raw for exact per-file additions/deletions.
+Patches, other formats/flags, uncertain rows or totals, and small captures
+that would grow after metadata all retain the original envelope.
+
 ```json
 {"command":"cargo test","output":"auto"}
 ```
@@ -430,6 +441,7 @@ bypass compaction; timed-out reader tasks are aborted and joined.
 Compacted results report `output_compacted`, collapsed line counts,
 `original_bytes`, `rendered_bytes` and `raw_output_id`. These are captured
 text measurements, not provider token savings, billing or prompt-cache hits.
+Git results report `stat_graphs_removed` instead of Cargo line counts.
 Use `bash` with `output: "raw"` to bypass compaction, or recover the existing
 capture without rerunning a command:
 
@@ -449,6 +461,10 @@ pages become ordinary tool history and journal entries.
 The stable native prompt also asks for concise prose while retaining
 negation, conditions, identifiers, units, errors, evidence and uncertainty.
 Source code, public documentation and structured deliverable shapes stay exact.
+Tool arguments/defaults live in the frozen schemas; the prompt keeps workflow
+and evidence rules without repeating those definitions. Reading raw pages adds
+requests/history, so recovering an entire capture can cost more than using raw
+output initially. No universal savings percentage is claimed.
 This changes the native tool/system signature; start a new session after
 updating. History is never rewritten by output compaction.
 
