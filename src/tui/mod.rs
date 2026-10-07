@@ -47,6 +47,8 @@ use app::*;
 
 /// Internal replies from async effects back into the app.
 enum Ctl {
+    LoginPrompt(u64, crate::auth::login::Prompt),
+    LoginDone(u64, Result<(), String>),
     Models(u64, Result<Vec<ModelInfo>, String>),
     ProbeDone(String, Result<provider::Probe, String>),
     ProfileSaved,
@@ -54,6 +56,17 @@ enum Ctl {
     WebTest(Result<String, String>),
     Sessions(u64, Result<Vec<crate::session::Summary>, String>),
     Resumed(Result<Box<(crate::session::SavedSession, Profile, PathBuf)>, String>),
+}
+
+struct LoginJob {
+    request: u64,
+    input: Option<tokio::sync::oneshot::Sender<String>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for LoginJob {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// Mouse capture: clicks+drags (1000/1002) + SGR encoding (1006).
@@ -301,6 +314,9 @@ pub fn start_solo(
 
 pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
     let (base_url, key, model) = app.resolve(name)?;
+    let transport =
+        config::Transport::from_kind(app.profiles.get(name).and_then(|p| p.kind.as_deref()))
+            .ok()?;
     Some(Profile {
         transport: config::Transport::from_kind(
             app.profiles.get(name).and_then(|p| p.kind.as_deref()),
@@ -311,7 +327,7 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
             .profiles
             .get(name)
             .and_then(|p| p.image_input)
-            .unwrap_or(base_url.starts_with("codex://")),
+            .unwrap_or(transport.default_image_input()),
         base_url,
         model,
         api_key: key,
@@ -319,7 +335,11 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
             .profiles
             .get(name)
             .and_then(|p| p.prompt_cache_key.clone()),
-        pricing: app.profiles.get(name).and_then(|p| p.pricing.clone()),
+        pricing: if transport.is_account() {
+            None
+        } else {
+            app.profiles.get(name).and_then(|p| p.pricing.clone())
+        },
     })
 }
 
@@ -387,6 +407,7 @@ pub async fn run_with_resume(
     let (ctl_tx, mut ctl_rx) = unbounded_channel::<Ctl>();
     let mut keys = EventStream::new();
     let mut solo: Option<Solo> = None;
+    let mut login_job: Option<LoginJob> = None;
     let mut dirty = true;
     let mut last_draw = Instant::now() - Duration::from_millis(100);
     let mut quit = false;
@@ -450,6 +471,14 @@ pub async fn run_with_resume(
             c = ctl_rx.recv() => {
                 if let Some(c) = c {
                     match c {
+                        Ctl::LoginPrompt(request,prompt) => app.login_prompt(request,prompt),
+                        Ctl::LoginDone(request,result) => {
+                            if login_job.as_ref().is_some_and(|j| j.request == request) {
+                                if result.is_ok() {app.profiles = config::profiles(None).unwrap_or_else(|_| app.profiles.clone());}
+                                app.login_finished(request,result);
+                                login_job = None;
+                            }
+                        }
                         Ctl::Models(request, r) => match r {
                             Ok(ms) => app.models_loaded(request, ms, None),
                             Err(e) => app.models_loaded(request, vec![], Some(e)),
@@ -532,6 +561,54 @@ pub async fn run_with_resume(
         // execute queued effects
         for e in std::mem::take(&mut app.effects) {
             match e {
+                Effect::OpenApiKeyPage => {
+                    crate::auth::login::open_browser("https://platform.claude.com/settings/keys")
+                }
+                Effect::SignIn { provider, request } => {
+                    let (input, receiver) = tokio::sync::oneshot::channel();
+                    let tx = ctl_tx.clone();
+                    let task = tokio::spawn(async move {
+                        let result = async {
+                            let session =
+                                crate::auth::login::Session::begin(provider, false).await?;
+                            let needs_input = session.prompt.input_required;
+                            let _ = tx.send(Ctl::LoginPrompt(request, session.prompt.clone()));
+                            crate::auth::login::open_browser(&session.prompt.url);
+                            let code = if needs_input {
+                                Some(
+                                    tokio::time::timeout(Duration::from_secs(600), receiver)
+                                        .await
+                                        .context("sign-in input timed out")?
+                                        .context("sign-in canceled")?,
+                                )
+                            } else {
+                                None
+                            };
+                            session.finish(code).await?;
+                            Ok::<(), anyhow::Error>(())
+                        }
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(Ctl::LoginDone(request, result));
+                    });
+                    login_job = Some(LoginJob {
+                        request,
+                        input: Some(input),
+                        task,
+                    });
+                }
+                Effect::SignInInput { request, input } => {
+                    if let Some(job) = login_job.as_mut().filter(|j| j.request == request) {
+                        if let Some(sender) = job.input.take() {
+                            let _ = sender.send(input);
+                        }
+                    }
+                }
+                Effect::CancelSignIn { request } => {
+                    if login_job.as_ref().is_some_and(|j| j.request == request) {
+                        login_job = None;
+                    }
+                }
                 Effect::Quit => quit = true,
                 Effect::ListSessions { request } => {
                     let tx = ctl_tx.clone();
@@ -787,15 +864,20 @@ pub async fn run_with_resume(
                     }
                 }
                 Effect::FetchModels {
+                    transport,
                     base_url,
                     key,
                     request,
                 } => {
                     let tx = ctl_tx.clone();
                     tokio::spawn(async move {
-                        let r = provider::list_models(&base_url, key.as_deref())
-                            .await
-                            .map_err(|e| format!("{e:#}"));
+                        let r = provider::list_models_with_transport(
+                            &base_url,
+                            key.as_deref(),
+                            transport,
+                        )
+                        .await
+                        .map_err(|e| format!("{e:#}"));
                         let _ = tx.send(Ctl::Models(request, r));
                     });
                 }

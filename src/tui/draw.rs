@@ -968,26 +968,41 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
             SettingsRow::AddProfile => {
                 label = "+ add provider".into();
                 spans.push(Span::styled(
-                    "api-key or ChatGPT sign-in".to_string(),
+                    "account sign-in, API key, or local models".to_string(),
                     dim(app),
                 ));
             }
             SettingsRow::EditProfile(n) => {
                 let p = &app.profiles[n];
                 label = n.clone();
-                if p.kind.as_deref() == Some("codex-oauth") {
+                if crate::config::Transport::from_kind(p.kind.as_deref())
+                    .is_ok_and(|t| t.is_account())
+                {
                     // OAuth session IS the credential — never render as a
                     // keyless API-key profile.
                     spans.push(Span::styled(
-                        format!("ChatGPT OAuth · {}", p.model.as_deref().unwrap_or("—")),
+                        format!(
+                            "{} · {}",
+                            match p.kind.as_deref() {
+                                Some("codex-oauth") => "ChatGPT OAuth",
+                                Some("gemini-oauth") => "Gemini OAuth",
+                                _ => "Copilot sign-in",
+                            },
+                            p.model.as_deref().unwrap_or("—")
+                        ),
                         Style::default(),
                     ));
-                    let session = crate::codex::CodexAuth::session_exists();
+                    let provider = match p.kind.as_deref() {
+                        Some("codex-oauth") => "codex",
+                        Some("gemini-oauth") => "gemini",
+                        _ => "copilot",
+                    };
+                    let session = app.signed_in.contains(provider);
                     spans.push(Span::styled(
                         if session {
                             "   session ✓".to_string()
                         } else {
-                            "   no session — `codex login` or `sui auth`".to_string()
+                            "   choose Sign in".to_string()
                         },
                         if session { ok } else { warn },
                     ));
@@ -1617,6 +1632,8 @@ never enables web access.";
                                 Field::Auth => format!("◀ {} ▶", pf.auth.name()),
                                 Field::CredSrc => "Environment variable".to_string(),
                                 Field::Store => format!("◀ {} ▶", pf.store.name()),
+                                Field::SignIn => "Enter to sign in".to_string(),
+                                Field::ApiKeyPage => "Open Claude Console".to_string(),
                                 _ => String::new(),
                             }
                         };
@@ -1638,7 +1655,7 @@ never enables web access.";
                 }
             }
             lines.push(Line::from(Span::styled(
-                if pf.endpoint.starts_with("codex://") {
+                if pf.transport().is_account() {
                     format!("→ {}", pf.endpoint)
                 } else {
                     format!("→ POST {}", pf.endpoint)
@@ -1682,6 +1699,35 @@ never enables web access.";
                     f.set_cursor_position((inner.x + label_width as u16 + col, inner.y + y));
                 }
             }
+        }
+        Modal::Login(dialog) => {
+            let r = centered(92, 18, area);
+            f.render_widget(Clear, r);
+            let mut lines = vec![
+                Line::from(format!("Sign in to {}", dialog.provider.id())),
+                Line::from(dialog.status.clone()),
+                Line::from(""),
+            ];
+            if let Some(prompt) = &dialog.prompt {
+                if let Some(code) = &prompt.user_code {
+                    lines.push(Line::from(format!("Enter code in browser: {code}")));
+                }
+                lines.push(Line::from("Ctrl+U copies the browser URL · Esc cancels"));
+                if prompt.input_required {
+                    lines.push(Line::from(format!(
+                        "Authorization input: {}",
+                        "•".repeat(dialog.input.text().chars().count().min(60))
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(prompt.url.clone()));
+            }
+            f.render_widget(
+                Paragraph::new(lines)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .block(panel(app)),
+                r,
+            );
         }
         Modal::Picker(p) => {
             let r = centered(70, 16, area);

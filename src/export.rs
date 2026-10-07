@@ -806,6 +806,7 @@ fn objective_from(agents: &[AgentRec], plan: Option<&Value>) -> Value {
 /// leak into a journal — it must be in this list.
 fn known_secrets() -> Vec<String> {
     let mut v = vec![];
+    v.extend(crate::auth::known_secrets());
     if let Ok(profiles) = crate::config::profiles(None) {
         for p in profiles.values() {
             if let Some(k) = &p.api_key {

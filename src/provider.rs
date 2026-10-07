@@ -1,4 +1,5 @@
 pub(crate) mod failure;
+mod native;
 pub(crate) mod responses;
 
 use anyhow::{bail, Context, Result};
@@ -33,6 +34,12 @@ enum Inner {
         api_key: Option<String>,
     },
     Codex(std::sync::OnceLock<std::sync::Arc<crate::codex::CodexAuth>>),
+    Native {
+        transport: crate::config::Transport,
+        base: String,
+        api_key: Option<String>,
+        catalog: tokio::sync::OnceCell<Value>,
+    },
 }
 
 pub struct StreamOutcome {
@@ -73,10 +80,7 @@ impl Provider {
         // Authenticated requests never follow redirects: a redirect would
         // carry credentials to whatever the endpoint points at. Codex's
         // token never travels anywhere but chatgpt.com / auth.openai.com.
-        let mut b = reqwest::Client::builder();
-        if api_key.is_some() || base_url.starts_with("codex://") {
-            b = b.redirect(reqwest::redirect::Policy::none());
-        }
+        let b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
         let inner = if base_url.starts_with("codex://") {
             Inner::Codex(std::sync::OnceLock::new())
         } else {
@@ -112,6 +116,29 @@ impl Provider {
     }
 
     pub fn with_transport(mut self, transport: crate::config::Transport) -> Self {
+        use crate::config::Transport;
+        if matches!(
+            transport,
+            Transport::Anthropic | Transport::Gemini | Transport::GeminiOauth | Transport::Copilot
+        ) {
+            let (base, api_key) = match &self.inner {
+                Inner::Chat { url, api_key } => (
+                    url.trim_end_matches("/chat/completions").to_string(),
+                    api_key.clone(),
+                ),
+                _ => (transport.default_url().into(), None),
+            };
+            self.inner = Inner::Native {
+                transport,
+                base,
+                api_key: if transport.is_account() {
+                    None
+                } else {
+                    api_key
+                },
+                catalog: Default::default(),
+            };
+        }
         if transport == crate::config::Transport::CodexOauth {
             self.inner = Inner::Codex(Default::default());
         }
@@ -143,6 +170,22 @@ impl Provider {
             Inner::Chat { url, .. } => ("chat-completions", url.as_str()),
             Inner::Responses { url, .. } => ("openai-responses", url.as_str()),
             Inner::Codex(_) => ("codex-oauth", "chatgpt.com/backend-api/codex/responses"),
+            Inner::Native {
+                transport, base, ..
+            } => (
+                match transport {
+                    crate::config::Transport::Anthropic => "anthropic",
+                    crate::config::Transport::Gemini => "gemini",
+                    crate::config::Transport::GeminiOauth => "gemini-oauth",
+                    crate::config::Transport::Copilot => "copilot",
+                    _ => unreachable!(),
+                },
+                if transport.is_account() {
+                    transport.default_url()
+                } else {
+                    base.as_str()
+                },
+            ),
         };
         crate::context::sha256_hex(
             json!({"wire_version": 1, "transport": transport, "endpoint": endpoint,
@@ -163,10 +206,33 @@ impl Provider {
         &self,
         messages: &crate::context::Compiled<'_>,
         tools: &[Value],
-        mut on_delta: impl FnMut(&str),
-        mut on_reasoning: impl FnMut(&str),
+        on_delta: impl FnMut(&str),
+        on_reasoning: impl FnMut(&str),
     ) -> Result<StreamOutcome> {
         let (url, api_key) = match &self.inner {
+            Inner::Native {
+                transport,
+                base,
+                api_key,
+                catalog,
+            } => {
+                return native::stream(
+                    *transport,
+                    native::Request {
+                        client: &self.client,
+                        base,
+                        api_key: api_key.as_deref(),
+                        model: &self.model,
+                        session_id: &self.session_id,
+                        messages,
+                        tools,
+                        catalog,
+                    },
+                    on_delta,
+                    on_reasoning,
+                )
+                .await;
+            }
             Inner::Codex(auth) => {
                 // OnceLock::get_or_try_init is unstable — a benign double
                 // discover() just reads the same file twice.
@@ -240,145 +306,159 @@ impl Provider {
             return Err(failure::Failure::response(resp).await.into());
         }
 
-        let mut stream = resp.bytes_stream();
-        // Byte buffer: '\n' can never appear inside a UTF-8 multibyte
-        // char, so byte-scanning for newlines and decoding complete LINES
-        // is corruption-free — unlike lossy-decoding each raw chunk,
-        // which splits a multibyte char at a boundary into two U+FFFDs.
-        let mut buf: Vec<u8> = Vec::new();
-        let mut content = String::new();
-        let mut reasoning: Option<String> = None;
-        let mut calls: BTreeMap<u32, CallAcc> = BTreeMap::new();
-        let mut usage: Option<Usage> = None;
-        let mut finish_reason: Option<String> = None;
-        let mut returned_model: Option<String> = None;
-        let mut first_delta_ms: Option<u128> = None;
+        read_chat(resp, start, on_delta, on_reasoning).await
+    }
+}
 
-        let mut handle_line = |line: &str| -> Result<()> {
-            if line.is_empty() || line.starts_with(':') {
-                return Ok(()); // blank line / comment keep-alive
-            }
-            let Some(data) = line.strip_prefix("data:") else {
-                return Ok(());
-            };
-            let data = data.trim();
-            if data == "[DONE]" {
-                return Ok(());
-            }
-            let Ok(ev) = serde_json::from_str::<Value>(data) else {
-                return Ok(()); // tolerate non-JSON keep-alive lines
-            };
+pub(crate) async fn read_chat(
+    resp: reqwest::Response,
+    start: Instant,
+    mut on_delta: impl FnMut(&str),
+    mut on_reasoning: impl FnMut(&str),
+) -> Result<StreamOutcome> {
+    let mut stream = resp.bytes_stream();
+    // Byte buffer: '\n' can never appear inside a UTF-8 multibyte
+    // char, so byte-scanning for newlines and decoding complete LINES
+    // is corruption-free — unlike lossy-decoding each raw chunk,
+    // which splits a multibyte char at a boundary into two U+FFFDs.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut content = String::new();
+    let mut reasoning: Option<String> = None;
+    let mut calls: BTreeMap<u32, CallAcc> = BTreeMap::new();
+    let mut usage: Option<Usage> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut returned_model: Option<String> = None;
+    let mut first_delta_ms: Option<u128> = None;
 
-            // In-stream error events (e.g. OpenRouter emits these after
-            // 200). `error` must be an object — some providers send an
-            // explicit `"error": null` on normal chunks.
-            if let Some(err) = ev.get("error").filter(|e| e.is_object()) {
-                return Err(failure::Failure::stream(err).into());
-            }
-            if let Some(m) = ev["model"].as_str() {
-                returned_model = Some(m.to_string());
-            }
-            // `"usage": null` is a placeholder, not telemetry — keep
-            // `usage` None so callers don't mistake it for complete data.
-            if let Some(u) = ev.get("usage").filter(|u| u.is_object()) {
-                usage = Some(parse_usage(u));
-            }
-            for ch in ev["choices"].as_array().into_iter().flatten() {
-                if let Some(fr) = ch["finish_reason"].as_str() {
-                    finish_reason = Some(fr.to_string());
-                }
-                let d = &ch["delta"];
-                if let Some(t) = d["content"].as_str() {
-                    if first_delta_ms.is_none() {
-                        first_delta_ms = Some(start.elapsed().as_millis());
-                    }
-                    content.push_str(t);
-                    on_delta(t);
-                }
-                // Normalize reasoning fields: prefer reasoning_content,
-                // fall back to `reasoning` (OpenRouter). Equivalent
-                // fields are never both emitted for one delta.
-                if let Some(r) = d["reasoning_content"]
-                    .as_str()
-                    .or_else(|| d["reasoning"].as_str())
-                {
-                    if first_delta_ms.is_none() {
-                        first_delta_ms = Some(start.elapsed().as_millis());
-                    }
-                    reasoning.get_or_insert_with(String::new).push_str(r);
-                    on_reasoning(r);
-                }
-                for tc in d["tool_calls"].as_array().into_iter().flatten() {
-                    if first_delta_ms.is_none() {
-                        first_delta_ms = Some(start.elapsed().as_millis());
-                    }
-                    let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                    let acc = calls.entry(idx).or_default();
-                    if let Some(id) = tc["id"].as_str() {
-                        acc.id.push_str(id);
-                    }
-                    if let Some(n) = tc["function"]["name"].as_str() {
-                        acc.name.push_str(n);
-                    }
-                    if let Some(a) = tc["function"]["arguments"].as_str() {
-                        acc.args.push_str(a);
-                    }
-                }
-            }
-            Ok(())
+    let mut handle_line = |line: &str| -> Result<()> {
+        if line.is_empty() || line.starts_with(':') {
+            return Ok(()); // blank line / comment keep-alive
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            return Ok(());
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            return Ok(());
+        }
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            return Ok(()); // tolerate non-JSON keep-alive lines
         };
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(failure::Failure::transport)?;
-            buf.extend_from_slice(&chunk);
-
-            // scan by index — drain once per chunk, no per-line alloc
-            let mut pos = 0usize;
-            while let Some(nl) = buf[pos..].iter().position(|&b| b == b'\n') {
-                let end = pos + nl;
-                let line = String::from_utf8_lossy(&buf[pos..end]);
-                pos = end + 1;
-                handle_line(line.trim_end_matches('\r'))?;
-            }
-            buf.drain(..pos);
+        // In-stream error events (e.g. OpenRouter emits these after
+        // 200). `error` must be an object — some providers send an
+        // explicit `"error": null` on normal chunks.
+        if let Some(err) = ev.get("error").filter(|e| e.is_object()) {
+            return Err(failure::Failure::stream(err).into());
         }
-        // A truncated stream can end mid-line — still parse what arrived
-        // (a complete final event without its newline still counts).
-        if !buf.is_empty() {
-            let line = String::from_utf8_lossy(&buf);
+        if let Some(m) = ev["model"].as_str() {
+            returned_model = Some(m.to_string());
+        }
+        // `"usage": null` is a placeholder, not telemetry — keep
+        // `usage` None so callers don't mistake it for complete data.
+        if let Some(u) = ev.get("usage").filter(|u| u.is_object()) {
+            usage = Some(parse_usage(u));
+        }
+        for ch in ev["choices"].as_array().into_iter().flatten() {
+            if let Some(fr) = ch["finish_reason"].as_str() {
+                finish_reason = Some(fr.to_string());
+            }
+            let d = &ch["delta"];
+            if let Some(t) = d["content"].as_str() {
+                if first_delta_ms.is_none() {
+                    first_delta_ms = Some(start.elapsed().as_millis());
+                }
+                content.push_str(t);
+                on_delta(t);
+            }
+            // Normalize reasoning fields: prefer reasoning_content,
+            // fall back to `reasoning` (OpenRouter). Equivalent
+            // fields are never both emitted for one delta.
+            if let Some(r) = d["reasoning_content"]
+                .as_str()
+                .or_else(|| d["reasoning"].as_str())
+            {
+                if first_delta_ms.is_none() {
+                    first_delta_ms = Some(start.elapsed().as_millis());
+                }
+                reasoning.get_or_insert_with(String::new).push_str(r);
+                on_reasoning(r);
+            }
+            for tc in d["tool_calls"].as_array().into_iter().flatten() {
+                if first_delta_ms.is_none() {
+                    first_delta_ms = Some(start.elapsed().as_millis());
+                }
+                let idx = tc["index"].as_u64().unwrap_or(0) as u32;
+                let acc = calls.entry(idx).or_default();
+                if let Some(id) = tc["id"].as_str() {
+                    acc.id.push_str(id);
+                }
+                if let Some(n) = tc["function"]["name"].as_str() {
+                    acc.name.push_str(n);
+                }
+                if let Some(a) = tc["function"]["arguments"].as_str() {
+                    acc.args.push_str(a);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let mut received = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(failure::Failure::transport)?;
+        received = received.saturating_add(chunk.len());
+        if received > 16_777_216 {
+            bail!("chat provider stream exceeds 16 MiB");
+        }
+        buf.extend_from_slice(&chunk);
+
+        // scan by index — drain once per chunk, no per-line alloc
+        let mut pos = 0usize;
+        while let Some(nl) = buf[pos..].iter().position(|&b| b == b'\n') {
+            let end = pos + nl;
+            let line = String::from_utf8_lossy(&buf[pos..end]);
+            pos = end + 1;
             handle_line(line.trim_end_matches('\r'))?;
         }
-
-        // A usage chunk on a truncated stream is partial telemetry, not
-        // a completed response — mark it complete only when the stream
-        // actually finished.
-        if let Some(u) = &mut usage {
-            u.complete = finish_reason.is_some();
-        }
-        let tool_calls = calls
-            .into_values()
-            .map(|a| ToolCall {
-                id: a.id,
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: a.name,
-                    arguments: a.args,
-                },
-            })
-            .collect();
-
-        Ok(StreamOutcome {
-            content,
-            reasoning_content: reasoning,
-            tool_calls,
-            finish_reason,
-            returned_model,
-            usage,
-            first_delta_ms: first_delta_ms.unwrap_or(0),
-            total_ms: start.elapsed().as_millis(),
-            response_items: Vec::new(),
-        })
+        buf.drain(..pos);
     }
+    // A truncated stream can end mid-line — still parse what arrived
+    // (a complete final event without its newline still counts).
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf);
+        handle_line(line.trim_end_matches('\r'))?;
+    }
+
+    // A usage chunk on a truncated stream is partial telemetry, not
+    // a completed response — mark it complete only when the stream
+    // actually finished.
+    if let Some(u) = &mut usage {
+        u.complete = finish_reason.is_some();
+    }
+    let tool_calls = calls
+        .into_values()
+        .map(|a| ToolCall {
+            id: a.id,
+            kind: "function".into(),
+            function: FunctionCall {
+                name: a.name,
+                arguments: a.args,
+            },
+        })
+        .collect();
+
+    Ok(StreamOutcome {
+        content,
+        reasoning_content: reasoning,
+        tool_calls,
+        finish_reason,
+        returned_model,
+        usage,
+        first_delta_ms: first_delta_ms.unwrap_or(0),
+        total_ms: start.elapsed().as_millis(),
+        response_items: Vec::new(),
+    })
 }
 
 /// A model entry from a provider's catalog (GET {base}/models).
@@ -399,6 +479,9 @@ pub struct ModelInfo {
 /// whatever the user configured is where we go.
 pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
     if base_url.starts_with("codex://") {
+        if crate::codex::CodexAuth::session_exists() {
+            return crate::codex::list_models().await;
+        }
         // The ChatGPT-OAuth Responses backend has no anonymous /models
         // catalog — offer the known Codex family. The picker's filter
         // box still accepts free-form names for newly released models.
@@ -420,6 +503,7 @@ pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<Mo
     }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = client.get(&url);
@@ -449,6 +533,20 @@ pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<Mo
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
+}
+
+pub async fn list_models_with_transport(
+    base_url: &str,
+    api_key: Option<&str>,
+    transport: crate::config::Transport,
+) -> Result<Vec<ModelInfo>> {
+    use crate::config::Transport;
+    match transport {
+        Transport::Anthropic | Transport::Gemini | Transport::GeminiOauth | Transport::Copilot => {
+            native::models(transport, base_url, api_key).await
+        }
+        _ => list_models(base_url, api_key).await,
+    }
 }
 
 /// Capability status from an actual test request — not catalog claims.

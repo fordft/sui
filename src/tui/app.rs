@@ -120,13 +120,21 @@ pub enum ProvType {
     OpenRouter,
     Codex,
     Custom,
+    Claude,
+    Gemini,
+    Copilot,
+    Ollama,
 }
 impl ProvType {
-    pub const ALL: [ProvType; 4] = [
+    pub const ALL: [ProvType; 8] = [
         ProvType::DeepSeek,
         ProvType::OpenRouter,
         ProvType::Codex,
         ProvType::Custom,
+        ProvType::Claude,
+        ProvType::Gemini,
+        ProvType::Copilot,
+        ProvType::Ollama,
     ];
     pub fn name(self) -> &'static str {
         [
@@ -134,6 +142,10 @@ impl ProvType {
             "OpenRouter",
             "ChatGPT (Codex OAuth)",
             "Custom OpenAI-compatible",
+            "Claude",
+            "Google Gemini",
+            "GitHub Copilot",
+            "Ollama (local)",
         ][self as usize]
     }
     pub fn default_url(self) -> &'static str {
@@ -142,6 +154,10 @@ impl ProvType {
             ProvType::OpenRouter => "https://openrouter.ai/api/v1",
             ProvType::Codex => "codex://oauth",
             ProvType::Custom => "",
+            ProvType::Claude => "https://api.anthropic.com/v1",
+            ProvType::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+            ProvType::Copilot => "copilot://oauth",
+            ProvType::Ollama => "http://127.0.0.1:11434/v1",
         }
     }
     pub fn default_env(self) -> &'static str {
@@ -149,23 +165,36 @@ impl ProvType {
             ProvType::DeepSeek => "DEEPSEEK_API_KEY",
             ProvType::OpenRouter => "OPENROUTER_API_KEY",
             ProvType::Codex | ProvType::Custom => "",
+            ProvType::Claude => "ANTHROPIC_API_KEY",
+            ProvType::Gemini => "GEMINI_API_KEY",
+            ProvType::Copilot | ProvType::Ollama => "",
+        }
+    }
+    pub fn login_provider(self) -> Option<crate::auth::LoginProvider> {
+        use crate::auth::LoginProvider;
+        match self {
+            Self::Codex => Some(LoginProvider::Codex),
+            Self::Claude => None,
+            Self::Gemini => Some(LoginProvider::Gemini),
+            Self::Copilot => Some(LoginProvider::Copilot),
+            _ => None,
         }
     }
 }
 
-/// Custom-endpoint auth choice. Known providers never see this — they get
-/// API-key + store only, with the conventional env var as invisible fallback.
+/// Authentication choices available for each provider preset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AuthMode {
     None,
     ApiKey,
     /// Headless/CI path: read the key from an environment variable.
     Advanced,
+    SignIn,
 }
 impl AuthMode {
     pub const ALL: [AuthMode; 3] = [AuthMode::None, AuthMode::ApiKey, AuthMode::Advanced];
     pub fn name(self) -> &'static str {
-        ["None", "API Key", "Advanced…"][self as usize]
+        ["None", "API Key", "Advanced…", "Account sign-in"][self as usize]
     }
 }
 
@@ -197,6 +226,8 @@ pub enum Field {
     KeyEnv,  // Advanced: variable name
     ApiKey,
     Store,
+    SignIn,
+    ApiKeyPage,
     Test,
     Save,
     Cancel,
@@ -212,6 +243,8 @@ impl Field {
             Field::KeyEnv => "Variable name",
             Field::ApiKey => "API Key",
             Field::Store => "Store",
+            Field::SignIn => "Sign in",
+            Field::ApiKeyPage => "API key setup",
             Field::Test | Field::Save | Field::Cancel => "",
         }
     }
@@ -223,7 +256,7 @@ pub struct ProvForm {
     pub name: Buf,
     pub ptype: ProvType,
     pub base_url: Buf,
-    pub auth: AuthMode, // custom only
+    pub auth: AuthMode,
     pub key_env: Buf,
     pub key: Buf, // masked in the view
     pub store: Store,
@@ -264,6 +297,28 @@ impl ProvForm {
                 "no session — run `codex login` or `sui auth`".into()
             };
         }
+        if let Some(provider) = ptype
+            .login_provider()
+            .filter(|p| *p != crate::auth::LoginProvider::Codex)
+        {
+            f.name.set(provider.id());
+            f.auth = AuthMode::SignIn;
+            f.model.set(&provider.transport().default_model());
+            f.status = if provider.session_exists() {
+                "session detected".into()
+            } else {
+                "choose Sign in to connect your account".into()
+            };
+        }
+        if ptype == ProvType::Ollama {
+            f.name.set("ollama");
+        }
+        if ptype == ProvType::Claude {
+            f.name.set("claude");
+            f.auth = AuthMode::ApiKey;
+            f.model.set(&config::Transport::Anthropic.default_model());
+            f.status = "Connect directly with an Anthropic API key".into();
+        }
         f.refresh_endpoint();
         f
     }
@@ -273,6 +328,14 @@ impl ProvForm {
         let base = p.base_url.as_deref().unwrap_or("");
         let ptype = if p.kind.as_deref() == Some("codex-oauth") {
             ProvType::Codex
+        } else if matches!(p.kind.as_deref(), Some("anthropic")) {
+            ProvType::Claude
+        } else if matches!(p.kind.as_deref(), Some("gemini-oauth" | "gemini")) {
+            ProvType::Gemini
+        } else if p.kind.as_deref() == Some("copilot") {
+            ProvType::Copilot
+        } else if p.kind.as_deref() == Some("ollama") {
+            ProvType::Ollama
         } else if base == ProvType::DeepSeek.default_url() {
             ProvType::DeepSeek
         } else if base == ProvType::OpenRouter.default_url() {
@@ -282,16 +345,27 @@ impl ProvForm {
         };
         let mut f = Self::new(ptype);
         f.name.set(name);
-        f.base_url.set(base);
+        f.base_url.set(if base.is_empty() {
+            ptype.default_url()
+        } else {
+            base
+        });
         f.model.set(p.model.as_deref().unwrap_or(""));
-        if ptype == ProvType::Custom {
+        if matches!(ptype, ProvType::Custom | ProvType::Ollama)
+            || (matches!(ptype, ProvType::Claude | ProvType::Gemini)
+                && !config::Transport::from_kind(p.kind.as_deref()).is_ok_and(|t| t.is_account()))
+        {
             f.auth = if let Some(env) = &p.key_env {
                 f.key_env.set(env);
                 AuthMode::Advanced
             } else if has_stored_key || p.api_key.is_some() {
                 AuthMode::ApiKey
             } else {
-                AuthMode::None
+                if matches!(ptype, ProvType::Claude | ProvType::Gemini) {
+                    AuthMode::ApiKey
+                } else {
+                    AuthMode::None
+                }
             };
         }
         f.editing = Some(name.to_string());
@@ -299,12 +373,19 @@ impl ProvForm {
         f
     }
     pub fn refresh_endpoint(&mut self) {
-        self.endpoint = if self.ptype == ProvType::Codex {
+        self.endpoint = if self.transport().is_account() {
+            self.transport().default_url().into()
+        } else if self.ptype == ProvType::Codex {
             "codex://oauth — reuses `codex login` or `sui auth`".into()
         } else {
             format!(
-                "{}/chat/completions",
-                self.base_url.text().trim_end_matches('/')
+                "{}/{}",
+                self.base_url.text().trim_end_matches('/'),
+                match self.transport() {
+                    config::Transport::Anthropic => "messages",
+                    config::Transport::Gemini => "models/<model>:streamGenerateContent",
+                    _ => "chat/completions",
+                }
             )
         };
     }
@@ -319,14 +400,29 @@ impl ProvForm {
             ProvType::Codex => {
                 // No endpoint/key fields — the OAuth session IS the
                 // credential. Model is the only real choice.
-                v.extend([Field::Model]);
+                v.extend([Field::SignIn, Field::Model]);
             }
-            ProvType::Custom => {
+            ProvType::Copilot => v.extend([Field::SignIn, Field::Model]),
+            ProvType::Claude | ProvType::Gemini => {
+                v.push(Field::Auth);
+                if self.ptype == ProvType::Claude {
+                    v.push(Field::ApiKeyPage);
+                }
+                match self.auth {
+                    AuthMode::SignIn => v.push(Field::SignIn),
+                    AuthMode::ApiKey => v.extend([Field::ApiKey, Field::Store]),
+                    AuthMode::Advanced => v.extend([Field::CredSrc, Field::KeyEnv]),
+                    AuthMode::None => {}
+                }
+                v.push(Field::Model);
+            }
+            ProvType::Custom | ProvType::Ollama => {
                 v.extend([Field::BaseUrl, Field::Model, Field::Auth]);
                 match self.auth {
                     AuthMode::ApiKey => v.extend([Field::ApiKey, Field::Store]),
                     AuthMode::Advanced => v.extend([Field::CredSrc, Field::KeyEnv]),
                     AuthMode::None => {}
+                    AuthMode::SignIn => {}
                 }
             }
         }
@@ -350,19 +446,51 @@ impl ProvForm {
     /// The base URL effects should use — the Codex form has no URL field;
     /// its endpoint is fixed by the OAuth backend.
     pub fn endpoint_url(&self) -> String {
-        if self.ptype == ProvType::Codex {
-            ProvType::Codex.default_url().to_string()
+        if self.transport().is_account() {
+            self.transport().default_url().to_string()
         } else {
             self.base_url.text()
         }
+    }
+    pub fn transport(&self) -> config::Transport {
+        use config::Transport;
+        match self.ptype {
+            ProvType::Codex => Transport::CodexOauth,
+            ProvType::Claude => Transport::Anthropic,
+            ProvType::Gemini if self.auth == AuthMode::SignIn => Transport::GeminiOauth,
+            ProvType::Gemini => Transport::Gemini,
+            ProvType::Copilot => Transport::Copilot,
+            ProvType::Ollama => Transport::Ollama,
+            _ => Transport::ChatCompletions,
+        }
+    }
+    fn kind(&self) -> Option<String> {
+        Some(
+            match self.transport() {
+                config::Transport::CodexOauth => "codex-oauth",
+                config::Transport::Anthropic => "anthropic",
+                config::Transport::GeminiOauth => "gemini-oauth",
+                config::Transport::Gemini => "gemini",
+                config::Transport::Copilot => "copilot",
+                config::Transport::Ollama => "ollama",
+                _ => return None,
+            }
+            .into(),
+        )
     }
     /// Selector rows cycle on ←/→/Space/Enter.
     fn cycle(&mut self, dir: isize) {
         match self.cur_field() {
             Field::Auth => {
-                let i = AuthMode::ALL.iter().position(|a| *a == self.auth).unwrap();
-                let n = AuthMode::ALL.len() as isize;
-                self.auth = AuthMode::ALL[((i as isize + dir).rem_euclid(n)) as usize];
+                let choices: &[AuthMode] = match self.ptype {
+                    ProvType::Claude => &[AuthMode::ApiKey, AuthMode::Advanced],
+                    ProvType::Gemini => &[AuthMode::SignIn, AuthMode::ApiKey, AuthMode::Advanced],
+                    _ => &AuthMode::ALL,
+                };
+                let i = choices.iter().position(|a| *a == self.auth).unwrap_or(0);
+                let n = choices.len() as isize;
+                self.auth = choices[((i as isize + dir).rem_euclid(n)) as usize];
+                self.refresh_endpoint();
             }
             Field::Store => {
                 let i = Store::ALL.iter().position(|s| *s == self.store).unwrap();
@@ -376,13 +504,19 @@ impl ProvForm {
     /// Key the form would use for fetches/probes: typed key, else the
     /// provider's conventional env var, else the advanced env var.
     fn effective_key(&self) -> Option<String> {
+        if self.transport().is_account() {
+            return None;
+        }
         let typed = self.key.text();
         if !typed.is_empty() {
             return Some(typed);
         }
+        if self.auth == AuthMode::Advanced {
+            return std::env::var(self.key_env.text()).ok();
+        }
         match self.ptype {
             ProvType::Codex => None, // OAuth session, no API key
-            ProvType::Custom => match self.auth {
+            ProvType::Custom | ProvType::Ollama => match self.auth {
                 AuthMode::Advanced => std::env::var(self.key_env.text()).ok(),
                 _ => None,
             },
@@ -394,15 +528,28 @@ impl ProvForm {
     /// env-var name so headless/CLI env auth keeps working even though the
     /// form never shows it.
     fn save_inputs(&self) -> (Option<String>, Option<String>, Store) {
+        if self.transport().is_account() {
+            return (None, None, self.store);
+        }
+        if self.auth == AuthMode::Advanced {
+            let env = self.key_env.text();
+            return (
+                if env.is_empty() { None } else { Some(env) },
+                None,
+                self.store,
+            );
+        }
         let key = self.key.text();
         let key = if key.is_empty() { None } else { Some(key) };
         match self.ptype {
             ProvType::Codex => (None, None, self.store), // OAuth, nothing to persist
-            ProvType::DeepSeek | ProvType::OpenRouter => {
+            ProvType::DeepSeek | ProvType::OpenRouter | ProvType::Claude | ProvType::Gemini => {
                 (Some(self.ptype.default_env().to_string()), key, self.store)
             }
-            ProvType::Custom => match self.auth {
+            ProvType::Copilot => (None, None, self.store),
+            ProvType::Custom | ProvType::Ollama => match self.auth {
                 AuthMode::None => (None, None, self.store),
+                AuthMode::SignIn => (None, None, self.store),
                 AuthMode::ApiKey => (None, key, self.store),
                 AuthMode::Advanced => {
                     let env = self.key_env.text();
@@ -701,6 +848,7 @@ pub enum Modal {
         sel: usize,
     },
     Provider(ProvForm),
+    Login(LoginDialog),
     Picker(Picker),
     Permission {
         id: u64,
@@ -733,8 +881,29 @@ pub enum TextTarget {
     WebKey,
 }
 
+pub struct LoginDialog {
+    pub request: u64,
+    pub provider: crate::auth::LoginProvider,
+    pub prompt: Option<crate::auth::login::Prompt>,
+    pub input: Buf,
+    pub submitted: bool,
+    pub status: String,
+}
+
 /// Side-effect the loop must execute — keeps App pure.
 pub enum Effect {
+    OpenApiKeyPage,
+    SignIn {
+        provider: crate::auth::LoginProvider,
+        request: u64,
+    },
+    SignInInput {
+        request: u64,
+        input: String,
+    },
+    CancelSignIn {
+        request: u64,
+    },
     SendTask {
         task: String,
         mode: Mode,
@@ -765,6 +934,7 @@ pub enum Effect {
         id: String,
     },
     FetchModels {
+        transport: config::Transport,
         base_url: String,
         key: Option<String>,
         request: u64,
@@ -845,6 +1015,7 @@ pub struct App {
     pub last_requests: BTreeMap<String, crate::events::RequestDetails>,
     pub resume_pending: bool,
     pub profiles: BTreeMap<String, ProfileCfg>,
+    pub signed_in: std::collections::BTreeSet<String>,
     pub session_keys: BTreeMap<String, String>,
     pub ui: UiSettings,
     pub workspace: PathBuf,
@@ -1005,6 +1176,15 @@ impl App {
             }
         }
         let mut app = Self {
+            signed_in: [
+                crate::auth::LoginProvider::Codex,
+                crate::auth::LoginProvider::Gemini,
+                crate::auth::LoginProvider::Copilot,
+            ]
+            .into_iter()
+            .filter(|p| p.session_exists())
+            .map(|p| p.id().to_string())
+            .collect(),
             screen: if no_profiles {
                 Screen::Setup
             } else {
@@ -1131,6 +1311,7 @@ impl App {
     /// keys override env; nothing is persisted here.
     pub fn resolve(&self, name: &str) -> Option<(String, Option<String>, String)> {
         let p = self.profiles.get(name)?;
+        let transport = config::Transport::from_kind(p.kind.as_deref()).ok()?;
         let key = self
             .session_keys
             .get(name)
@@ -1138,15 +1319,9 @@ impl App {
             .or_else(|| p.key_env.as_deref().and_then(|e| std::env::var(e).ok()))
             .or_else(|| p.api_key.clone());
         Some((
-            if p.kind.as_deref() == Some("codex-oauth") {
-                "codex://oauth".into()
-            } else {
-                p.base_url
-                    .clone()
-                    .unwrap_or_else(|| "https://api.openai.com/v1".into())
-            },
-            key,
-            p.model.clone().unwrap_or_default(),
+            transport.resolve_url(p.base_url.as_deref()),
+            if transport.is_account() { None } else { key },
+            p.model.clone().unwrap_or_else(|| transport.default_model()),
         ))
     }
 
@@ -1167,7 +1342,10 @@ impl App {
         .or_else(|| {
             self.profiles
                 .keys()
-                .find(|n| self.profiles[*n].kind.as_deref() != Some("codex-oauth"))
+                .find(|n| {
+                    !config::Transport::from_kind(self.profiles[*n].kind.as_deref())
+                        .is_ok_and(|t| t.is_account())
+                })
                 .or_else(|| self.profiles.keys().next())
                 .cloned()
         })
@@ -2570,10 +2748,52 @@ impl App {
         self.sync_layout();
     }
 
+    pub fn login_prompt(&mut self, request: u64, prompt: crate::auth::login::Prompt) {
+        if let Some(Modal::Login(dialog)) = &mut self.modal {
+            if dialog.request == request {
+                dialog.status = if prompt.input_required {
+                    "Paste the code or callback URL, then Enter".into()
+                } else {
+                    "Waiting for browser authorization…".into()
+                };
+                dialog.prompt = Some(prompt);
+            }
+        }
+    }
+    pub fn login_finished(&mut self, request: u64, result: Result<(), String>) {
+        let Some(Modal::Login(dialog)) = &self.modal else {
+            return;
+        };
+        if dialog.request != request {
+            return;
+        }
+        let provider = dialog.provider;
+        let status = match result {
+            Ok(()) => {
+                self.signed_in.insert(provider.id().into());
+                format!("{} signed in — choose a model and Save", provider.id())
+            }
+            Err(error) => format!("sign-in failed: {error}"),
+        };
+        self.modal = self.form_stash.take().map(|mut form| {
+            form.status = status.clone();
+            Modal::Provider(form)
+        });
+        self.status = status;
+    }
+
     fn handle_paste(&mut self, s: &str) {
         // modal field wins over chat input — pasting an API key into the
         // setup form must not leak it into the task box
         match &mut self.modal {
+            Some(Modal::Login(dialog))
+                if dialog.prompt.as_ref().is_some_and(|p| p.input_required)
+                    && !dialog.submitted =>
+            {
+                if dialog.input.text().len().saturating_add(s.len()) <= 16_384 {
+                    dialog.input.insert_str(s.trim());
+                }
+            }
             Some(Modal::Provider(f)) => {
                 if let Some(b) = f.cur() {
                     b.insert_str(s);
@@ -2958,6 +3178,42 @@ impl App {
             }
         }
         match m {
+            Modal::Login(mut dialog) => {
+                if k.code == KeyCode::Esc {
+                    self.effects.push(Effect::CancelSignIn {
+                        request: dialog.request,
+                    });
+                    return self.form_stash.take().map(Modal::Provider);
+                }
+                if k.code == KeyCode::Char('u') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    if let Some(prompt) = &dialog.prompt {
+                        self.effects.push(Effect::Clip(prompt.url.clone()));
+                    }
+                } else if dialog.prompt.as_ref().is_some_and(|p| p.input_required)
+                    && !dialog.submitted
+                {
+                    match k.code {
+                        KeyCode::Enter if !dialog.input.text().trim().is_empty() => {
+                            self.effects.push(Effect::SignInInput {
+                                request: dialog.request,
+                                input: dialog.input.text(),
+                            });
+                            dialog.input.clear();
+                            dialog.submitted = true;
+                            dialog.status = "Completing sign-in…".into();
+                        }
+                        KeyCode::Backspace => dialog.input.backspace(),
+                        KeyCode::Char(c)
+                            if !k.modifiers.contains(KeyModifiers::CONTROL)
+                                && dialog.input.text().len() < 16_384 =>
+                        {
+                            dialog.input.insert(c)
+                        }
+                        _ => {}
+                    }
+                }
+                Some(Modal::Login(dialog))
+            }
             Modal::Commands {
                 mut filter,
                 mut sel,
@@ -3169,6 +3425,19 @@ impl App {
 
     fn provider_key(&mut self, k: KeyEvent, mut f: ProvForm) -> Option<Modal> {
         let n = f.fields().len();
+        let use_stored = !f.transport().is_account()
+            && f.key.text().is_empty()
+            && (f.auth == AuthMode::ApiKey
+                || matches!(f.ptype, ProvType::DeepSeek | ProvType::OpenRouter));
+        let key = use_stored
+            .then(|| {
+                f.editing
+                    .as_deref()
+                    .and_then(|name| self.resolve(name))
+                    .and_then(|(_, key, _)| key)
+            })
+            .flatten()
+            .or_else(|| f.effective_key());
         match k.code {
             KeyCode::Esc => return None,
             KeyCode::Tab | KeyCode::Down => f.focus = (f.focus + 1) % n,
@@ -3194,13 +3463,33 @@ impl App {
             }
             KeyCode::Char(' ') if f.cur().is_none() => f.cycle(1),
             KeyCode::Enter => match f.cur_field() {
+                Field::ApiKeyPage => self.effects.push(Effect::OpenApiKeyPage),
+                Field::SignIn => {
+                    if self.running {
+                        f.status = "Stop the current run before signing in".into();
+                        return Some(Modal::Provider(f));
+                    }
+                    if let Some(provider) = f.ptype.login_provider() {
+                        let request = self.next_id();
+                        self.effects.push(Effect::SignIn { provider, request });
+                        self.form_stash = Some(f);
+                        return Some(Modal::Login(LoginDialog {
+                            request,
+                            provider,
+                            prompt: None,
+                            input: Buf::new(),
+                            submitted: false,
+                            status: "Preparing sign-in…".into(),
+                        }));
+                    }
+                }
                 Field::Test => {
                     let name = f.name.text();
                     if !name.is_empty() {
                         self.status = "test sends one small live request".into();
                         self.effects.push(Effect::Probe {
-                            transport: if f.ptype == ProvType::Codex {
-                                config::Transport::CodexOauth
+                            transport: if f.kind().is_some() {
+                                f.transport()
                             } else {
                                 config::Transport::from_kind(
                                     f.editing
@@ -3213,7 +3502,7 @@ impl App {
                             name,
                             base_url: f.endpoint_url(),
                             model: f.model.text(),
-                            key: f.effective_key(),
+                            key: key.clone(),
                         });
                     }
                 }
@@ -3229,15 +3518,13 @@ impl App {
                             key_env,
                             key,
                             store,
-                            kind: if f.ptype == ProvType::Codex {
-                                Some("codex-oauth".into())
-                            } else {
+                            kind: f.kind().or_else(|| {
                                 f.editing
                                     .as_ref()
                                     .and_then(|name| self.profiles.get(name))
                                     .and_then(|p| p.kind.clone())
                                     .filter(|k| k != "codex-oauth")
-                            },
+                            }),
                         });
                         self.screen = Screen::Main;
                         return None;
@@ -3249,7 +3536,8 @@ impl App {
                     let request = self.next_id();
                     self.effects.push(Effect::FetchModels {
                         base_url: f.endpoint_url(),
-                        key: f.effective_key(),
+                        transport: f.transport(),
+                        key,
                         request,
                     });
                     self.form_stash = Some(f);
@@ -3365,6 +3653,10 @@ impl App {
                     self.set_role_profile(r, choice.clone());
                     self.effects.push(Effect::FetchModels {
                         base_url: base,
+                        transport: config::Transport::from_kind(
+                            self.profiles.get(&choice).and_then(|p| p.kind.as_deref()),
+                        )
+                        .unwrap_or_default(),
                         key,
                         request,
                     });

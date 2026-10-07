@@ -1148,11 +1148,12 @@ fn codex_form_saves_oauth_kind() {
     let repo = fixture_repo();
     let mut app = app_with_mock(&repo, 1);
     let f = ProvForm::new(ProvType::Codex);
-    // fields: Name, Model, Test, Save, Cancel — no BaseUrl/Auth/Key/Store
+    // Name, SignIn, Model, Test, Save, Cancel — no BaseUrl/Auth/Key/Store
     assert_eq!(
         f.fields(),
         vec![
             Field::Name,
+            Field::SignIn,
             Field::Model,
             Field::Test,
             Field::Save,
@@ -1161,7 +1162,7 @@ fn codex_form_saves_oauth_kind() {
     );
     assert_eq!(f.endpoint_url(), "codex://oauth");
     app.modal = Some(Modal::Provider(f));
-    for _ in 0..3 {
+    for _ in 0..4 {
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     }
     app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

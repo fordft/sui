@@ -9,15 +9,27 @@ use sui::{agent, config, context, journal, permission, provider, tools, web};
 enum Sub {
     /// Terminal UI (also the default when run bare on a terminal)
     Tui,
-    /// Sign in to OpenAI with your ChatGPT account (Codex OAuth).
-    /// Reuses an existing `codex login` session automatically; this writes
-    /// Sui's own token store so its refresh chain never collides with the
-    /// Codex CLI's.
+    /// Sign in to an account or configure Claude/local/custom API access.
+    #[command(alias = "login")]
     Auth {
+        /// claude, codex (default), gemini, copilot, ollama, or openai-compatible
+        provider: Option<String>,
+        /// Alternate spelling: sui login --provider claude
+        #[arg(long = "provider", conflicts_with = "provider")]
+        provider_name: Option<String>,
         /// Paste the callback URL yourself (headless/SSH — the browser's
         /// localhost is not this machine's localhost)
         #[arg(long)]
         manual: bool,
+        /// Base URL for Claude, Ollama, or a custom OpenAI-compatible endpoint
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Model ID; local/custom setup prompts when omitted on a terminal
+        #[arg(long)]
+        model: Option<String>,
+        /// Environment variable containing a Claude/local/custom API key
+        #[arg(long)]
+        key_env: Option<String>,
     },
     /// Export a recorded run's journals into a sanitized report (no API calls)
     Export {
@@ -81,6 +93,118 @@ struct Cli {
     prompt: Option<String>,
 }
 
+fn validate_setup_url(base: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        anyhow::bail!("use an HTTP(S) base URL without embedded credentials");
+    }
+    Ok(())
+}
+
+async fn setup_endpoint(
+    name: &str,
+    base: Option<&str>,
+    model: Option<&str>,
+    key_env: Option<&str>,
+) -> Result<()> {
+    use std::io::Write;
+    let ollama = name == "ollama";
+    let interactive = std::io::stdin().is_terminal();
+    let prompt = |label: &str| -> Result<String> {
+        if !interactive {
+            anyhow::bail!(
+                "{label} required; pass --base-url and --model for non-interactive setup"
+            );
+        }
+        print!("{label}> ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(line.trim().into())
+    };
+    let base: String = match base {
+        Some(base) => base.into(),
+        None if ollama => config::Transport::Ollama.default_url().into(),
+        None => prompt("Base URL")?,
+    };
+    validate_setup_url(&base)?;
+    let model: String = match model.filter(|m| !m.trim().is_empty()) {
+        Some(model) => model.into(),
+        None => {
+            if !interactive {
+                anyhow::bail!("--model is required for non-interactive endpoint setup");
+            }
+            let key = key_env.and_then(|name| std::env::var(name).ok());
+            match provider::list_models(&base, key.as_deref()).await {
+                Ok(models) => {
+                    for model in models.iter().take(50) {
+                        println!("  {}", model.id);
+                    }
+                }
+                Err(_) => println!("Model catalog unavailable; enter the exact model ID."),
+            }
+            prompt("Model ID")?
+        }
+    };
+    if model.is_empty() {
+        anyhow::bail!("model ID required");
+    }
+    let profile = if ollama { "ollama" } else { "custom" };
+    config::save_profile(
+        profile,
+        &base,
+        &model,
+        key_env,
+        None,
+        if ollama { Some("ollama") } else { None },
+    )?;
+    println!("Saved profile '{profile}'. Run: sui --profile {profile} \"your task\"");
+    Ok(())
+}
+
+async fn setup_claude(
+    base: Option<&str>,
+    model: Option<&str>,
+    key_env: Option<&str>,
+) -> Result<()> {
+    let base = base.unwrap_or(config::Transport::Anthropic.default_url());
+    validate_setup_url(base)?;
+    let env = key_env.unwrap_or("ANTHROPIC_API_KEY");
+    let in_env = std::env::var(env).ok().is_some_and(|s| !s.is_empty());
+    let key = if in_env {
+        None
+    } else {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("set {env} or use Settings to enter an Anthropic API key");
+        }
+        sui::auth::login::open_browser("https://platform.claude.com/settings/keys");
+        println!("Create an API key in Claude Console, then return here.");
+        Some(sui::auth::read_api_key()?)
+    };
+    let model = model
+        .map(str::to_string)
+        .or_else(|| {
+            config::profiles(None)
+                .ok()
+                .and_then(|p| p.get("claude").and_then(|p| p.model.clone()))
+        })
+        .unwrap_or_else(|| config::Transport::Anthropic.default_model());
+    config::save_profile(
+        "claude",
+        base,
+        &model,
+        Some(env),
+        key.as_deref(),
+        Some("anthropic"),
+    )?;
+    println!("Configured Claude's native API. Choose the claude profile in Settings or --profile claude.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -96,15 +220,54 @@ async fn main() -> Result<()> {
         )
         .await;
     }
-    if let Some(Sub::Auth { manual }) = &cli.sub {
-        let path = sui::codex::login(*manual).await?;
+    if let Some(Sub::Auth {
+        provider,
+        provider_name,
+        manual,
+        base_url,
+        model,
+        key_env,
+    }) = &cli.sub
+    {
+        let name = provider
+            .as_deref()
+            .or(provider_name.as_deref())
+            .unwrap_or("codex");
+        if model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            anyhow::bail!("--model must not be empty");
+        }
+        if matches!(name, "ollama" | "custom" | "openai-compatible") {
+            return setup_endpoint(
+                name,
+                base_url.as_deref(),
+                model.as_deref(),
+                key_env.as_deref(),
+            )
+            .await;
+        }
+        if name == "claude" {
+            return setup_claude(base_url.as_deref(), model.as_deref(), key_env.as_deref()).await;
+        }
+        if base_url.is_some() || key_env.is_some() {
+            anyhow::bail!("--base-url and --key-env apply to claude/ollama/openai-compatible; use Settings for Gemini API keys");
+        }
+        let provider = sui::auth::LoginProvider::parse(name)?;
+        let path = sui::auth::login::cli(provider, *manual).await?;
+        if let Some(model) = model {
+            config::save_profile(
+                provider.id(),
+                provider.transport().default_url(),
+                model,
+                None,
+                None,
+                Some(provider.kind()),
+            )?;
+        }
         println!("Signed in. Token store: {}", path.display());
         println!(
-            "The `codex` profile is now registered automatically — pick it \
-             in Settings → Solo/Orchestrator role, or pass \
-             --control-profile codex / --worker-profile codex to sui-mission.\n\
-             To override the default model, add [profiles.codex] model = \"…\" \
-             to ~/.config/sui/config.toml."
+            "Profile {} is available in Settings and --profile {}.",
+            provider.id(),
+            provider.id()
         );
         return Ok(());
     }
@@ -176,11 +339,17 @@ async fn main() -> Result<()> {
     if let Some(pname) = &profile_name {
         let p = config::resolve_profile(pname, cli.config.as_deref())
             .map_err(|e| anyhow::anyhow!("--profile {pname}: {e:#}"))?;
-        cfg.base_url = flag_base.clone().unwrap_or(p.base_url);
+        cfg.base_url = p
+            .transport
+            .resolve_url(flag_base.as_deref().or(Some(&p.base_url)));
         cfg.model = flag_model.clone().unwrap_or(p.model);
         cfg.image_input = p.image_input;
         cfg.transport = p.transport;
-        cfg.api_key = flag_key.or(p.api_key);
+        cfg.api_key = if p.transport.is_account() {
+            None
+        } else {
+            flag_key.or(p.api_key)
+        };
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
     if let Some(saved) = &saved {
@@ -207,8 +376,11 @@ async fn main() -> Result<()> {
         cfg.workspace.display(),
         cfg.run_dir.display()
     );
-    if cfg.api_key.is_none() && !cfg.base_url.starts_with("codex://") {
-        eprintln!("warning: no API key set (SUI_API_KEY / OPENAI_API_KEY)");
+    if cfg.api_key.is_none()
+        && !cfg.transport.is_account()
+        && cfg.transport != config::Transport::Ollama
+    {
+        eprintln!("warning: no API key set; configure this provider in Settings");
     }
 
     let mut journal = journal::Journal::open_named(&cfg.run_dir, "headless")?;

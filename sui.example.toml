@@ -4,7 +4,8 @@
 
 [provider]
 # Trusted GLOBAL/--config only: "chat-completions" (default),
-# "openai-responses" (standard Responses API), or "codex-oauth".
+# "openai-responses" (standard Responses API), "codex-oauth",
+# "anthropic", "gemini", "gemini-oauth", "copilot", or "ollama".
 # kind = "openai-responses"
 # Any OpenAI-compatible endpoint:
 #   OpenAI      https://api.openai.com/v1
@@ -23,7 +24,8 @@ model = "gpt-5"
 # Declare image input only for a model/provider that actually supports it.
 # Trusted GLOBAL/--config only; project sui.toml cannot enable image uploads.
 # Without it, UI text snapshots work and screenshots can be saved, but the
-# runtime reports visual review as unverified. Codex OAuth defaults true.
+# runtime reports visual review as unverified. Native Codex/Claude/Gemini
+# profiles default true; Copilot/Ollama/custom profiles need explicit opt-in.
 # image_input = true
 
 # Requested in the request body for providers that support cache accounting
@@ -97,6 +99,40 @@ bash_timeout_max_ms = 600000
 # [profiles.codex]
 # kind = "codex-oauth"
 # model = "gpt-5.5"
+
+# Native account profiles: sign in from Settings or run sui auth PROVIDER.
+# Sessions auto-register gemini/copilot; explicit profiles win.
+# Account endpoints are fixed; base_url/API keys/pricing do not override them.
+#
+# [profiles.gemini]
+# kind = "gemini-oauth"
+# model = "gemini-2.5-pro"
+# Work/paid Code Assist accounts may also need GOOGLE_CLOUD_PROJECT.
+#
+# [profiles.copilot]
+# kind = "copilot"
+# model = "gpt-4.1"  # choose an ID from your account's model catalog
+#
+# Native API-key access (API billing, separate from subscriptions):
+# Anthropic's developer guidance requires API keys for third-party products.
+# sui auth claude configures this profile from ANTHROPIC_API_KEY or hidden input.
+# [profiles.claude]
+# kind = "anthropic"
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-sonnet-4-6"
+# key_env = "ANTHROPIC_API_KEY"
+#
+# [profiles.gemini-api]
+# kind = "gemini"
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+# model = "gemini-2.5-pro"
+# key_env = "GEMINI_API_KEY"
+#
+# [profiles.ollama]
+# kind = "ollama"
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "your-installed-model"
+# No key needed by default; key_env/api_key remain available for protected servers.
 
 # Mission roles use native [profiles.<name>] entries. Legacy [agents]
 # tables and acp: UI roles are unsupported; select native profile names.
