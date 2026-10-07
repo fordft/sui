@@ -184,8 +184,14 @@ pixel-art slime blinks, hops, follows your typing with its eyes, naps when
 you leave it alone, and squishes when you click it; a short splash plays at
 launch (any key skips it). While a task runs, the composer border flows,
 status text shimmers, and a companion slime keeps you company under short
-transcripts; a successful run ends with a burst of bubbles. Empty Tasks,
-Changes, and Usage views get a napping slime. Everything here is
+transcripts; a successful run ends with a burst of bubbles. Once a
+conversation is under way, a small slime lives in a lane just above the
+composer: it runs back and forth while a task works, hops when it succeeds,
+slumps when it fails, bounces and asks `?` when it needs your approval, and
+naps when you leave it alone. The lane is reserved rows, so the slime never
+covers transcript text; it costs 2–3 transcript rows on terminals at least 26
+rows tall and does not appear on shorter ones. Click it to poke it. Empty
+Tasks, Changes, and Usage views get a napping slime. Everything here is
 presentation: it never reaches model requests, journals, or exports.
 
 - Pixel art needs a truecolor terminal (`COLORTERM=truecolor`). With

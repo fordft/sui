@@ -76,6 +76,10 @@ pub fn pixel_ok(theme: Theme) -> bool {
     super::gfx::rgb(theme.background).is_some() && truecolor_terminal()
 }
 
+/// How long a finished run keeps the slime cheering or fretting.
+pub const HAPPY_MS: u64 = 6_000;
+pub const OOPS_MS: u64 = 12_000;
+
 pub fn mood(app: &App) -> Mood {
     let (a, now) = (&app.anim, now_ms());
     if matches!(app.modal, Some(super::app::Modal::Permission { .. }))
@@ -84,10 +88,9 @@ pub fn mood(app: &App) -> Mood {
         Mood::Ask
     } else if app.running {
         Mood::Think
-    } else if let Some(ok) = a
-        .done
-        .and_then(|(t, ok)| (now.saturating_sub(t) < if ok { 6_000 } else { 12_000 }).then_some(ok))
-    {
+    } else if let Some(ok) = a.done.and_then(|(t, ok)| {
+        (now.saturating_sub(t) < if ok { HAPPY_MS } else { OOPS_MS }).then_some(ok)
+    }) {
         if ok {
             Mood::Happy
         } else {
@@ -100,13 +103,14 @@ pub fn mood(app: &App) -> Mood {
     }
 }
 
+/// No conversation yet: the chat tab shows the home screen instead of a transcript.
+pub fn empty_chat(app: &App) -> bool {
+    app.groups.len() == 1 && app.groups[0].items.is_empty() && !app.running
+}
+
 /// True when the home screen mascot is on screen.
 pub fn is_home(app: &App) -> bool {
-    app.tab == Tab::Chat
-        && app.groups.len() == 1
-        && app.groups[0].items.is_empty()
-        && !app.running
-        && app.modal.is_none()
+    app.tab == Tab::Chat && empty_chat(app) && app.modal.is_none()
 }
 
 /// Compact face for the header bar.

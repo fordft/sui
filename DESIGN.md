@@ -533,7 +533,7 @@ prefixes are unchanged).
   gel shading, face, mood props), the glossy wordmark, and ambient bubbles;
   `fx` holds `Anim`, the motion policy, and screen effects (gel backdrop,
   flowing border, shimmer, confetti, dialog fade); `slime` holds moods,
-  copy, and the clock. Invariants: (1) a frame is a pure function of
+  copy, and the clock; `runner` is the lane slime (below). Invariants: (1) a frame is a pure function of
   `(App, clock)` — `draw` only reads `App.anim`, whose timestamps are
   advanced by `fx::observe` from the event loop, and `slime::freeze_clock`
   pins the clock for tests and screenshots; (2) essential text is never
@@ -547,7 +547,23 @@ prefixes are unchanged).
   in a few discrete poses — an idle screen repaints a handful of cells per
   frame rather than the whole hero. Full motion draws at 20 fps ambient and
   30 fps while something reacts; `calm` draws at ~8 fps.
-- **Layout**: `tui::layout::regions` owns header, content, sidebar,
+- **Lane slime**: the corner companion only fits while the transcript is
+  short, so once a conversation exists the layout reserves a lane of 3 rows
+  (terminals 26–33 rows tall) or 4 rows (34+) directly above the composer,
+  taking the blank gutter plus 2–3 content rows. The lane is geometry, not an
+  overlay: transcript rows end above it and nothing but the slime and one mood
+  glyph (`?` `!` `*` `z`, only into blank cells) is drawn there, so the slime
+  can never cover text. No lane without pixel art, below 50 columns, on the
+  home screen, or off the chat tab. `runner` draws a small gel slime with
+  pixel-exact face details; while a task is working (`Mood::Think`) it hops
+  back and forth along the lane, otherwise it parks where the last run left
+  it. The only state is `Anim.track`, advanced by `fx::observe` on run
+  start/stop edges (the slime resumes from its parking spot); position and
+  pose are otherwise pure functions of the clock. `runner::lively` asks for
+  frames during the cheer and for the single redraw that ends a mood or starts
+  the nap, so an idle screen stays idle. The slime is a poke target
+  (`Hit::Mascot`).
+- **Layout**: `tui::layout::regions` owns header, content, sidebar, lane,
   composer, metadata, and footer geometry. Drawing and resize/input
   anchoring share it. Chat has an unboxed transcript; the composer grows
   from one to six text rows and scrolls internally. `Buf::view` shares

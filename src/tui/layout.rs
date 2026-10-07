@@ -9,10 +9,30 @@ pub struct Regions {
     pub header: Rect,
     pub content: Rect,
     pub sidebar: Option<Rect>,
+    /// Runway for the lane slime, directly above the composer.
+    pub lane: Option<Rect>,
     pub composer: Rect,
     pub metadata: Rect,
     pub footer: Rect,
     pub input: InputView,
+}
+
+/// Terminal rows of the lane the slime runs along: 0 (none) once there is no
+/// transcript, where the terminal is too small to spare the rows, or where
+/// pixel art cannot be drawn. Tall terminals get headroom for bigger hops.
+fn lane_rows(area: Rect, app: &App) -> u16 {
+    if app.tab != Tab::Chat
+        || area.width < 50
+        || super::slime::empty_chat(app)
+        || !super::slime::pixel_ok(app.theme())
+    {
+        return 0;
+    }
+    match area.height {
+        34.. => 4,
+        26..=33 => 3,
+        _ => 0,
+    }
 }
 
 pub fn regions(area: Rect, app: &App) -> Regions {
@@ -41,13 +61,19 @@ pub fn regions(area: Rect, app: &App) -> Regions {
             Constraint::Length(if side { 31 } else { 0 }),
         ])
         .split(rows[1]);
-    let content = inset(body[0], 1, 1);
+    let mut content = inset(body[0], 1, 1);
     let composer = Rect::new(
         rows[2].x + u16::from(rows[2].width > 0),
         rows[2].y,
         width.saturating_sub(2),
         rows[2].height,
     );
+    // The lane takes the blank gutter above the composer plus the rows it
+    // needs on top of that, so the transcript never shares a row with it.
+    let lane = Some(lane_rows(area, app)).filter(|&n| n > 0).map(|n| {
+        content.height = content.height.saturating_sub(n - 1);
+        Rect::new(composer.x, composer.y - n, composer.width, n)
+    });
     Regions {
         header: rows[0],
         content,
@@ -55,6 +81,7 @@ pub fn regions(area: Rect, app: &App) -> Regions {
             let r = inset(body[1], 0, 1);
             Rect::new(r.x, r.y, r.width.saturating_sub(1), r.height)
         }),
+        lane,
         composer,
         metadata: Rect::new(rows[3].x, rows[3].y, width, rows[3].height),
         footer: rows[4],

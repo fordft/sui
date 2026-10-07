@@ -9,9 +9,9 @@ use super::slime::Mood;
 /// Seconds into the splash when the first drop hits the ground.
 pub const BOOT_LAND: f32 = 0.62;
 
-const WHITE: Rgb = [246.0, 250.0, 255.0];
-const INK: Rgb = [8.0, 16.0, 44.0];
-const BLUSH: Rgb = [255.0, 130.0, 178.0];
+pub(super) const WHITE: Rgb = [246.0, 250.0, 255.0];
+pub(super) const INK: Rgb = [8.0, 16.0, 44.0];
+pub(super) const BLUSH: Rgb = [255.0, 130.0, 178.0];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Scene {
@@ -28,14 +28,14 @@ pub struct Scene {
     pub gaze: (f32, f32),
 }
 
-struct Pal {
-    light: Rgb,
-    body: Rgb,
-    deep: Rgb,
-    rim: Rgb,
+pub(super) struct Pal {
+    pub(super) light: Rgb,
+    pub(super) body: Rgb,
+    pub(super) deep: Rgb,
+    pub(super) rim: Rgb,
 }
 
-fn palette(m: Mood) -> Pal {
+pub(super) fn palette(m: Mood) -> Pal {
     match m {
         Mood::Think => Pal {
             light: [186.0, 240.0, 255.0],
@@ -179,7 +179,7 @@ fn pose(s: &Scene) -> Pose {
 }
 
 /// 0..1 eyelid closure: a blink every few seconds, sometimes doubled.
-fn blink(t: f32) -> f32 {
+pub(super) fn blink(t: f32) -> f32 {
     let n = (t / 3.3).floor();
     let start = n * 3.3 + 0.9 + 1.6 * noise(n as u32 + 7);
     let k = t - start;

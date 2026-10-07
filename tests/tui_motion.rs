@@ -1,15 +1,16 @@
 //! Motion, pixel-art and effect behaviour of the slime TUI. The animation
 //! clock is process-global, so every test pins it under one lock.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::{backend::TestBackend, style::Color, Terminal};
+use ratatui::{backend::TestBackend, layout::Rect, style::Color, Terminal};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 use sui::config::{ProfileCfg, UiSettings};
 use sui::events::UiEvent;
-use sui::tui::app::{App, Effect, Hit, Modal, Tab};
+use sui::tui::app::{App, Effect, Hit, HitZone, Modal, Tab};
 use sui::tui::commands::Command;
 use sui::tui::draw;
 use sui::tui::fx::{self, Motion};
+use sui::tui::layout;
 use sui::tui::slime;
 use sui::tui::theme::Theme;
 
@@ -87,6 +88,68 @@ fn pixel_env() -> bool {
 fn submit(a: &mut App, task: &str) {
     a.input.set(task);
     a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+}
+
+/// Send a task and return its run id (the run stays "running").
+fn start(a: &mut App, task: &str) -> u64 {
+    submit(a, task);
+    let Some(Effect::SendTask { run, .. }) = a.effects.pop() else {
+        panic!("no SendTask effect")
+    };
+    run
+}
+
+fn finish(a: &mut App, run: u64, outcome: &str) {
+    for ev in [
+        UiEvent::ReqStart {
+            run,
+            agent: "solo".into(),
+            req: 0,
+        },
+        UiEvent::Delta {
+            run,
+            agent: "solo".into(),
+            req: 0,
+            text: format!("reply {run}: the slime squishes, springs and lands.\nA second line."),
+        },
+        UiEvent::ReqDone {
+            run,
+            agent: "solo".into(),
+            req: 0,
+            ms: 5,
+            ok: true,
+            reasoning: false,
+        },
+        UiEvent::RunDone {
+            run,
+            outcome: outcome.into(),
+            accepted_sha: None,
+        },
+    ] {
+        a.apply_event(ev);
+    }
+}
+
+/// A transcript long enough that no spare room is left for the corner pet.
+fn long_chat() -> App {
+    let mut a = app();
+    for i in 0..8 {
+        let run = start(&mut a, &format!("question number {i}: how does it hop?"));
+        finish(&mut a, run, "done");
+    }
+    a
+}
+
+fn lane_of(a: &App, w: u16, h: u16) -> Option<Rect> {
+    layout::regions(Rect::new(0, 0, w, h), a).lane
+}
+
+fn runner_zone(a: &App) -> Option<HitZone> {
+    a.hits
+        .borrow()
+        .iter()
+        .find(|z| z.hit == Hit::Mascot)
+        .copied()
 }
 
 #[test]
@@ -315,7 +378,27 @@ fn frame_pacing_follows_motion_and_activity() {
     assert_eq!(fx::frame_ms(&a, 100), None, "busy-free chat is idle");
     a.anim.done = Some((100, true));
     assert_eq!(fx::frame_ms(&a, 200), Some(33), "confetti needs frames");
-    assert_eq!(fx::frame_ms(&a, 100 + fx::CONFETTI_MS + 10), None);
+    assert_eq!(
+        fx::frame_ms(&a, 100 + fx::CONFETTI_MS + 10),
+        Some(50),
+        "the lane slime keeps cheering after the confetti"
+    );
+    assert_eq!(
+        fx::frame_ms(&a, 100 + slime::HAPPY_MS + 1_000),
+        None,
+        "and the screen settles once the cheer is over"
+    );
+    a.anim.done = Some((100, false));
+    assert_eq!(fx::frame_ms(&a, 5_000), None, "fretting is a still pose");
+    assert_eq!(
+        fx::frame_ms(&a, 100 + slime::OOPS_MS + 100),
+        Some(50),
+        "one last frame wipes the mood away"
+    );
+    a.anim.done = None;
+    let nap = a.anim.active + fx::SLEEP_MS + 100;
+    assert_eq!(fx::frame_ms(&a, nap), Some(50), "a frame lets it doze off");
+    assert_eq!(fx::frame_ms(&a, nap + 5_000), None);
     slime::freeze_clock(None);
 }
 
@@ -374,7 +457,7 @@ fn confetti_celebrates_success_only() {
         pixels_in_rows(&w, 5..15) > 5,
         "confetti flies through the upper transcript"
     );
-    assert_eq!(pixels_in_rows(&l, 5..15), 0, "failure gets no party");
+    assert_eq!(pixels_in_rows(&l, 5..13), 0, "failure gets no party");
     assert!(text(&w).contains("Run ended · done") || text(&w).contains("all done"));
     slime::freeze_clock(None);
 }
@@ -464,6 +547,283 @@ fn empty_tabs_get_a_napping_slime() {
         a.tab = tab;
         let t = frame(&a, 100, 30);
         assert!(pixels(&t) > 30, "{tab:?} shows a sleeper");
+    }
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn a_long_chat_keeps_a_runner_in_its_own_lane() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    start(&mut a, "now do something long");
+    fx::observe(&mut a, 30_000);
+    for (w, h) in [(60, 26), (80, 30), (100, 34), (150, 50)] {
+        let t = frame(&a, w, h);
+        let r = layout::regions(Rect::new(0, 0, w, h), &a);
+        let lane = r.lane.expect("lane");
+        assert!(
+            r.content.bottom() <= lane.y,
+            "{w}x{h}: transcript ends above the lane"
+        );
+        assert_eq!(
+            lane.bottom(),
+            r.composer.y,
+            "{w}x{h}: the lane sits on the composer"
+        );
+        assert!(text(&t).contains("now do something long"), "{w}x{h}");
+        let (buf, rows) = (t.backend().buffer(), lane.y..lane.bottom());
+        assert!(
+            pixels_in_rows(&t, rows.clone()) > 10,
+            "{w}x{h}: the slime is in its lane"
+        );
+        assert_eq!(
+            pixels_in_rows(&t, r.content.y..r.content.bottom()),
+            0,
+            "{w}x{h}: no pixels over the transcript"
+        );
+        for y in rows {
+            for x in 0..w {
+                let c = buf[(x, y)].symbol();
+                assert!(
+                    c == "▀" || c.trim().is_empty() || "?!*z".contains(c),
+                    "{w}x{h}: lane cell ({x},{y}) holds {c:?}"
+                );
+            }
+        }
+        let z = runner_zone(&a).expect("poke target");
+        assert!(
+            z.x >= lane.x && z.x + z.w <= lane.right() && z.y == lane.y && z.h == lane.height,
+            "{w}x{h}: {z:?} not inside {lane:?}"
+        );
+    }
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn the_runner_runs_both_ways_and_stays_in_the_lane() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    start(&mut a, "go");
+    fx::observe(&mut a, 30_000);
+    let lane = lane_of(&a, 100, 34).expect("lane");
+    let (mut xs, mut left, mut right) = (vec![], false, false);
+    for ms in (30_000..42_000).step_by(100) {
+        slime::freeze_clock(Some(ms));
+        frame(&a, 100, 34);
+        let z = runner_zone(&a).expect("runner");
+        assert!(z.x >= lane.x && z.x + z.w <= lane.right());
+        let x = z.x as i32 + z.w as i32 / 2;
+        if let Some(&p) = xs.last() {
+            left |= x < p;
+            right |= x > p;
+        }
+        xs.push(x);
+    }
+    let (lo, hi) = (xs.iter().min().unwrap(), xs.iter().max().unwrap());
+    assert!(hi - lo > 60, "it crosses most of the lane: {lo}..{hi}");
+    assert!(left && right, "and turns around at the ends");
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn the_runner_parks_where_the_run_ended() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    let run = start(&mut a, "go");
+    fx::observe(&mut a, 30_000);
+    slime::freeze_clock(Some(34_100));
+    finish(&mut a, run, "done");
+    fx::observe(&mut a, 34_100);
+    slime::freeze_clock(Some(34_200));
+    frame(&a, 100, 34);
+    let cheering = runner_zone(&a).unwrap();
+    let start_x = lane_of(&a, 100, 34).unwrap().right();
+    assert!(
+        cheering.x + cheering.w < start_x - 8,
+        "it ran away from the start"
+    );
+    slime::freeze_clock(Some(80_000));
+    frame(&a, 100, 34);
+    let napping = runner_zone(&a).unwrap();
+    assert_eq!(
+        (napping.x, napping.w),
+        (cheering.x, cheering.w),
+        "it rests in place"
+    );
+    slime::freeze_clock(Some(80_500));
+    start(&mut a, "again");
+    fx::observe(&mut a, 80_500);
+    frame(&a, 100, 34);
+    let resumed = runner_zone(&a).unwrap();
+    assert!(
+        resumed.x.abs_diff(napping.x) <= 2,
+        "the next run resumes from the same spot"
+    );
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn the_lane_only_exists_where_it_fits() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    for (w, h, rows) in [
+        (100, 25, 0),
+        (49, 40, 0),
+        (100, 26, 3),
+        (100, 33, 3),
+        (100, 34, 4),
+        (100, 60, 4),
+    ] {
+        let lane = lane_of(&a, w, h);
+        assert_eq!(lane.map_or(0, |l| l.height), rows, "{w}x{h}");
+        if lane.is_none() {
+            let t = frame(&a, w, h);
+            assert!(runner_zone(&a).is_none(), "{w}x{h} has no runner");
+            assert_eq!(pixels(&t), 0, "{w}x{h}");
+        }
+    }
+    let fresh = app();
+    assert!(
+        lane_of(&fresh, 100, 40).is_none(),
+        "the home screen has its own hero"
+    );
+    for tab in [Tab::Tasks, Tab::Changes, Tab::Usage, Tab::Settings] {
+        a.tab = tab;
+        assert!(lane_of(&a, 100, 40).is_none(), "{tab:?}");
+    }
+    a.tab = Tab::Chat;
+    a.ui.theme = Some("terminal".into());
+    assert!(lane_of(&a, 100, 40).is_none(), "no pixel art, no lane");
+    let rows_before = layout::regions(Rect::new(0, 0, 100, 40), &a).content.height;
+    a.ui.theme = None;
+    let rows_after = layout::regions(Rect::new(0, 0, 100, 40), &a).content.height;
+    assert_eq!(
+        rows_before - rows_after,
+        3,
+        "a 4-row lane costs 3 transcript rows"
+    );
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn the_runner_stands_still_when_motion_is_off() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    a.anim.motion = Motion::Off;
+    let run = start(&mut a, "go");
+    fx::observe(&mut a, 30_000);
+    let first = frame(&a, 100, 34).backend().buffer().clone();
+    slime::freeze_clock(Some(37_000));
+    let later = frame(&a, 100, 34).backend().buffer().clone();
+    assert_eq!(first, later, "still while running");
+    assert!(pixels(&frame(&a, 100, 34)) > 10, "but still there");
+    slime::freeze_clock(Some(37_100));
+    finish(&mut a, run, "done");
+    fx::observe(&mut a, 37_100);
+    let calm = frame(&a, 100, 34).backend().buffer().clone();
+    slime::freeze_clock(Some(41_000));
+    assert_eq!(calm, frame(&a, 100, 34).backend().buffer().clone());
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn clicking_the_runner_pokes_it_and_moods_reach_the_lane() {
+    if !pixel_env() {
+        return;
+    }
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    frame(&a, 100, 34);
+    let z = runner_zone(&a).expect("runner");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        a.mouse(MouseEvent {
+            kind,
+            column: z.x + z.w / 2,
+            row: z.y + z.h / 2,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+    assert_eq!(a.anim.poke, Some(30_000));
+    let lane = lane_of(&a, 100, 34).unwrap();
+    let at = |a: &App| {
+        let t = frame(a, 100, 34);
+        let buf = t.backend().buffer().clone();
+        let mut ch = String::new();
+        for y in lane.y..lane.bottom() {
+            for x in lane.x..lane.right() {
+                let c = buf[(x, y)].symbol();
+                if "?!*z".contains(c) && !c.trim().is_empty() {
+                    ch.push_str(c);
+                }
+            }
+        }
+        ch
+    };
+    let mut ok = long_chat();
+    let run = start(&mut ok, "go");
+    fx::observe(&mut ok, 30_000);
+    slime::freeze_clock(Some(31_000));
+    finish(&mut ok, run, "done");
+    fx::observe(&mut ok, 31_000);
+    assert_eq!(at(&ok), "*", "success sparkles");
+    let mut bad = long_chat();
+    let run = start(&mut bad, "go");
+    fx::observe(&mut bad, 31_000);
+    finish(&mut bad, run, "error: boom");
+    fx::observe(&mut bad, 31_000);
+    assert_eq!(at(&bad), "!", "failure frets");
+    slime::freeze_clock(Some(31_000 + fx::SLEEP_MS + 5_000));
+    let mut idle = long_chat();
+    idle.anim.active = 31_000;
+    assert_eq!(at(&idle), "z", "it naps when left alone");
+    slime::freeze_clock(None);
+}
+
+#[test]
+fn the_lane_survives_every_size_and_mood() {
+    let _g = pin(30_000);
+    let mut a = long_chat();
+    for (n, outcome) in ["done", "error: boom"].into_iter().enumerate() {
+        let base = 30_000 + 10_000 * n as u64;
+        slime::freeze_clock(Some(base));
+        let run = start(&mut a, "go");
+        fx::observe(&mut a, base);
+        for state in 0..3 {
+            match state {
+                0 => {}
+                1 => finish(&mut a, run, outcome),
+                _ => a.modal = Some(Modal::Help),
+            }
+            slime::freeze_clock(Some(base + state));
+            fx::observe(&mut a, base + state);
+            for &w in &[1u16, 20, 49, 50, 51, 80, 110, 111, 160] {
+                for &h in &[1u16, 6, 12, 25, 26, 27, 33, 34, 35, 70] {
+                    for motion in [Motion::Full, Motion::Calm, Motion::Off] {
+                        a.anim.motion = motion;
+                        frame(&a, w, h);
+                    }
+                }
+            }
+        }
+        a.modal = None;
     }
     slime::freeze_clock(None);
 }

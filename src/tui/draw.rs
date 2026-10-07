@@ -136,7 +136,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     });
 
     match app.tab {
-        Tab::Chat => draw_chat(f, app, layout.content),
+        Tab::Chat => {
+            draw_chat(f, app, layout.content);
+            if let Some(lane) = layout.lane {
+                super::runner::draw(f, app, lane);
+            }
+        }
         Tab::Tasks => draw_tasks(f, app, layout.content),
         Tab::Changes => draw_changes(f, app, layout.content),
         Tab::Usage => draw_usage(f, app, layout.content),
@@ -622,7 +627,7 @@ fn draw_chat(f: &mut Frame, app: &App, a: Rect) {
     let (inner_w, inner_h) = (a.width as usize, a.height as usize);
     app.view_w.set(inner_w);
     app.view_h.set(inner_h);
-    if app.groups.len() == 1 && app.groups[0].items.is_empty() && !app.running {
+    if super::slime::empty_chat(app) {
         draw_home(f, app, a);
         return;
     }

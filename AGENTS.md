@@ -47,8 +47,10 @@ Integration binaries: `sui`, `sui-mission`, `sui-certify`.
 - Bounded output everywhere — truncate, never drop silently.
 - New provider transports thread through `ProfileCfg`/`Transport`,
   never as special cases in the agent loop.
-- TUI motion (`src/tui/{gfx,hero,fx,slime}.rs`) is presentation only:
+- TUI motion (`src/tui/{gfx,hero,fx,slime,runner}.rs`) is presentation only:
   `draw` stays a pure function of `(App, clock)` (pin it with
   `slime::freeze_clock` in tests), essential text never depends on
   animation state, and backgrounds stay constant along a row — the PTY
-  tests grep the byte stream, so per-cell gradients split words.
+  tests grep the byte stream, so per-cell gradients split words. The lane
+  slime (`runner.rs`) lives in rows the layout reserves (`Regions.lane`) —
+  never overlay a slime on transcript rows.

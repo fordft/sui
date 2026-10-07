@@ -11,6 +11,7 @@ pub mod fx;
 pub mod gfx;
 pub mod hero;
 pub mod layout;
+pub mod runner;
 pub mod slime;
 pub mod text;
 pub mod theme;

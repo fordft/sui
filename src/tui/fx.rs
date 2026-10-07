@@ -13,7 +13,8 @@ use std::hash::{Hash, Hasher};
 
 use super::app::App;
 use super::gfx::{color, mix, noise, rgb, smooth, Canvas};
-use super::slime::{is_home, lerp};
+use super::runner::{self, Track};
+use super::slime::{self, is_home, lerp, Mood};
 use super::theme::Theme;
 
 /// How much the interface is allowed to move.
@@ -92,6 +93,8 @@ pub struct Anim {
     pub done: Option<(u64, bool)>,
     /// When the open dialog appeared.
     pub modal: Option<u64>,
+    /// Where the lane slime parks and runs.
+    pub track: Track,
     seen_running: bool,
     seen_input: u64,
     seen_modal: bool,
@@ -109,6 +112,7 @@ impl Anim {
             poke: None,
             done: None,
             modal: None,
+            track: Track::default(),
             seen_running: false,
             seen_input: text_hash(""),
             seen_modal: false,
@@ -152,6 +156,7 @@ pub fn observe(app: &mut App, now: u64) {
         o if o.starts_with("error") => Some(false),
         _ => None,
     };
+    let thinking = slime::mood(app) == Mood::Think;
     let a = &mut app.anim;
     if input != a.seen_input {
         a.seen_input = input;
@@ -162,6 +167,7 @@ pub fn observe(app: &mut App, now: u64) {
         a.done = verdict.map(|ok| (now, ok));
     }
     a.seen_running = running;
+    a.track.advance(thinking, now, a.motion != Motion::Off);
     if modal != a.seen_modal {
         a.seen_modal = modal;
         a.modal = modal.then_some(now);
@@ -182,11 +188,12 @@ pub fn frame_ms(app: &App, now: u64) -> Option<u64> {
         || a.boot(now).is_some()
         || a.poke.is_some_and(|t| now.saturating_sub(t) < 1_500)
         || a.tap.is_some_and(|t| now.saturating_sub(t) < 600);
+    let lane = runner::lively(app, now);
     match a.motion {
         Motion::Off => app.running.then_some(250),
-        Motion::Calm => (app.running || is_home(app)).then_some(120),
+        Motion::Calm => (app.running || is_home(app) || lane).then_some(120),
         Motion::Full => {
-            (app.running || is_home(app) || fx_live).then_some(if hot { 33 } else { 50 })
+            (app.running || is_home(app) || fx_live || lane).then_some(if hot { 33 } else { 50 })
         }
     }
 }
