@@ -785,3 +785,7 @@ support explicit breakpoints or public API diagnostics.
 - codex-oauth rides your ChatGPT subscription — requests count against
   your Codex rate windows, and reuse of `~/.codex/auth.json` assumes the
   file-based store (keyring-stored credentials aren't readable).
+
+## License
+
+Sui is licensed under the [MIT License](LICENSE).
