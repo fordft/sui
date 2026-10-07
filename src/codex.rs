@@ -314,14 +314,11 @@ impl CodexAuth {
             }))
             .send()
             .await
-            .context("token refresh request")?;
+            .map_err(crate::provider::failure::Failure::transport)?;
         if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let text = resp.text().await.unwrap_or_default();
-            bail!(
-                "token refresh failed (http {status}): {}",
-                crate::provider::truncate(&text, 300)
-            );
+            return Err(crate::provider::failure::Failure::response(resp)
+                .await
+                .into());
         }
         let body: Value = resp.json().await.context("parse refresh response")?;
         let access = body["access_token"]
@@ -508,14 +505,14 @@ pub async fn stream_responses(
     if let Some(a) = &account_id {
         http = http.header("chatgpt-account-id", a);
     }
-    let resp = http.send().await.context("send codex request")?;
+    let resp = http
+        .send()
+        .await
+        .map_err(crate::provider::failure::Failure::transport)?;
     if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        bail!(
-            "codex http {status}: {}",
-            crate::provider::truncate(&text, 500)
-        );
+        return Err(crate::provider::failure::Failure::response(resp)
+            .await
+            .into());
     }
 
     crate::provider::responses::read(resp, start, on_delta, on_reasoning).await

@@ -411,6 +411,11 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 }
                 "task" => agent.timeline.push(tl(ts, "task", d.clone())),
                 "task_done" => agent.timeline.push(tl(ts, "task_done", d.clone())),
+                "provider_retry" | "runtime_observation" => {
+                    agent
+                        .timeline
+                        .push(tl(ts, e["type"].as_str().unwrap(), d.clone()))
+                }
                 // Historical ACP journals remain readable after backend removal.
                 "acp_model" => agent.timeline.push(tl(ts, "acp_model", d.clone())),
                 "journal_error" => agent.timeline.push(tl(ts, "journal_error", d.clone())),
@@ -474,6 +479,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                             "model": d["returned_model"].as_str().or(d["requested_model"].as_str()),
                             "finish_reason": d["finish_reason"],
                             "error_class": d["error_class"],
+                            "diagnostic": d["diagnostic"],
                             "usage": u,
                             "timing": d["timing"],
                             "request_fingerprint": d["request_fingerprint"],
@@ -584,6 +590,35 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
         total_complete += a.telemetry_complete;
         total.add(&a.usage);
     }
+    if total_complete < total_req {
+        ctx.limitations.push(format!(
+            "{} request(s) have incomplete or unreported usage; totals cover recorded buckets only",
+            total_req - total_complete
+        ));
+    }
+    let events: Vec<_> = agents.iter().flat_map(|a| a.timeline.iter()).collect();
+    let request_failures = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == "request"
+                && e["data"]["error_class"]
+                    .as_str()
+                    .is_some_and(|c| c != "cancelled")
+        })
+        .count();
+    let retries = events
+        .iter()
+        .filter(|e| e["kind"] == "provider_retry")
+        .count();
+    let task_failures = events
+        .iter()
+        .filter(|e| {
+            e["kind"] == "task_done"
+                && e["data"]["outcome"]
+                    .as_str()
+                    .is_some_and(|o| o.starts_with("error:"))
+        })
+        .count();
 
     // ── diff (opt-in) ───────────────────────────────────────────────
     let mut diff_sec: Option<Value> = None;
@@ -622,6 +657,7 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
         "os_arch": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         "mode": mode,
         "status": if o.running { "RUNNING — partial snapshot".to_string() } else { outcome.clone() },
+        "activity_summary": {"request_failures": request_failures, "automatic_retries": retries, "task_failures": task_failures},
         "workspace": workspace,
         "approval_mode": approval,
         "started_unix_ms": started,
@@ -899,6 +935,15 @@ fn render_md(r: &Value) -> String {
     if let Some(t) = r["last_event_unix_ms"].as_u64() {
         m.push_str(&format!("- **Last event:** {} (unix ms)\n", t));
     }
+    m.push_str(&format!(
+        "- **Request failures:** {} · **Automatic retries:** {} · **Task failures:** {}\n",
+        r["activity_summary"]["request_failures"],
+        r["activity_summary"]["automatic_retries"],
+        r["activity_summary"]["task_failures"]
+    ));
+    m.push_str(
+        "\nStatus reflects the latest recorded outcome; it is not verification of delivery.\n",
+    );
     m.push('\n');
 
     m.push_str("## Task and agents\n\n");
@@ -1187,16 +1232,30 @@ fn render_event(m: &mut String, e: &Value) {
         }
         "request" => {
             m.push_str(&format!(
-                "<sub>req#{} model={} finish={} in={} cached={} out={}</sub>\n\n",
+                "<sub>req#{} model={} finish={} in={} cached={} out={}{}</sub>\n\n",
                 d["request_id"].as_u64().unwrap_or(0),
                 md_str(&d["model"]),
                 md_str(&d["finish_reason"]),
                 num_or_unknown(&d["usage"]["input_tokens"]),
                 num_or_unknown(&d["usage"]["cache_read_tokens"]),
                 num_or_unknown(&d["usage"]["output_tokens"]),
+                d["diagnostic"]
+                    .as_str()
+                    .map(|s| format!(" error={}", cap(s, 400)))
+                    .or_else(|| d["error_class"]
+                        .as_str()
+                        .map(|s| format!(" error={}", cap(s, 100))))
+                    .unwrap_or_default(),
             ));
         }
-        "warn" | "budget_exceeded" | "interrupted" | "context_checkpoint" | "compaction_failed" => {
+        "runtime_observation" => {
+            m.push_str(&format!(
+                "**Runtime observation:**\n\n{}\n\n",
+                cap(d["content"].as_str().unwrap_or(""), 1500)
+            ));
+        }
+        "warn" | "budget_exceeded" | "interrupted" | "context_checkpoint" | "compaction_failed"
+        | "provider_retry" => {
             m.push_str(&format!(
                 "**{}**: {}\n\n",
                 kind,

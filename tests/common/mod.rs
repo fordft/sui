@@ -73,6 +73,15 @@ pub fn serve<F>(handler: F) -> u16
 where
     F: Fn(&[u8], &[Value]) -> String + Send + 'static,
 {
+    serve_http(move |body, messages| (200, handler(body, messages)))
+}
+
+/// Same native wire fixture with selectable HTTP status for recovery tests.
+/// Status 0 drops the connection before sending any headers.
+pub fn serve_http<F>(handler: F) -> u16
+where
+    F: Fn(&[u8], &[Value]) -> (u16, String) + Send + 'static,
+{
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -103,9 +112,12 @@ where
             }
             let req: Value = serde_json::from_slice(&body).unwrap_or_default();
             let msgs = req["messages"].as_array().cloned().unwrap_or_default();
-            let out = handler(&body, &msgs);
+            let (status, out) = handler(&body, &msgs);
+            if status == 0 {
+                continue;
+            }
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                "HTTP/1.1 {status} Fixture\r\nContent-Type: text/event-stream\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 out.len(),
                 out

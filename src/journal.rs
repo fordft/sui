@@ -19,6 +19,7 @@ type Notice = Box<dyn Fn(&str) + Send>;
 /// perturb the repository epoch fingerprint.
 pub struct Journal {
     f: File,
+    path: PathBuf,
     replay_dir: PathBuf,
     /// Latched on the first persistence failure — the journal is the
     /// run's evidence trail, so once writes break we stop half-writing
@@ -55,6 +56,7 @@ impl Journal {
         let f = o.open(run_dir.join(format!("{name}.jsonl")))?;
         Ok(Self {
             f,
+            path: run_dir.join(format!("{name}.jsonl")),
             replay_dir: run_dir.to_path_buf(),
             failed: false,
             notice: None,
@@ -113,6 +115,14 @@ impl Journal {
     /// Path of a named journal file (for replay/reconstruction).
     pub fn path_of(run_dir: &Path, name: &str) -> PathBuf {
         run_dir.join(format!("{name}.jsonl"))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn run_dir(&self) -> &Path {
+        &self.replay_dir
     }
 
     /// Append one event. Returns () — callers can't meaningfully
@@ -243,7 +253,7 @@ pub(crate) fn replay_events<'a>(
                 history = serde_json::from_value(data["messages"].clone())
                     .context("invalid context checkpoint")?;
             }
-            Some("user") => history.push(Message::User {
+            Some("user" | "runtime_observation") => history.push(Message::User {
                 content: data["content"]
                     .as_str()
                     .context("invalid user event")?
@@ -317,6 +327,7 @@ impl Journal {
     fn for_test(f: File) -> Self {
         Self {
             f,
+            path: PathBuf::new(),
             replay_dir: PathBuf::new(),
             failed: false,
             notice: None,

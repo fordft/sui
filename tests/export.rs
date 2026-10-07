@@ -325,3 +325,60 @@ fn headless_journal_exports_session() {
     let p = run_export(&o).unwrap();
     assert!(p.to_string_lossy().contains("run-h1"), "{p:?}");
 }
+
+#[test]
+fn recovered_failures_and_unknown_usage_remain_visible_in_reports() {
+    let root = fixture_dir("recovered");
+    let runs = root.join("runs");
+    let run = runs.join("recovered-run");
+    std::fs::create_dir_all(&run).unwrap();
+    write_journal(
+        &run,
+        "solo",
+        &[
+            jline("session", json!({"mode":"solo","workspace":"/tmp/proj"})),
+            jline(
+                "request",
+                json!({"request_id":0,"error_class":"stream_error",
+            "diagnostic":"provider stream_error: server_error","usage":null}),
+            ),
+            jline(
+                "provider_retry",
+                json!({"request_id":0,"attempt":1,"delay_ms":500}),
+            ),
+            jline(
+                "runtime_observation",
+                json!({"content":"The provider recovered; incomplete calls were discarded."}),
+            ),
+            jline("task_done", json!({"outcome":"error: earlier failure"})),
+            jline(
+                "request",
+                json!({"request_id":1,"finish_reason":"stop",
+            "usage":{"input_tokens":10,"cache_read_tokens":2,"output_tokens":1,"complete":true}}),
+            ),
+            jline("task_done", json!({"outcome":"done"})),
+        ],
+    );
+    let mut options = opts(&runs, &root.join("exports"), "recovered-run");
+    let report = std::fs::read_to_string(run_export(&options).unwrap()).unwrap();
+    assert!(report.contains("**Status:** done"));
+    assert!(report.contains("**Request failures:** 1"));
+    assert!(report.contains("**Automatic retries:** 1"));
+    assert!(report.contains("**Task failures:** 1"));
+    assert!(report.contains("error=provider stream_error: server_error"));
+    assert!(report.contains("**provider_retry**"));
+    assert!(report.contains("**Runtime observation:**"));
+    assert!(report.contains("incomplete or unreported usage"));
+    options.format = Format::Json;
+    let report: Value =
+        serde_json::from_str(&std::fs::read_to_string(run_export(&options).unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(report["activity_summary"]["request_failures"], 1);
+    assert_eq!(report["activity_summary"]["automatic_retries"], 1);
+    assert_eq!(report["usage"]["totals"]["input_tokens"], 10);
+    assert_eq!(
+        report["usage"]["telemetry"],
+        "1/2 requests reported complete usage"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

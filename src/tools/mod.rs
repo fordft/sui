@@ -3,6 +3,8 @@ pub mod code_context;
 pub mod code_intel;
 pub mod fs;
 pub mod inventory;
+pub mod patch;
+pub mod session_info;
 pub mod tool_output;
 pub mod ui;
 
@@ -149,6 +151,8 @@ pub fn schemas() -> Vec<Value> {
     schemas.push(code_intel::schema());
     schemas.push(code_context::schema());
     schemas.push(tool_output::schema());
+    schemas.push(patch::schema());
+    schemas.push(session_info::schema());
     schemas
 }
 
@@ -207,6 +211,7 @@ pub async fn execute(
     // Disk mutations invalidate the language process before execution. Failed
     // commands may also have changed files; never reuse their old observations.
     if matches!(name, "write_file" | "edit_file" | "bash")
+        || (name == "patch_files" && args["action"] == "apply")
         || (name == "terminal"
             && matches!(args["action"].as_str(), Some("start" | "type" | "press")))
     {
@@ -222,6 +227,16 @@ pub async fn execute(
                 "write_file" => fs::write_file(ctx, args)?,
                 _ => fs::edit_file(ctx, args)?,
             };
+            let kind = if text.starts_with("status: success") {
+                ExecKind::Success
+            } else {
+                ExecKind::Error
+            };
+            Ok(ExecOut::plain(text, kind))
+        }
+        "patch_files" => {
+            let _ = (cancel, obs);
+            let text = patch::execute(ctx, args);
             let kind = if text.starts_with("status: success") {
                 ExecKind::Success
             } else {

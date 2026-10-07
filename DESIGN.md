@@ -346,8 +346,10 @@ BELOW_MIN_PREFIX, UNKNOWN.
 - **Credentials:** bash children get an explicit env allowlist (no API keys,
   no unrelated secrets). Project `sui.toml` cannot inject `api_key` or
   define `[profiles]` — profiles live in user-owned config only.
-- **Bounded execution:** max_turns, per-request deadline, per-command
+- **Bounded execution:** max_turns, per-attempt request deadline, per-command
   timeout (process-group kill), context budget = est_tokens + reserve.
+  Transient provider recovery is cancellable and uses capped backoff; mission
+  task deadlines bound the full trajectory, including retries.
 - **Cancellation:** Ctrl-C aborts the in-flight request or, mid-tool, kills
   the process group via the same kill+reap path as timeout. Verified: no
   orphans.
@@ -608,6 +610,24 @@ task. Old journal events remain intact. Failed/interrupted summaries never
 execute tools or alter history. The summary is untrusted context, not contract
 proof. An already-oversized request cannot be safely compacted through that
 same full-context request and still hits the hard guard.
+
+Checkpoint context includes a separate bounded ledger of runtime tool
+dispositions/exit codes and provider failures. Model summaries cannot rewrite
+these facts or turn them into delivery proof. Resume rebuilds the ledger from
+the original events. Runtime observations use labeled, replayable tail messages;
+the latest real user task is retained independently of those messages.
+`session_info` has a frozen read-only schema and is executed by Agent, which owns
+the current identity, journal paths and ledger. It never discovers other runs.
+
+Provider failures carry typed retryability and bounded allowlisted diagnostics,
+not arbitrary HTTP bodies or error messages. The agent retries transient failures
+with capped exponential backoff until recovery/cancellation; retries retain the
+exact pending request and do not consume iteration limits or execute partial
+tool calls. Each attempt journals a distinct request and retry event. Failed
+request elapsed time is measured; unknown first-delta/usage fields remain null.
+Permanent failures append a runtime observation for the next turn. Context and
+iteration guards return an unfinished error, never successful completion. Mission
+task deadlines and all independent permission surfaces still apply.
 
 Opaque replay items stay in bounded 0600 content-addressed sidecars in the
 0700 run directory. Journals reference their hash/name; exports omit contents.

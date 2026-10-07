@@ -1,3 +1,4 @@
+pub(crate) mod failure;
 pub(crate) mod responses;
 
 use anyhow::{bail, Context, Result};
@@ -210,11 +211,9 @@ impl Provider {
                 if let Some(key) = api_key {
                     http = http.bearer_auth(key);
                 }
-                let response = http.send().await.context("send Responses request")?;
+                let response = http.send().await.map_err(failure::Failure::transport)?;
                 if !response.status().is_success() {
-                    let status = response.status();
-                    // Provider errors may echo credentials; avoid persisting their body.
-                    bail!("provider http {status}");
+                    return Err(failure::Failure::response(response).await.into());
                 }
                 return responses::read(response, start, on_delta, on_reasoning).await;
             }
@@ -236,15 +235,9 @@ impl Provider {
         if let Some(k) = &api_key {
             req = req.bearer_auth(k);
         }
-        let resp = req.send().await.context("send chat request")?;
+        let resp = req.send().await.map_err(failure::Failure::transport)?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!(
-                "provider http {}: {}",
-                status.as_u16(),
-                truncate(&text, 500)
-            );
+            return Err(failure::Failure::response(resp).await.into());
         }
 
         let mut stream = resp.bytes_stream();
@@ -280,8 +273,7 @@ impl Provider {
             // 200). `error` must be an object — some providers send an
             // explicit `"error": null` on normal chunks.
             if let Some(err) = ev.get("error").filter(|e| e.is_object()) {
-                let msg = err["message"].as_str().unwrap_or("unknown stream error");
-                bail!("provider stream error: {}", truncate(msg, 300));
+                return Err(failure::Failure::stream(err).into());
             }
             if let Some(m) = ev["model"].as_str() {
                 returned_model = Some(m.to_string());
@@ -337,7 +329,7 @@ impl Provider {
         };
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("stream read failed (interrupted)")?;
+            let chunk = chunk.map_err(failure::Failure::transport)?;
             buf.extend_from_slice(&chunk);
 
             // scan by index — drain once per chunk, no per-line alloc

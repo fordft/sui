@@ -414,6 +414,44 @@ Adding `code_context` changes the native tool/system signature. Start a new
 session after updating Sui; older sessions remain inspectable/exportable,
 and Resume requires their recorded signature.
 
+## Guarded multi-file patches
+
+`patch_files` lets a native agent preview and then apply exact replacements
+across existing UTF-8 workspace files. Preview is read-only; apply uses the
+**same ordered edits** and the returned `preview_id`:
+
+```json
+{"action":"preview","edits":[{"path":"src/lib.rs","old_str":"old text","new_str":"new text"}]}
+{"action":"apply","preview_id":"<ID from preview>","edits":[{"path":"src/lib.rs","old_str":"old text","new_str":"new text"}]}
+```
+
+Preview returns a bounded `-`/`+` replacement diff (not a complete unified
+file diff), file/edit counts, and an ID calculated from the edits and original
+file bytes. If the diff exceeds 12,000 bytes, split the patch; no apply ID is
+issued. Every old string must match **exactly once** at its step; multiple
+edits to one file run in order. Apply rejects changed files or edits and
+requires ordinary local mutation approval (preview does not). Read the source
+before editing and run tests after applying. New files still use `write_file`.
+
+The tool limits one patch to 20 replacements, 128 KiB of input text, 512 KiB
+per file and 2 MiB of total source. It refuses symlinks and non-regular files,
+stages output next to each target, preserves file permissions and attempts to
+restore earlier files if a later write fails. **Multi-file updates are not
+crash-atomic or protected against concurrent filesystem writers**; a power
+loss or failed rollback may leave a partial patch. On rollback failure the
+backup is retained at the path reported in the error for manual recovery.
+
+Adding `patch_files` changes the native tool/system signature. Start a new
+session after updating; older sessions remain inspectable/exportable and
+Resume requires their original signature.
+
+`session_info` is a read-only native tool for the current conversation: it
+returns the session/run IDs, workspace, journal path, export command, and
+bounded recorded tool/request activity. It reads no other sessions or
+credentials and grants no permissions. After Resume, it reports the new run's
+paths while retaining the conversation identity and recorded observations.
+Its schema also requires a new session after updating Sui.
+
 ## Native output compaction
 
 Sui's Rust Bash result renderer reduces recognized Cargo and Git diffstat output
@@ -631,6 +669,11 @@ journals with credentials redacted best-effort; missing data shows
 "Not recorded"/"Unknown", never invented. **Review before sharing** —
 reports contain project code. No API calls needed.
 
+Reports show request failures, automatic retries, and failed task outcomes even
+when a later turn succeeds. Status describes the latest recorded outcome;
+the declared completion state remains a claim. Missing usage is flagged and
+totals include only recorded buckets.
+
 ## Config files
 
 - **Global** `~/.config/sui/config.toml` — providers, profiles, trusted
@@ -692,6 +735,28 @@ executed. Failed or insufficient summaries preserve the old history; input
 already above the hard budget still stops. A summary provides context, not
 runtime verification or permission. Set `context_compaction = false` to retain
 the original stop-at-budget behavior.
+
+Each checkpoint also carries a bounded runtime record of actual tool
+dispositions, exit codes, command observations, and provider failures. Generated
+summary claims cannot override that record. Omitted older records are counted;
+the original journal preserves them. Runtime observations are evidence, not
+mission gates, permission grants, or proof that current code still passes.
+
+Transient provider failures (connection/timeouts, HTTP 408/429/5xx, retryable
+stream errors, or a stream ending without its terminal event) automatically
+retry the pending request. Backoff starts at 0.5 seconds and caps at 30 seconds;
+retries continue until recovery, Stop/Ctrl-C, or a mission task deadline. They
+do not consume `max_turns`, duplicate the user message, rerun earlier tool
+results, or execute incomplete tool calls. Each attempt has its own request ID
+and usage coverage; unreported usage stays unknown. The UI shows retry progress.
+
+Authentication, permission, invalid-request, quota and output-limit failures
+need attention rather than repeated identical requests. Their safe diagnostic
+is recorded for the next turn. HTTP status and recognized provider error codes
+are retained; arbitrary provider error payloads are excluded because they may
+echo credentials. Context/iteration exhaustion reports unfinished work rather
+than a successful task. Tool failures remain visible to the agent so it can
+diagnose, repair, and verify within the current permissions and limits.
 
 Opaque reasoning for journal replay lives in bounded, owner-only, hash-verified
 `replay-*.json` sidecars next to the journal. Sidecar contents are excluded from

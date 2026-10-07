@@ -31,10 +31,13 @@ model = "gpt-5"
 # prompt_cache_key = "sui"
 
 [agent]
-# Hard cap on tool-call iterations per user turn. Don't let the loop spiral.
+# Hard cap on model/tool-loop iterations per user turn (including compaction).
+# Provider retries do not consume it. Exhaustion reports unfinished work.
 max_turns = 60
 
-# Per-request deadline for the provider call.
+# Per-attempt deadline for the provider call. Transient failures automatically
+# retry the pending request with backoff (0.5s up to 30s) until recovery or Stop /
+# Ctrl-C; mission task deadlines still apply. Permanent faults need attention.
 request_timeout_ms = 300000
 
 # Conservative context guard (estimated tokens, chars/4). Above this the

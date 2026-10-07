@@ -363,7 +363,9 @@ impl SavedSession {
                         bail!("unmatched recorded tool result");
                     }
                 }
-                Some("user" | "context_checkpoint") if !pending.is_empty() => {
+                Some("user" | "runtime_observation" | "context_checkpoint")
+                    if !pending.is_empty() =>
+                {
                     bail!("session has unresolved tool calls")
                 }
                 Some("context_checkpoint") => {

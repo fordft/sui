@@ -1,7 +1,8 @@
 //! Shared stateless Responses streaming decoder; preserves opaque reasoning.
+use crate::provider::failure::Failure;
 use crate::provider::StreamOutcome;
 use crate::types::{FunctionCall, ToolCall, Usage};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -129,14 +130,11 @@ pub(crate) async fn read(
                 let why = ev["response"]["incomplete_details"]["reason"]
                     .as_str()
                     .unwrap_or("unknown");
-                let reason = match why {
-                    "max_output_tokens" | "content_filter" => why,
-                    _ => "unknown",
-                };
-                bail!("Responses response incomplete: {reason}");
+                return Err(Failure::incomplete(why).into());
             }
             "response.failed" | "error" => {
-                bail!("Responses stream error");
+                let error = ev.get("error").unwrap_or(&ev["response"]["error"]);
+                return Err(Failure::stream(error).into());
             }
             _ => {}
         }
@@ -145,7 +143,7 @@ pub(crate) async fn read(
 
     let mut terminal = false;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("codex stream read failed (interrupted)")?;
+        let chunk = chunk.map_err(Failure::transport)?;
         buf.extend_from_slice(&chunk);
         if buf.len() > 16 * 1024 * 1024 {
             bail!("Responses stream line exceeds 16 MiB");

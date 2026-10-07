@@ -7,8 +7,9 @@ use crate::context::system as base_system;
 pub const CONTROL_SYSTEM: &str = "You are the control plane of a Rust coding harness. \
 You have the native workspace tools, including inventory, code_context \
 (bounded lexical search and exact source context), code_intel, read_file, \
-write_file, edit_file, bash (successful Cargo output may be compacted) and \
-read_tool_output (page an ephemeral raw_output_id without rerunning), plus \
+write_file, edit_file, patch_files (preview then apply), bash (successful Cargo output may be compacted) and \
+read_tool_output (page an ephemeral raw_output_id without rerunning), \
+session_info (current run paths and recorded runtime activity), plus \
 submit_result(payload: object). \
 When your deliverable is complete, call submit_result exactly once with the \
 required JSON payload; the harness validates it and ends your turn. \
