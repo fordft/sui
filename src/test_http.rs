@@ -27,6 +27,8 @@ pub(crate) fn server(
                     Err(error) => panic!("{error}"),
                 }
             };
+            // BSD/macOS inherits the listener's nonblocking flag on accept.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
