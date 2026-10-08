@@ -547,7 +547,7 @@ fn save_own_store(id_token: &str, access: &str, refresh: &str) -> Result<PathBuf
         },
         "last_refresh": rfc3339_now(),
     });
-    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+    crate::auth::write_secret(&path, serde_json::to_string_pretty(&doc)?.as_bytes())?;
     Ok(path)
 }
 
@@ -555,6 +555,57 @@ struct Exchanged {
     id_token: String,
     access: String,
     refresh: String,
+}
+
+pub(crate) async fn complete_login(
+    client: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+) -> Result<PathBuf> {
+    let tokens = exchange_code(client, code, verifier).await?;
+    save_own_store(&tokens.id_token, &tokens.access, &tokens.refresh)
+}
+
+/// Account-scoped catalog instead of limiting authenticated users to presets.
+pub(crate) async fn list_models() -> Result<Vec<crate::provider::ModelInfo>> {
+    let auth = CodexAuth::discover()?;
+    let (token, account) = auth.access_token().await?;
+    let client = crate::auth::client()?;
+    let mut request = client
+        .get("https://chatgpt.com/backend-api/codex/models?client_version=0.153.0")
+        .bearer_auth(token)
+        .header("originator", "sui");
+    if let Some(account) = account {
+        request = request.header("chatgpt-account-id", account);
+    }
+    let body = crate::auth::json_response(
+        request
+            .send()
+            .await
+            .map_err(crate::provider::failure::Failure::transport)?,
+        "Codex model catalog",
+    )
+    .await?;
+    Ok(parse_models(&body))
+}
+fn parse_models(body: &Value) -> Vec<crate::provider::ModelInfo> {
+    let mut models: Vec<_> = body["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str().is_none_or(|v| v != "hidden"))
+        .filter_map(|m| {
+            Some(crate::provider::ModelInfo {
+                id: m["slug"].as_str()?.into(),
+                context_length: m["context_window"].as_u64(),
+                price_in: None,
+                price_out: None,
+                tools_claimed: None,
+            })
+        })
+        .collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models
 }
 
 async fn exchange_code(client: &reqwest::Client, code: &str, verifier: &str) -> Result<Exchanged> {
@@ -570,15 +621,7 @@ async fn exchange_code(client: &reqwest::Client, code: &str, verifier: &str) -> 
         .send()
         .await
         .context("code exchange request")?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        bail!(
-            "code exchange failed (http {status}): {}",
-            crate::provider::truncate(&text, 300)
-        );
-    }
-    let body: Value = resp.json().await.context("parse token response")?;
+    let body = crate::auth::json_response(resp, "Codex code exchange").await?;
     Ok(Exchanged {
         id_token: body["id_token"].as_str().context("no id_token")?.into(),
         access: body["access_token"]
@@ -736,6 +779,17 @@ fn wait_for_callback(expect_state: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn account_catalog_accepts_new_model_ids_without_inventing_usage_or_price() {
+        let models = parse_models(&json!({"models":[
+            {"slug":"future-codex","context_window":250000},
+            {"slug":"hidden-model","visibility":"hidden"},
+        ]}));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "future-codex");
+        assert_eq!(models[0].context_length, Some(250000));
+        assert!(models[0].price_in.is_none() && models[0].tools_claimed.is_none());
+    }
     use crate::types::FunctionCall;
     use crate::types::ToolCall;
 

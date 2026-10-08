@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
     if let Some(a) = &auditor {
         eprintln!("  auditor: native:{} → {}", a.name, a.model);
     }
-    let verified = control.api_key.is_some() && worker.api_key.is_some();
+    let verified = control.credentials_available() && worker.credentials_available();
     if !verified {
         eprintln!("  warning: credentials missing — report will be UNVERIFIED");
     }

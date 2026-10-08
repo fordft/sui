@@ -71,8 +71,53 @@ SUI_TAG=v0.4.2 sh -c "$(curl -LsSf \
 
 ## Model planes
 
-Sui speaks to models three ways. Pick per role — solo, orchestrator,
-worker, auditor can each use a different one.
+Choose a provider per role — solo, orchestrator, worker, and auditor can
+each use a different profile. Settings → "+ add provider" includes:
+
+| Provider | Connection |
+| --- | --- |
+| OpenAI / ChatGPT Codex | Browser sign-in; native Responses API |
+| GitHub Copilot | GitHub device sign-in; requires Copilot access |
+| Ollama | Local OpenAI-compatible server; no API key required |
+| Custom OpenAI-compatible | Your endpoint, with optional API key |
+| DeepSeek / OpenRouter | Existing API-key presets |
+
+For accounts, choose **Sign in** in the provider form. Sui opens a browser;
+Copilot shows a device code, and Codex waits for a local callback. Esc
+cancels sign-in. Choose a model, save the profile, and assign it to a role.
+
+The same setup works from the CLI:
+
+```bash
+sui auth codex
+sui auth copilot
+sui auth ollama --model your-installed-model
+sui auth openai-compatible --base-url http://localhost:8000/v1 --model your-model
+```
+
+The alias `sui login --provider copilot` also works. Bare `sui auth` keeps
+its existing Codex behavior. Use `--manual` on SSH/headless machines for
+Codex; Copilot's device flow already works across machines. Local or custom
+endpoints accept `--key-env YOUR_API_KEY_VAR` when authentication is needed.
+Ollama must be running and the chosen model must be installed.
+
+Model pickers fetch the provider's catalog, including the signed-in Codex
+and Copilot account catalogs. You can always type an exact model ID.
+Catalog entries describe provider claims; access and tool support still
+need a successful request/certification.
+
+Account tokens live in separate owner-only files under `~/.config/sui/`,
+refresh automatically, and stay out of profiles, journals, model messages,
+and exports. `SUI_HOME` relocates this directory and the global config.
+Copilot refreshes are serialized across workers and Sui processes.
+Subscription cost remains unknown; usage is shown only when the provider
+reports it. Provider login grants no web-tool or destructive-tool permissions.
+
+These native account integrations use the same provider protocols examined
+in [jcode](https://github.com/1jehuang/jcode); see
+[third-party notices](THIRD_PARTY_NOTICES.md). Account eligibility and upstream
+authentication/API changes can affect access. Real account login and inference
+remain unverified until exercised with your own account.
 
 ### OpenAI-compatible API profiles
 

@@ -518,7 +518,8 @@ mod tests {
         let parsed: Request = serde_json::from_value(req).unwrap();
         let prepared = prepare(&ctx, &parsed.edits).unwrap();
         let mut staged = stage(&prepared.files).unwrap();
-        let err = commit_staged(&prepared.files, &dir.path, &mut staged, |index, _| {
+        let root = ctx.workspace.canonicalize().unwrap();
+        let err = commit_staged(&prepared.files, &root, &mut staged, |index, _| {
             if index == 1 {
                 bail!("simulated rename failure");
             }

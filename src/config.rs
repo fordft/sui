@@ -12,6 +12,8 @@ pub enum Transport {
     ChatCompletions,
     OpenaiResponses,
     CodexOauth,
+    Copilot,
+    Ollama,
 }
 
 impl Transport {
@@ -20,7 +22,44 @@ impl Transport {
             None | Some("chat-completions") => Ok(Self::ChatCompletions),
             Some("openai-responses") => Ok(Self::OpenaiResponses),
             Some("codex-oauth") => Ok(Self::CodexOauth),
+            Some("copilot") => Ok(Self::Copilot),
+            Some("ollama") => Ok(Self::Ollama),
             Some(other) => bail!("unsupported provider kind: {other}"),
+        }
+    }
+
+    pub fn is_account(self) -> bool {
+        matches!(self, Self::CodexOauth | Self::Copilot)
+    }
+
+    pub fn default_url(self) -> &'static str {
+        match self {
+            Self::CodexOauth => "codex://oauth",
+            Self::Copilot => "copilot://oauth",
+            Self::Ollama => "http://127.0.0.1:11434/v1",
+            Self::ChatCompletions | Self::OpenaiResponses => "https://api.openai.com/v1",
+        }
+    }
+
+    pub fn default_model(self) -> String {
+        match self {
+            Self::CodexOauth => crate::codex::CodexAuth::cli_default_model()
+                .unwrap_or_else(|| "gpt-5.3-codex".into()),
+            Self::Copilot => "gpt-4.1".into(),
+            Self::Ollama => String::new(),
+            Self::ChatCompletions | Self::OpenaiResponses => "gpt-5".into(),
+        }
+    }
+
+    pub fn default_image_input(self) -> bool {
+        self == Self::CodexOauth
+    }
+
+    pub fn resolve_url(self, configured: Option<&str>) -> String {
+        if self.is_account() {
+            self.default_url().into()
+        } else {
+            norm_url(configured.unwrap_or(self.default_url()))
         }
     }
 }
@@ -56,10 +95,11 @@ pub struct Config {
 pub struct ProfileCfg {
     pub base_url: Option<String>,
     pub model: Option<String>,
-    /// Explicit model capability; absent = text-only (Codex OAuth defaults true).
+    /// Explicit model capability; absent defaults true for native Codex
+    /// and false for other transports.
     pub image_input: Option<bool>,
-    /// "codex-oauth" = ChatGPT sign-in; "openai-responses" = API/gateway
-    /// Responses transport. Absent = standard chat-completions.
+    /// Selects a native wire adapter or account transport; absent selects
+    /// standard Chat Completions. See sui.example.toml for all kinds.
     pub kind: Option<String>,
     /// Name of the env var holding this profile's API key.
     pub key_env: Option<String>,
@@ -115,6 +155,28 @@ pub struct Profile {
     pub api_key: Option<String>,
     pub prompt_cache_key: Option<String>,
     pub pricing: Option<PricingCfg>,
+}
+
+impl Profile {
+    /// Availability is a preflight hint, not proof of valid credentials.
+    /// The actual request and mission gates own verification.
+    pub fn credentials_available(&self) -> bool {
+        match self.transport {
+            Transport::CodexOauth => crate::codex::CodexAuth::session_exists(),
+            Transport::Copilot => crate::auth::LoginProvider::Copilot.session_exists(),
+            Transport::Ollama => true,
+            _ => {
+                self.api_key.is_some()
+                    || reqwest::Url::parse(&self.base_url).is_ok_and(|url| {
+                        url.host_str().is_some_and(|h| {
+                            h == "localhost"
+                                || h.parse::<std::net::IpAddr>()
+                                    .is_ok_and(|ip| ip.is_loopback())
+                        })
+                    })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -246,7 +308,9 @@ fn norm_url(u: &str) -> String {
 }
 
 fn global_cfg_path() -> Option<PathBuf> {
-    std::env::home_dir().map(|h| h.join(".config/sui/config.toml"))
+    std::env::var_os("SUI_HOME")
+        .map(|h| PathBuf::from(h).join("config.toml"))
+        .or_else(|| std::env::home_dir().map(|h| h.join(".config/sui/config.toml")))
 }
 
 fn read_toml(p: &Path) -> Result<FileConfig> {
@@ -335,6 +399,14 @@ fn inject_detected_profiles(out: &mut BTreeMap<String, ProfileCfg>) {
             ..Default::default()
         });
     }
+    let provider = crate::auth::LoginProvider::Copilot;
+    if provider.session_exists() {
+        out.entry(provider.id().into()).or_insert(ProfileCfg {
+            kind: Some(provider.kind().into()),
+            model: Some(provider.transport().default_model()),
+            ..Default::default()
+        });
+    }
 }
 
 /// The global `[provider]` credential (api_key inline or via key_env) —
@@ -365,7 +437,6 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
         )
     })?;
     let transport = Transport::from_kind(p.kind.as_deref())?;
-    let is_codex = transport == Transport::CodexOauth;
     let api_key = p
         .key_env
         .as_deref()
@@ -375,16 +446,20 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
     Ok(Profile {
         transport,
         name: name.to_string(),
-        base_url: if is_codex {
-            "codex://oauth".into()
+        base_url: transport.resolve_url(p.base_url.as_deref()),
+        model: p.model.clone().unwrap_or_else(|| transport.default_model()),
+        image_input: p.image_input.unwrap_or(transport.default_image_input()),
+        api_key: if transport.is_account() {
+            None
         } else {
-            norm_url(p.base_url.as_deref().unwrap_or("https://api.openai.com/v1"))
+            api_key
         },
-        model: p.model.clone().unwrap_or_else(|| "gpt-5".into()),
-        image_input: p.image_input.unwrap_or(is_codex),
-        api_key,
         prompt_cache_key: p.prompt_cache_key.clone(),
-        pricing: p.pricing.clone(),
+        pricing: if transport.is_account() {
+            None
+        } else {
+            p.pricing.clone()
+        },
     })
 }
 
@@ -457,7 +532,15 @@ pub fn load(ov: Overrides) -> Result<Config> {
     .into_iter()
     .find(|(v, _)| v.is_some())
     .map(|(v, s)| (v.unwrap(), s))
-    .unwrap_or_else(|| ("https://api.openai.com/v1".into(), Source::Default));
+    .unwrap_or_else(|| {
+        (
+            Transport::from_kind(fp.kind.as_deref().or(gp.kind.as_deref()))
+                .unwrap_or_default()
+                .default_url()
+                .into(),
+            Source::Default,
+        )
+    });
     let base_url = norm_url(&base_url);
 
     // api_key: flag > env > --config > global. Project file is excluded.
@@ -523,7 +606,11 @@ pub fn load(ov: Overrides) -> Result<Config> {
         .or(fp.model)
         .or(pp.model)
         .or(gp.model)
-        .unwrap_or_else(|| "gpt-5".into());
+        .unwrap_or_else(|| {
+            Transport::from_kind(fp.kind.as_deref().or(gp.kind.as_deref()))
+                .unwrap_or_default()
+                .default_model()
+        });
 
     // prompt_cache_key picks the provider-side cache domain — letting a
     // repo file choose it would let a checked-in sui.toml borrow (or
@@ -553,19 +640,19 @@ pub fn load(ov: Overrides) -> Result<Config> {
     } else {
         Transport::from_kind(fp.kind.as_deref().or(gp.kind.as_deref()))?
     };
-    let base_url = if transport == Transport::CodexOauth {
-        "codex://oauth".into()
-    } else {
-        base_url
-    };
+    let base_url = transport.resolve_url(Some(&base_url));
     Ok(Config {
         transport,
         image_input: fp
             .image_input
             .or(gp.image_input)
-            .unwrap_or(base_url.starts_with("codex://")),
+            .unwrap_or(transport.default_image_input()),
         base_url,
-        api_key,
+        api_key: if transport.is_account() {
+            None
+        } else {
+            api_key
+        },
         model,
         prompt_cache_key,
         workspace,
@@ -624,9 +711,7 @@ pub(crate) fn global_config_path() -> Option<PathBuf> {
 }
 
 fn global_path() -> Result<PathBuf> {
-    std::env::home_dir()
-        .map(|h| h.join(".config/sui/config.toml"))
-        .context("no home dir")
+    global_cfg_path().context("no home dir")
 }
 
 /// Load the [ui] section of the global config (absent → defaults).
@@ -741,11 +826,12 @@ pub fn save_profile_at(
         .entry(name)
         .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
     let t = entry.as_table_mut().context("profile not a table")?;
-    // OAuth-backed kinds (codex-oauth) have no base_url or API key —
+    // Account-backed kinds have no configured base_url or API key —
     // write the kind and strip the chat-completions fields entirely so
     // a stale endpoint can't shadow the OAuth backend.
-    if kind == Some("codex-oauth") {
-        let k = "codex-oauth";
+    let transport = Transport::from_kind(kind)?;
+    if transport.is_account() {
+        let k = kind.context("account transport requires kind")?;
         t.insert("kind".into(), toml::Value::String(k.to_string()));
         t.insert("model".into(), toml::Value::String(model.to_string()));
         t.remove("base_url");
@@ -799,6 +885,61 @@ fn unix_ts() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_native_profiles_are_rejected_without_rewriting_configuration() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let home = crate::test_http::AuthHome::new();
+        let path = home.path.join("config.toml");
+        for kind in ["anthropic", "gemini", "gemini-oauth"] {
+            let before = format!("[profiles.removed]\nkind = '{kind}'\nmodel = 'old-model'\n");
+            std::fs::write(&path, &before).unwrap();
+            let error = resolve_profile("removed", None).unwrap_err();
+            assert!(error.to_string().contains("unsupported provider kind"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn account_configuration_ignores_and_removes_stale_api_credentials() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let home = crate::test_http::AuthHome::new();
+        let path = home.path.join("config.toml");
+        for kind in ["codex-oauth", "copilot"] {
+            let transport = Transport::from_kind(Some(kind)).unwrap();
+            std::fs::write(&path, format!(
+                "[provider]\nkind = '{kind}'\napi_key = 'stale-api-key'\nbase_url = 'https://stale.invalid/v1'\nmodel = 'chosen-model'\n\n[profiles.account]\nkind = '{kind}'\napi_key = 'stale-profile-key'\nbase_url = 'https://stale.invalid/v1'\nmodel = 'chosen-model'\n\n[profiles.account.pricing]\ninput = 1.0\noutput = 2.0\n",
+            )).unwrap();
+            let config = load(Overrides {
+                base_url: None,
+                api_key: None,
+                model: None,
+                auto_approve: false,
+                workspace: Some(home.path.clone()),
+                config_path: None,
+                non_interactive: true,
+            })
+            .unwrap();
+            assert_eq!(config.base_url, transport.default_url());
+            assert_eq!(config.transport, transport);
+            assert!(config.api_key.is_none());
+            let profile = resolve_profile("account", None).unwrap();
+            assert_eq!(profile.base_url, transport.default_url());
+            assert!(profile.api_key.is_none() && profile.pricing.is_none());
+            save_profile(
+                "account",
+                "https://ignored.invalid",
+                "chosen-model",
+                Some("IGNORED_API_KEY"),
+                Some("ignored-key"),
+                Some(kind),
+            )
+            .unwrap();
+            let saved = profiles(None).unwrap();
+            let saved = &saved["account"];
+            assert!(saved.base_url.is_none() && saved.api_key.is_none() && saved.key_env.is_none());
+        }
+    }
 
     #[test]
     fn save_refuses_to_overwrite_unparseable_config() {

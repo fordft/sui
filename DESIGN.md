@@ -496,17 +496,18 @@ status numbers stay out of model context — append-only history and frozen
 prefixes are unchanged).
 
 - **First run**: no profiles → Setup opens a provider editor instead of
-  demanding hand-edited TOML. Three provider kinds: DeepSeek
-  (`api.deepseek.com`), OpenRouter (`openrouter.ai/api/v1`), custom
-  OpenAI-compatible. Model entry searches `GET {base}/models` (OpenRouter
-  catalog shows ctx/price/tool-claims when published) with a manual-entry
-  fallback. The exact request endpoint is previewed; no `/v1` guessing.
+  demanding hand-edited TOML. Presets cover ChatGPT/Codex, Copilot, Ollama,
+  DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints. Account
+  sign-in is an async, cancellable dialog for Codex/Copilot. Model entry
+  uses the selected transport's catalog (OpenRouter shows ctx/price/tool
+  claims when published) with a manual-entry fallback. The exact request
+  endpoint is previewed; no `/v1` guessing.
 - **Roles**: Solo profile; Mission orchestrator/workers/auditor (auditor
   defaults to the orchestrator profile). Any provider may fill any role;
   no profile is hardcoded to a vendor. Worker concurrency 1–2 (cap kept).
-- **Keys**: masked entry; env-var or session-only storage by default,
-  optional OS keyring when available (falls back cleanly headless).
-  Keys never hit journals, chat, or TOML.
+- **Keys**: masked entry; environment, session, OS keyring, or explicitly
+  selected owner-only config storage. Headless hosts use config storage.
+  Keys never hit journals or chat; account tokens use separate private stores.
 - **Screens**: Chat (streaming, multiline, paste, scroll, unicode-safe) /
   Tasks (plan + per-task status) / Changes (files, audit, accepted SHA) /
   Usage (per-agent/model requests + provider-reported cache tokens; each
@@ -610,12 +611,27 @@ to the auditor. No frontier model typing boilerplate. No embeddings in v1.
 
 ### Implemented cache/replay boundaries
 
-`ProfileCfg.kind` selects Chat Completions, standard `openai-responses`, or
-`codex-oauth`; native profiles carry the resolved transport through every
-launcher. Standard and OAuth Responses share a decoder that preserves opaque
+`ProfileCfg.kind` selects Chat Completions, standard `openai-responses`,
+`codex-oauth`, `copilot`, or `ollama`; native profiles carry the resolved
+transport through every launcher. Standard and OAuth Responses share a
+decoder that preserves opaque
 reasoning and known cache-read/write zeros. Session identity is frozen on each
 provider instance; configured cache-group keys take precedence. Cache options
 are not inferred from model names or advertised without backend verification.
+
+Copilot chooses Chat Completions or Responses from its model catalog, with
+jcode's known GPT-5.6 compatibility route when metadata is absent. The native
+account adapter consumes frozen tool schemas and append-only history and
+uses the shared streaming decoders, including private Responses replay sidecars.
+
+New account tokens stay in owner-only atomic stores beneath SUI_HOME or
+~/.config/sui. In-process mutexes and Unix file locks serialize refreshes;
+Copilot refreshes retain the GitHub token while replacing the API token.
+OAuth endpoints are fixed and account API endpoints are pinned/validated;
+project config cannot choose a credential-bearing transport. Account profiles
+do not synthesize API billing costs, even if stale pricing exists in config.
+Login replies carry only bounded errors/prompts/completion, never tokens.
+Provider sign-in leaves tool permissions and web consent independent.
 
 Native compaction starts proactively at 80% of the context budget, including
 tool schema estimates and completion reserve. It appends a bounded summary

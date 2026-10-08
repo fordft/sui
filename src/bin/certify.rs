@@ -182,7 +182,7 @@ async fn run_profile(prof: &Profile, max_req: u64, keep: bool) -> Result<()> {
         "\n══ profile '{}' → {} · model {} ══",
         prof.name, prof.base_url, prof.model
     );
-    if prof.api_key.is_none() {
+    if !prof.credentials_available() {
         eprintln!("  no credentials resolved — will run but verdict is UNVERIFIED");
     }
 
@@ -435,7 +435,7 @@ fn report(ctx: &Ctx, run_dir: &Path, prof: &Profile) -> Result<()> {
         }
     }
     p!("");
-    let verdict = if prof.api_key.is_none() {
+    let verdict = if !prof.credentials_available() {
         "UNVERIFIED — no credentials for profile"
     } else if n == 0 {
         "UNVERIFIED — no requests completed"
