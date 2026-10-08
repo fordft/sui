@@ -985,7 +985,6 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                             "{} · {}",
                             match p.kind.as_deref() {
                                 Some("codex-oauth") => "ChatGPT OAuth",
-                                Some("gemini-oauth") => "Gemini OAuth",
                                 _ => "Copilot sign-in",
                             },
                             p.model.as_deref().unwrap_or("—")
@@ -994,7 +993,6 @@ fn draw_settings(f: &mut Frame, app: &App, a: Rect) {
                     ));
                     let provider = match p.kind.as_deref() {
                         Some("codex-oauth") => "codex",
-                        Some("gemini-oauth") => "gemini",
                         _ => "copilot",
                     };
                     let session = app.signed_in.contains(provider);
@@ -1633,7 +1631,6 @@ never enables web access.";
                                 Field::CredSrc => "Environment variable".to_string(),
                                 Field::Store => format!("◀ {} ▶", pf.store.name()),
                                 Field::SignIn => "Enter to sign in".to_string(),
-                                Field::ApiKeyPage => "Open Claude Console".to_string(),
                                 _ => String::new(),
                             }
                         };

@@ -148,7 +148,6 @@ mod tests {
             let token = auth::AccountToken {
                 access: "copilot-fixture-token".into(),
                 base,
-                project: None,
             };
             let client = auth::client().unwrap();
             let cache = tokio::sync::OnceCell::new();
@@ -158,10 +157,7 @@ mod tests {
             let compiled = crate::context::Compiled::view(&messages);
             let request = Request {
                 client: &client,
-                base: "copilot://oauth",
-                api_key: None,
                 model: id,
-                session_id: "session",
                 messages: &compiled,
                 tools: &[],
                 catalog: &cache,

@@ -35,9 +35,6 @@ enum Inner {
     },
     Codex(std::sync::OnceLock<std::sync::Arc<crate::codex::CodexAuth>>),
     Native {
-        transport: crate::config::Transport,
-        base: String,
-        api_key: Option<String>,
         catalog: tokio::sync::OnceCell<Value>,
     },
 }
@@ -117,25 +114,8 @@ impl Provider {
 
     pub fn with_transport(mut self, transport: crate::config::Transport) -> Self {
         use crate::config::Transport;
-        if matches!(
-            transport,
-            Transport::Anthropic | Transport::Gemini | Transport::GeminiOauth | Transport::Copilot
-        ) {
-            let (base, api_key) = match &self.inner {
-                Inner::Chat { url, api_key } => (
-                    url.trim_end_matches("/chat/completions").to_string(),
-                    api_key.clone(),
-                ),
-                _ => (transport.default_url().into(), None),
-            };
+        if transport == Transport::Copilot {
             self.inner = Inner::Native {
-                transport,
-                base,
-                api_key: if transport.is_account() {
-                    None
-                } else {
-                    api_key
-                },
                 catalog: Default::default(),
             };
         }
@@ -170,22 +150,7 @@ impl Provider {
             Inner::Chat { url, .. } => ("chat-completions", url.as_str()),
             Inner::Responses { url, .. } => ("openai-responses", url.as_str()),
             Inner::Codex(_) => ("codex-oauth", "chatgpt.com/backend-api/codex/responses"),
-            Inner::Native {
-                transport, base, ..
-            } => (
-                match transport {
-                    crate::config::Transport::Anthropic => "anthropic",
-                    crate::config::Transport::Gemini => "gemini",
-                    crate::config::Transport::GeminiOauth => "gemini-oauth",
-                    crate::config::Transport::Copilot => "copilot",
-                    _ => unreachable!(),
-                },
-                if transport.is_account() {
-                    transport.default_url()
-                } else {
-                    base.as_str()
-                },
-            ),
+            Inner::Native { .. } => ("copilot", crate::config::Transport::Copilot.default_url()),
         };
         crate::context::sha256_hex(
             json!({"wire_version": 1, "transport": transport, "endpoint": endpoint,
@@ -210,20 +175,11 @@ impl Provider {
         on_reasoning: impl FnMut(&str),
     ) -> Result<StreamOutcome> {
         let (url, api_key) = match &self.inner {
-            Inner::Native {
-                transport,
-                base,
-                api_key,
-                catalog,
-            } => {
+            Inner::Native { catalog } => {
                 return native::stream(
-                    *transport,
                     native::Request {
                         client: &self.client,
-                        base,
-                        api_key: api_key.as_deref(),
                         model: &self.model,
-                        session_id: &self.session_id,
                         messages,
                         tools,
                         catalog,
@@ -542,9 +498,7 @@ pub async fn list_models_with_transport(
 ) -> Result<Vec<ModelInfo>> {
     use crate::config::Transport;
     match transport {
-        Transport::Anthropic | Transport::Gemini | Transport::GeminiOauth | Transport::Copilot => {
-            native::models(transport, base_url, api_key).await
-        }
+        Transport::Copilot => native::models().await,
         _ => list_models(base_url, api_key).await,
     }
 }

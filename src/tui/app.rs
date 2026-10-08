@@ -120,19 +120,15 @@ pub enum ProvType {
     OpenRouter,
     Codex,
     Custom,
-    Claude,
-    Gemini,
     Copilot,
     Ollama,
 }
 impl ProvType {
-    pub const ALL: [ProvType; 8] = [
+    pub const ALL: [ProvType; 6] = [
         ProvType::DeepSeek,
         ProvType::OpenRouter,
         ProvType::Codex,
         ProvType::Custom,
-        ProvType::Claude,
-        ProvType::Gemini,
         ProvType::Copilot,
         ProvType::Ollama,
     ];
@@ -142,8 +138,6 @@ impl ProvType {
             "OpenRouter",
             "ChatGPT (Codex OAuth)",
             "Custom OpenAI-compatible",
-            "Claude",
-            "Google Gemini",
             "GitHub Copilot",
             "Ollama (local)",
         ][self as usize]
@@ -154,8 +148,6 @@ impl ProvType {
             ProvType::OpenRouter => "https://openrouter.ai/api/v1",
             ProvType::Codex => "codex://oauth",
             ProvType::Custom => "",
-            ProvType::Claude => "https://api.anthropic.com/v1",
-            ProvType::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             ProvType::Copilot => "copilot://oauth",
             ProvType::Ollama => "http://127.0.0.1:11434/v1",
         }
@@ -165,8 +157,6 @@ impl ProvType {
             ProvType::DeepSeek => "DEEPSEEK_API_KEY",
             ProvType::OpenRouter => "OPENROUTER_API_KEY",
             ProvType::Codex | ProvType::Custom => "",
-            ProvType::Claude => "ANTHROPIC_API_KEY",
-            ProvType::Gemini => "GEMINI_API_KEY",
             ProvType::Copilot | ProvType::Ollama => "",
         }
     }
@@ -174,8 +164,6 @@ impl ProvType {
         use crate::auth::LoginProvider;
         match self {
             Self::Codex => Some(LoginProvider::Codex),
-            Self::Claude => None,
-            Self::Gemini => Some(LoginProvider::Gemini),
             Self::Copilot => Some(LoginProvider::Copilot),
             _ => None,
         }
@@ -189,12 +177,11 @@ pub enum AuthMode {
     ApiKey,
     /// Headless/CI path: read the key from an environment variable.
     Advanced,
-    SignIn,
 }
 impl AuthMode {
     pub const ALL: [AuthMode; 3] = [AuthMode::None, AuthMode::ApiKey, AuthMode::Advanced];
     pub fn name(self) -> &'static str {
-        ["None", "API Key", "Advanced…", "Account sign-in"][self as usize]
+        ["None", "API Key", "Advanced…"][self as usize]
     }
 }
 
@@ -227,7 +214,6 @@ pub enum Field {
     ApiKey,
     Store,
     SignIn,
-    ApiKeyPage,
     Test,
     Save,
     Cancel,
@@ -244,7 +230,6 @@ impl Field {
             Field::ApiKey => "API Key",
             Field::Store => "Store",
             Field::SignIn => "Sign in",
-            Field::ApiKeyPage => "API key setup",
             Field::Test | Field::Save | Field::Cancel => "",
         }
     }
@@ -302,7 +287,6 @@ impl ProvForm {
             .filter(|p| *p != crate::auth::LoginProvider::Codex)
         {
             f.name.set(provider.id());
-            f.auth = AuthMode::SignIn;
             f.model.set(&provider.transport().default_model());
             f.status = if provider.session_exists() {
                 "session detected".into()
@@ -313,12 +297,6 @@ impl ProvForm {
         if ptype == ProvType::Ollama {
             f.name.set("ollama");
         }
-        if ptype == ProvType::Claude {
-            f.name.set("claude");
-            f.auth = AuthMode::ApiKey;
-            f.model.set(&config::Transport::Anthropic.default_model());
-            f.status = "Connect directly with an Anthropic API key".into();
-        }
         f.refresh_endpoint();
         f
     }
@@ -328,10 +306,6 @@ impl ProvForm {
         let base = p.base_url.as_deref().unwrap_or("");
         let ptype = if p.kind.as_deref() == Some("codex-oauth") {
             ProvType::Codex
-        } else if matches!(p.kind.as_deref(), Some("anthropic")) {
-            ProvType::Claude
-        } else if matches!(p.kind.as_deref(), Some("gemini-oauth" | "gemini")) {
-            ProvType::Gemini
         } else if p.kind.as_deref() == Some("copilot") {
             ProvType::Copilot
         } else if p.kind.as_deref() == Some("ollama") {
@@ -351,21 +325,14 @@ impl ProvForm {
             base
         });
         f.model.set(p.model.as_deref().unwrap_or(""));
-        if matches!(ptype, ProvType::Custom | ProvType::Ollama)
-            || (matches!(ptype, ProvType::Claude | ProvType::Gemini)
-                && !config::Transport::from_kind(p.kind.as_deref()).is_ok_and(|t| t.is_account()))
-        {
+        if matches!(ptype, ProvType::Custom | ProvType::Ollama) {
             f.auth = if let Some(env) = &p.key_env {
                 f.key_env.set(env);
                 AuthMode::Advanced
             } else if has_stored_key || p.api_key.is_some() {
                 AuthMode::ApiKey
             } else {
-                if matches!(ptype, ProvType::Claude | ProvType::Gemini) {
-                    AuthMode::ApiKey
-                } else {
-                    AuthMode::None
-                }
+                AuthMode::None
             };
         }
         f.editing = Some(name.to_string());
@@ -379,13 +346,8 @@ impl ProvForm {
             "codex://oauth — reuses `codex login` or `sui auth`".into()
         } else {
             format!(
-                "{}/{}",
-                self.base_url.text().trim_end_matches('/'),
-                match self.transport() {
-                    config::Transport::Anthropic => "messages",
-                    config::Transport::Gemini => "models/<model>:streamGenerateContent",
-                    _ => "chat/completions",
-                }
+                "{}/chat/completions",
+                self.base_url.text().trim_end_matches('/')
             )
         };
     }
@@ -403,26 +365,12 @@ impl ProvForm {
                 v.extend([Field::SignIn, Field::Model]);
             }
             ProvType::Copilot => v.extend([Field::SignIn, Field::Model]),
-            ProvType::Claude | ProvType::Gemini => {
-                v.push(Field::Auth);
-                if self.ptype == ProvType::Claude {
-                    v.push(Field::ApiKeyPage);
-                }
-                match self.auth {
-                    AuthMode::SignIn => v.push(Field::SignIn),
-                    AuthMode::ApiKey => v.extend([Field::ApiKey, Field::Store]),
-                    AuthMode::Advanced => v.extend([Field::CredSrc, Field::KeyEnv]),
-                    AuthMode::None => {}
-                }
-                v.push(Field::Model);
-            }
             ProvType::Custom | ProvType::Ollama => {
                 v.extend([Field::BaseUrl, Field::Model, Field::Auth]);
                 match self.auth {
                     AuthMode::ApiKey => v.extend([Field::ApiKey, Field::Store]),
                     AuthMode::Advanced => v.extend([Field::CredSrc, Field::KeyEnv]),
                     AuthMode::None => {}
-                    AuthMode::SignIn => {}
                 }
             }
         }
@@ -456,9 +404,6 @@ impl ProvForm {
         use config::Transport;
         match self.ptype {
             ProvType::Codex => Transport::CodexOauth,
-            ProvType::Claude => Transport::Anthropic,
-            ProvType::Gemini if self.auth == AuthMode::SignIn => Transport::GeminiOauth,
-            ProvType::Gemini => Transport::Gemini,
             ProvType::Copilot => Transport::Copilot,
             ProvType::Ollama => Transport::Ollama,
             _ => Transport::ChatCompletions,
@@ -468,9 +413,6 @@ impl ProvForm {
         Some(
             match self.transport() {
                 config::Transport::CodexOauth => "codex-oauth",
-                config::Transport::Anthropic => "anthropic",
-                config::Transport::GeminiOauth => "gemini-oauth",
-                config::Transport::Gemini => "gemini",
                 config::Transport::Copilot => "copilot",
                 config::Transport::Ollama => "ollama",
                 _ => return None,
@@ -482,11 +424,7 @@ impl ProvForm {
     fn cycle(&mut self, dir: isize) {
         match self.cur_field() {
             Field::Auth => {
-                let choices: &[AuthMode] = match self.ptype {
-                    ProvType::Claude => &[AuthMode::ApiKey, AuthMode::Advanced],
-                    ProvType::Gemini => &[AuthMode::SignIn, AuthMode::ApiKey, AuthMode::Advanced],
-                    _ => &AuthMode::ALL,
-                };
+                let choices = &AuthMode::ALL;
                 let i = choices.iter().position(|a| *a == self.auth).unwrap_or(0);
                 let n = choices.len() as isize;
                 self.auth = choices[((i as isize + dir).rem_euclid(n)) as usize];
@@ -543,13 +481,12 @@ impl ProvForm {
         let key = if key.is_empty() { None } else { Some(key) };
         match self.ptype {
             ProvType::Codex => (None, None, self.store), // OAuth, nothing to persist
-            ProvType::DeepSeek | ProvType::OpenRouter | ProvType::Claude | ProvType::Gemini => {
+            ProvType::DeepSeek | ProvType::OpenRouter => {
                 (Some(self.ptype.default_env().to_string()), key, self.store)
             }
             ProvType::Copilot => (None, None, self.store),
             ProvType::Custom | ProvType::Ollama => match self.auth {
                 AuthMode::None => (None, None, self.store),
-                AuthMode::SignIn => (None, None, self.store),
                 AuthMode::ApiKey => (None, key, self.store),
                 AuthMode::Advanced => {
                     let env = self.key_env.text();
@@ -892,7 +829,6 @@ pub struct LoginDialog {
 
 /// Side-effect the loop must execute — keeps App pure.
 pub enum Effect {
-    OpenApiKeyPage,
     SignIn {
         provider: crate::auth::LoginProvider,
         request: u64,
@@ -1178,7 +1114,6 @@ impl App {
         let mut app = Self {
             signed_in: [
                 crate::auth::LoginProvider::Codex,
-                crate::auth::LoginProvider::Gemini,
                 crate::auth::LoginProvider::Copilot,
             ]
             .into_iter()
@@ -3463,7 +3398,6 @@ impl App {
             }
             KeyCode::Char(' ') if f.cur().is_none() => f.cycle(1),
             KeyCode::Enter => match f.cur_field() {
-                Field::ApiKeyPage => self.effects.push(Effect::OpenApiKeyPage),
                 Field::SignIn => {
                     if self.running {
                         f.status = "Stop the current run before signing in".into();

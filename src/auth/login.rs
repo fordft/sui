@@ -67,24 +67,6 @@ impl Session {
                     ("id_token_add_organizations","true"), ("codex_cli_simplified_flow","true"), ("originator","sui"),
                 ])?
             }
-            LoginProvider::Gemini => {
-                if manual {
-                    redirect = "https://codeassist.google.com/authcode".into();
-                } else {
-                    let socket = TcpListener::bind("127.0.0.1:0").await?;
-                    redirect = format!(
-                        "http://127.0.0.1:{}/oauth2callback",
-                        socket.local_addr()?.port()
-                    );
-                    listener = Some(socket);
-                }
-                authorization_url("https://accounts.google.com/o/oauth2/v2/auth", &[
-                    ("response_type","code"), ("client_id",GEMINI_CLIENT_ID), ("redirect_uri",&redirect),
-                    ("scope","https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"),
-                    ("code_challenge",&challenge), ("code_challenge_method","S256"), ("state",&state),
-                    ("access_type","offline"), ("prompt","consent"),
-                ])?
-            }
             LoginProvider::Copilot => {
                 let response = client()?
                     .post("https://github.com/login/device/code")
@@ -136,7 +118,6 @@ impl Session {
             interval,
             expires,
             token_endpoint: match provider {
-                LoginProvider::Gemini => GOOGLE_TOKEN_URL,
                 LoginProvider::Copilot => COPILOT_TOKEN_URL,
                 LoginProvider::Codex => "https://auth.openai.com/oauth/token",
             }
@@ -170,30 +151,9 @@ impl Session {
                     .as_deref()
                     .context("paste the authorization code or callback URL")?,
                 &self.state,
-                self.provider == LoginProvider::Gemini,
             )?
         };
-        if self.provider == LoginProvider::Codex {
-            return crate::codex::complete_login(&http, &code, &self.verifier).await;
-        }
-        let request = http.post(&self.token_endpoint).form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", GEMINI_CLIENT_ID),
-            ("client_secret", GEMINI_CLIENT_SECRET),
-            ("code", &code),
-            ("redirect_uri", &self.redirect),
-            ("code_verifier", &self.verifier),
-        ]);
-        let body = json_response(
-            request
-                .send()
-                .await
-                .map_err(crate::provider::failure::Failure::transport)?,
-            "OAuth code exchange",
-        )
-        .await?;
-        let credentials = credentials_from_json(&body, None)?;
-        save_login(self.provider, &credentials).await
+        crate::codex::complete_login(&http, &code, &self.verifier).await
     }
     async fn finish_device(&self, http: &reqwest::Client) -> Result<PathBuf> {
         let deadline = Instant::now() + Duration::from_secs(self.expires);
@@ -236,7 +196,6 @@ impl Session {
                         access_token: String::new(),
                         refresh_token: token.into(),
                         expires_at: 0,
-                        project: None,
                         api_base: None,
                     };
                     // Exchange before persisting: GitHub login alone does not prove
@@ -269,7 +228,7 @@ impl Session {
     }
 }
 
-pub(crate) fn parse_input(input: &str, expected: &str, allow_code: bool) -> Result<String> {
+pub(crate) fn parse_input(input: &str, expected: &str) -> Result<String> {
     let trimmed = input.trim();
     if trimmed.len() > 16_384 || trimmed.is_empty() {
         bail!("invalid authorization input");
@@ -291,17 +250,6 @@ pub(crate) fn parse_input(input: &str, expected: &str, allow_code: bool) -> Resu
         return code
             .filter(|s| !s.is_empty())
             .context("callback is missing authorization code");
-    }
-    if allow_code {
-        let (code, state) = trimmed
-            .split_once('#')
-            .map_or((trimmed, None), |(c, s)| (c, Some(s)));
-        if state.is_some_and(|s| s != expected) {
-            bail!("OAuth state mismatch");
-        }
-        if !code.is_empty() && !code.chars().any(char::is_whitespace) {
-            return Ok(code.into());
-        }
     }
     bail!("paste the full callback URL including code and state")
 }
@@ -335,7 +283,7 @@ async fn callback(listener: &TcpListener, state: &str, expected_path: &str) -> R
         let code = url
             .ok()
             .filter(|u| method == Some("GET") && u.path() == expected_path)
-            .and_then(|u| parse_input(u.as_str(), state, false).ok());
+            .and_then(|u| parse_input(u.as_str(), state).ok());
         let (status, body) = if code.is_some() {
             ("200 OK", "Sui sign-in received. Return to Sui to finish.")
         } else {
@@ -406,36 +354,33 @@ pub async fn cli(provider: LoginProvider, manual: bool) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn gemini_exchanges_pkce_codes_into_a_private_store() {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
-        let _home = crate::test_http::AuthHome::new();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            for provider in [LoginProvider::Gemini] {
-                let mut session = Session::begin(provider,true).await.unwrap();
-                let url = reqwest::Url::parse(&session.prompt.url).unwrap();
-                assert!(url.query_pairs().any(|(k,v)| k == "code_challenge" && !v.is_empty()));
-                let (endpoint,captured,task) = crate::test_http::server(vec![(200,"application/json",
-                    json!({"access_token":"fake-access","refresh_token":"fake-refresh","expires_in":3600}).to_string())]);
-                session.token_endpoint = endpoint;
-                let path = session.finish(Some("fake-code".into())).await.unwrap();
-                assert_eq!(path,store_path(provider).unwrap());
-                assert!(provider.session_exists());
-                task.join().unwrap();
-                let requests = captured.lock().unwrap();
-                assert!(requests[0].1.contains("code_verifier="));
-                assert!(requests[0].1.contains("grant_type=authorization_code"));
-            }
-            let profiles = crate::config::profiles(None).unwrap();
-            assert!(profiles.contains_key("gemini"));
-        });
+    #[tokio::test]
+    async fn codex_authorization_uses_pkce_and_a_matching_callback() {
+        let session = Session::begin(LoginProvider::Codex, true).await.unwrap();
+        let url = reqwest::Url::parse(&session.prompt.url).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            params["code_challenge"],
+            URL_SAFE_NO_PAD.encode(Sha256::digest(session.verifier.as_bytes()))
+        );
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(
+            params["redirect_uri"],
+            "http://localhost:1455/auth/callback"
+        );
+        let callback = format!(
+            "http://localhost:1455/auth/callback?code=fake-code&state={}",
+            params["state"]
+        );
+        assert_eq!(parse_input(&callback, &session.state).unwrap(), "fake-code");
+        assert!(session.prompt.input_required);
     }
     #[test]
     fn github_device_login_waits_for_authorization_and_validates_copilot_access() {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let _home = crate::test_http::AuthHome::new();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut session = Session::begin(LoginProvider::Gemini, true).await.unwrap();
+            let mut session = Session::begin(LoginProvider::Codex, true).await.unwrap();
             session.provider = LoginProvider::Copilot;
             session.device_code = Some("fake-device-code".into());
             session.interval = 0;
@@ -478,7 +423,6 @@ mod tests {
             parse_input(
                 "http://localhost:1455/auth/callback?code=c%2Bd&state=s",
                 "s",
-                false
             )
             .unwrap(),
             "c+d"
@@ -489,10 +433,8 @@ mod tests {
             "http://localhost/?code=c&state=s&state=wrong",
             "c",
         ] {
-            assert!(parse_input(input, "s", false).is_err());
+            assert!(parse_input(input, "s").is_err());
         }
-        assert_eq!(parse_input("code#state", "state", true).unwrap(), "code");
-        assert!(parse_input("code#wrong", "state", true).is_err());
     }
     #[tokio::test]
     async fn callback_skips_invalid_requests_then_accepts_matching_state() {

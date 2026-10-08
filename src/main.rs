@@ -9,25 +9,25 @@ use sui::{agent, config, context, journal, permission, provider, tools, web};
 enum Sub {
     /// Terminal UI (also the default when run bare on a terminal)
     Tui,
-    /// Sign in to an account or configure Claude/local/custom API access.
+    /// Sign in to an account or configure local/custom API access.
     #[command(alias = "login")]
     Auth {
-        /// claude, codex (default), gemini, copilot, ollama, or openai-compatible
+        /// codex (default), copilot, ollama, or openai-compatible
         provider: Option<String>,
-        /// Alternate spelling: sui login --provider claude
+        /// Alternate spelling: sui login --provider copilot
         #[arg(long = "provider", conflicts_with = "provider")]
         provider_name: Option<String>,
         /// Paste the callback URL yourself (headless/SSH — the browser's
         /// localhost is not this machine's localhost)
         #[arg(long)]
         manual: bool,
-        /// Base URL for Claude, Ollama, or a custom OpenAI-compatible endpoint
+        /// Base URL for Ollama or a custom OpenAI-compatible endpoint
         #[arg(long)]
         base_url: Option<String>,
         /// Model ID; local/custom setup prompts when omitted on a terminal
         #[arg(long)]
         model: Option<String>,
-        /// Environment variable containing a Claude/local/custom API key
+        /// Environment variable containing a local/custom API key
         #[arg(long)]
         key_env: Option<String>,
     },
@@ -166,45 +166,6 @@ async fn setup_endpoint(
     Ok(())
 }
 
-async fn setup_claude(
-    base: Option<&str>,
-    model: Option<&str>,
-    key_env: Option<&str>,
-) -> Result<()> {
-    let base = base.unwrap_or(config::Transport::Anthropic.default_url());
-    validate_setup_url(base)?;
-    let env = key_env.unwrap_or("ANTHROPIC_API_KEY");
-    let in_env = std::env::var(env).ok().is_some_and(|s| !s.is_empty());
-    let key = if in_env {
-        None
-    } else {
-        if !std::io::stdin().is_terminal() {
-            anyhow::bail!("set {env} or use Settings to enter an Anthropic API key");
-        }
-        sui::auth::login::open_browser("https://platform.claude.com/settings/keys");
-        println!("Create an API key in Claude Console, then return here.");
-        Some(sui::auth::read_api_key()?)
-    };
-    let model = model
-        .map(str::to_string)
-        .or_else(|| {
-            config::profiles(None)
-                .ok()
-                .and_then(|p| p.get("claude").and_then(|p| p.model.clone()))
-        })
-        .unwrap_or_else(|| config::Transport::Anthropic.default_model());
-    config::save_profile(
-        "claude",
-        base,
-        &model,
-        Some(env),
-        key.as_deref(),
-        Some("anthropic"),
-    )?;
-    println!("Configured Claude's native API. Choose the claude profile in Settings or --profile claude.");
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -245,11 +206,8 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        if name == "claude" {
-            return setup_claude(base_url.as_deref(), model.as_deref(), key_env.as_deref()).await;
-        }
         if base_url.is_some() || key_env.is_some() {
-            anyhow::bail!("--base-url and --key-env apply to claude/ollama/openai-compatible; use Settings for Gemini API keys");
+            anyhow::bail!("--base-url and --key-env apply to ollama/openai-compatible");
         }
         let provider = sui::auth::LoginProvider::parse(name)?;
         let path = sui::auth::login::cli(provider, *manual).await?;

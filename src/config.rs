@@ -12,9 +12,6 @@ pub enum Transport {
     ChatCompletions,
     OpenaiResponses,
     CodexOauth,
-    Anthropic,
-    Gemini,
-    GeminiOauth,
     Copilot,
     Ollama,
 }
@@ -25,9 +22,6 @@ impl Transport {
             None | Some("chat-completions") => Ok(Self::ChatCompletions),
             Some("openai-responses") => Ok(Self::OpenaiResponses),
             Some("codex-oauth") => Ok(Self::CodexOauth),
-            Some("anthropic") => Ok(Self::Anthropic),
-            Some("gemini") => Ok(Self::Gemini),
-            Some("gemini-oauth") => Ok(Self::GeminiOauth),
             Some("copilot") => Ok(Self::Copilot),
             Some("ollama") => Ok(Self::Ollama),
             Some(other) => bail!("unsupported provider kind: {other}"),
@@ -35,16 +29,13 @@ impl Transport {
     }
 
     pub fn is_account(self) -> bool {
-        matches!(self, Self::CodexOauth | Self::GeminiOauth | Self::Copilot)
+        matches!(self, Self::CodexOauth | Self::Copilot)
     }
 
     pub fn default_url(self) -> &'static str {
         match self {
             Self::CodexOauth => "codex://oauth",
-            Self::GeminiOauth => "gemini://oauth",
             Self::Copilot => "copilot://oauth",
-            Self::Anthropic => "https://api.anthropic.com/v1",
-            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             Self::Ollama => "http://127.0.0.1:11434/v1",
             Self::ChatCompletions | Self::OpenaiResponses => "https://api.openai.com/v1",
         }
@@ -54,8 +45,6 @@ impl Transport {
         match self {
             Self::CodexOauth => crate::codex::CodexAuth::cli_default_model()
                 .unwrap_or_else(|| "gpt-5.3-codex".into()),
-            Self::Anthropic => "claude-sonnet-4-6".into(),
-            Self::Gemini | Self::GeminiOauth => "gemini-2.5-pro".into(),
             Self::Copilot => "gpt-4.1".into(),
             Self::Ollama => String::new(),
             Self::ChatCompletions | Self::OpenaiResponses => "gpt-5".into(),
@@ -63,10 +52,7 @@ impl Transport {
     }
 
     pub fn default_image_input(self) -> bool {
-        matches!(
-            self,
-            Self::CodexOauth | Self::GeminiOauth | Self::Anthropic | Self::Gemini
-        )
+        self == Self::CodexOauth
     }
 
     pub fn resolve_url(self, configured: Option<&str>) -> String {
@@ -109,8 +95,8 @@ pub struct Config {
 pub struct ProfileCfg {
     pub base_url: Option<String>,
     pub model: Option<String>,
-    /// Explicit model capability; absent defaults true for native Codex,
-    /// Claude, and Gemini, and false for other transports.
+    /// Explicit model capability; absent defaults true for native Codex
+    /// and false for other transports.
     pub image_input: Option<bool>,
     /// Selects a native wire adapter or account transport; absent selects
     /// standard Chat Completions. See sui.example.toml for all kinds.
@@ -177,7 +163,6 @@ impl Profile {
     pub fn credentials_available(&self) -> bool {
         match self.transport {
             Transport::CodexOauth => crate::codex::CodexAuth::session_exists(),
-            Transport::GeminiOauth => crate::auth::LoginProvider::Gemini.session_exists(),
             Transport::Copilot => crate::auth::LoginProvider::Copilot.session_exists(),
             Transport::Ollama => true,
             _ => {
@@ -414,17 +399,13 @@ fn inject_detected_profiles(out: &mut BTreeMap<String, ProfileCfg>) {
             ..Default::default()
         });
     }
-    for provider in [
-        crate::auth::LoginProvider::Gemini,
-        crate::auth::LoginProvider::Copilot,
-    ] {
-        if provider.session_exists() {
-            out.entry(provider.id().into()).or_insert(ProfileCfg {
-                kind: Some(provider.kind().into()),
-                model: Some(provider.transport().default_model()),
-                ..Default::default()
-            });
-        }
+    let provider = crate::auth::LoginProvider::Copilot;
+    if provider.session_exists() {
+        out.entry(provider.id().into()).or_insert(ProfileCfg {
+            kind: Some(provider.kind().into()),
+            model: Some(provider.transport().default_model()),
+            ..Default::default()
+        });
     }
 }
 
@@ -906,11 +887,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn removed_native_profiles_are_rejected_without_rewriting_configuration() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let home = crate::test_http::AuthHome::new();
+        let path = home.path.join("config.toml");
+        for kind in ["anthropic", "gemini", "gemini-oauth"] {
+            let before = format!("[profiles.removed]\nkind = '{kind}'\nmodel = 'old-model'\n");
+            std::fs::write(&path, &before).unwrap();
+            let error = resolve_profile("removed", None).unwrap_err();
+            assert!(error.to_string().contains("unsupported provider kind"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn account_configuration_ignores_and_removes_stale_api_credentials() {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let home = crate::test_http::AuthHome::new();
         let path = home.path.join("config.toml");
-        for kind in ["codex-oauth", "gemini-oauth", "copilot"] {
+        for kind in ["codex-oauth", "copilot"] {
             let transport = Transport::from_kind(Some(kind)).unwrap();
             std::fs::write(&path, format!(
                 "[provider]\nkind = '{kind}'\napi_key = 'stale-api-key'\nbase_url = 'https://stale.invalid/v1'\nmodel = 'chosen-model'\n\n[profiles.account]\nkind = '{kind}'\napi_key = 'stale-profile-key'\nbase_url = 'https://stale.invalid/v1'\nmodel = 'chosen-model'\n\n[profiles.account.pricing]\ninput = 1.0\noutput = 2.0\n",

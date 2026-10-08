@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sui::auth::{login::Prompt, LoginProvider};
 use sui::config::{ProfileCfg, Transport, UiSettings};
-use sui::tui::app::{App, AuthMode, Effect, Field, Modal, ProvForm, ProvType};
+use sui::tui::app::{App, Effect, Field, Modal, ProvForm, ProvType};
 fn app() -> App {
     App::with_state(
         std::env::temp_dir(),
@@ -38,7 +38,6 @@ fn start_login(app: &mut App, ptype: ProvType) -> u64 {
 fn all_account_providers_have_native_sign_in_and_catalog_effects() {
     for (ptype, provider) in [
         (ProvType::Codex, LoginProvider::Codex),
-        (ProvType::Gemini, LoginProvider::Gemini),
         (ProvType::Copilot, LoginProvider::Copilot),
     ] {
         let mut app = app();
@@ -66,12 +65,12 @@ fn all_account_providers_have_native_sign_in_and_catalog_effects() {
 fn login_input_is_masked_kept_out_of_chat_and_late_replies_are_ignored() {
     let mut app = app();
     app.input.set("keep my task draft");
-    let request = start_login(&mut app, ProvType::Gemini);
+    let request = start_login(&mut app, ProvType::Codex);
     let before = app.signed_in.clone();
     app.login_prompt(
         request,
         Prompt {
-            url: "https://accounts.google.com/o/oauth2/v2/auth".into(),
+            url: "https://auth.openai.com/oauth/authorize".into(),
             user_code: None,
             input_required: true,
         },
@@ -103,7 +102,7 @@ fn login_input_is_masked_kept_out_of_chat_and_late_replies_are_ignored() {
     assert_eq!(app.signed_in, before);
 }
 #[test]
-fn local_models_need_no_key_and_native_api_mode_remains_selectable() {
+fn local_models_need_no_key() {
     let mut app = app();
     let mut form = ProvForm::new(ProvType::Ollama);
     form.model.set("local-coder");
@@ -115,30 +114,12 @@ fn local_models_need_no_key_and_native_api_mode_remains_selectable() {
         if base_url == "http://127.0.0.1:11434/v1")
     ));
     press(&mut app, KeyCode::Esc);
-    for (ptype, transport) in [
-        (ProvType::Claude, Transport::Anthropic),
-        (ProvType::Gemini, Transport::Gemini),
-    ] {
-        let mut form = ProvForm::new(ptype);
-        form.auth = AuthMode::ApiKey;
-        form.key.set("masked-test-api-key");
-        form.refresh_endpoint();
-        assert!(!form.fields().contains(&Field::SignIn));
-        app.modal = Some(Modal::Provider(form));
-        field(&mut app, Field::Model);
-        press(&mut app, KeyCode::Enter);
-        assert!(app
-            .effects
-            .iter()
-            .any(|e| matches!(e,Effect::FetchModels {transport:t,key,..}
-            if *t == transport && key.as_deref() == Some("masked-test-api-key"))));
-    }
 }
 #[test]
 fn signing_in_cannot_replace_credentials_during_an_active_run() {
     let mut app = app();
     app.running = true;
-    app.modal = Some(Modal::Provider(ProvForm::new(ProvType::Gemini)));
+    app.modal = Some(Modal::Provider(ProvForm::new(ProvType::Codex)));
     field(&mut app, Field::SignIn);
     press(&mut app, KeyCode::Enter);
     assert!(matches!(app.modal, Some(Modal::Provider(_))));
@@ -149,35 +130,29 @@ fn signing_in_cannot_replace_credentials_during_an_active_run() {
 }
 
 #[test]
-fn claude_console_and_saved_key_work_when_editing_a_profile() {
+fn custom_saved_key_works_when_editing_a_profile() {
     let mut app = app();
     let profile = ProfileCfg {
-        kind: Some("anthropic".into()),
-        model: Some("claude-test".into()),
+        base_url: Some("http://127.0.0.1:9/v1".into()),
+        model: Some("custom-test".into()),
         api_key: Some("private-saved-key".into()),
         ..Default::default()
     };
-    app.profiles.insert("claude".into(), profile.clone());
+    app.profiles.insert("custom".into(), profile.clone());
     app.modal = Some(Modal::Provider(ProvForm::from_existing(
-        "claude", &profile, false,
+        "custom", &profile, false,
     )));
-    field(&mut app, Field::ApiKeyPage);
-    press(&mut app, KeyCode::Enter);
-    assert!(app
-        .effects
-        .iter()
-        .any(|e| matches!(e, Effect::OpenApiKeyPage)));
     field(&mut app, Field::Model);
     press(&mut app, KeyCode::Enter);
     assert!(app.effects.iter().any(|e| matches!(e,
-        Effect::FetchModels {transport:Transport::Anthropic,key,..}
+        Effect::FetchModels {transport:Transport::ChatCompletions,key,..}
         if key.as_deref() == Some("private-saved-key")
     )));
     press(&mut app, KeyCode::Esc);
     field(&mut app, Field::Test);
     press(&mut app, KeyCode::Enter);
     assert!(app.effects.iter().any(|e| matches!(e,
-        Effect::Probe {transport:Transport::Anthropic,key,model,..}
-        if key.as_deref() == Some("private-saved-key") && model == "claude-test"
+        Effect::Probe {transport:Transport::ChatCompletions,key,model,..}
+        if key.as_deref() == Some("private-saved-key") && model == "custom-test"
     )));
 }

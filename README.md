@@ -76,57 +76,42 @@ each use a different profile. Settings → "+ add provider" includes:
 
 | Provider | Connection |
 | --- | --- |
-| Claude | Anthropic API key with Console setup; native Messages API |
 | OpenAI / ChatGPT Codex | Browser sign-in; native Responses API |
-| Google Gemini | Google sign-in through Code Assist, or Gemini API key |
 | GitHub Copilot | GitHub device sign-in; requires Copilot access |
 | Ollama | Local OpenAI-compatible server; no API key required |
 | Custom OpenAI-compatible | Your endpoint, with optional API key |
 | DeepSeek / OpenRouter | Existing API-key presets |
 
 For accounts, choose **Sign in** in the provider form. Sui opens a browser;
-Copilot shows a device code, and Codex/Gemini wait for a local callback.
-Esc cancels sign-in. Choose a
-model, save the profile, and assign it to a role. API keys stay available
-for Claude and as a separate authentication choice for Gemini.
+Copilot shows a device code, and Codex waits for a local callback. Esc
+cancels sign-in. Choose a model, save the profile, and assign it to a role.
 
 The same setup works from the CLI:
 
 ```bash
-sui auth claude
 sui auth codex
-sui auth gemini
 sui auth copilot
 sui auth ollama --model your-installed-model
 sui auth openai-compatible --base-url http://localhost:8000/v1 --model your-model
 ```
 
-For Claude, `sui auth claude` uses `ANTHROPIC_API_KEY` if set, or opens
-Claude Console and accepts a hidden API-key entry. The TUI has an
-**Open Claude Console** action and its existing key storage choices.
-Sui uses API-key access for Claude rather than embedding Claude.ai login,
-following [Anthropic's current developer guidance](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use).
-
-The alias `sui login --provider gemini` also works. Bare `sui auth` keeps
+The alias `sui login --provider copilot` also works. Bare `sui auth` keeps
 its existing Codex behavior. Use `--manual` on SSH/headless machines for
-Codex/Gemini; Copilot's device flow already works across machines. Local
-or custom endpoints accept `--key-env YOUR_API_KEY_VAR` when authentication
-is needed. Ollama must be running and the chosen model must be installed.
+Codex; Copilot's device flow already works across machines. Local or custom
+endpoints accept `--key-env YOUR_API_KEY_VAR` when authentication is needed.
+Ollama must be running and the chosen model must be installed.
 
 Model pickers fetch the provider's catalog, including the signed-in Codex
-and Copilot account catalogs. Gemini Code Assist may omit a catalog; in that
-case Sui offers known model suggestions. You can always type an exact model
-ID. Catalog entries describe provider claims; access and tool support still
+and Copilot account catalogs. You can always type an exact model ID.
+Catalog entries describe provider claims; access and tool support still
 need a successful request/certification.
 
 Account tokens live in separate owner-only files under `~/.config/sui/`,
 refresh automatically, and stay out of profiles, journals, model messages,
 and exports. `SUI_HOME` relocates this directory and the global config.
-Refreshes for each new account provider are serialized across workers and
-Sui processes. Subscription cost remains unknown; usage is shown only when
-the provider reports it. Google work/paid Code Assist accounts may require
-`GOOGLE_CLOUD_PROJECT`. Provider login grants no web-tool or destructive-tool
-permissions.
+Copilot refreshes are serialized across workers and Sui processes.
+Subscription cost remains unknown; usage is shown only when the provider
+reports it. Provider login grants no web-tool or destructive-tool permissions.
 
 These native account integrations use the same provider protocols examined
 in [jcode](https://github.com/1jehuang/jcode); see

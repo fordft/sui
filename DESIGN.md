@@ -496,14 +496,12 @@ status numbers stay out of model context — append-only history and frozen
 prefixes are unchanged).
 
 - **First run**: no profiles → Setup opens a provider editor instead of
-  demanding hand-edited TOML. Presets cover Claude's native API,
-  ChatGPT/Codex, Gemini, Copilot, Ollama, DeepSeek, OpenRouter, and custom
-  OpenAI-compatible endpoints. Account sign-in is an async, cancellable
-  dialog for Codex/Gemini/Copilot; Claude provides Console/API-key setup
-  per Anthropic's developer authentication guidance. Model entry uses the
-  selected transport's catalog (OpenRouter shows ctx/price/tool claims
-  when published) with a manual-entry
-  fallback. The exact request endpoint is previewed; no `/v1` guessing.
+  demanding hand-edited TOML. Presets cover ChatGPT/Codex, Copilot, Ollama,
+  DeepSeek, OpenRouter, and custom OpenAI-compatible endpoints. Account
+  sign-in is an async, cancellable dialog for Codex/Copilot. Model entry
+  uses the selected transport's catalog (OpenRouter shows ctx/price/tool
+  claims when published) with a manual-entry fallback. The exact request
+  endpoint is previewed; no `/v1` guessing.
 - **Roles**: Solo profile; Mission orchestrator/workers/auditor (auditor
   defaults to the orchestrator profile). Any provider may fill any role;
   no profile is hardcoded to a vendor. Worker concurrency 1–2 (cap kept).
@@ -614,24 +612,21 @@ to the auditor. No frontier model typing boilerplate. No embeddings in v1.
 ### Implemented cache/replay boundaries
 
 `ProfileCfg.kind` selects Chat Completions, standard `openai-responses`,
-`codex-oauth`, `anthropic`, `gemini`, `gemini-oauth`, `copilot`, or `ollama`;
-native profiles carry the resolved transport through every
-launcher. Standard and OAuth Responses share a decoder that preserves opaque
+`codex-oauth`, `copilot`, or `ollama`; native profiles carry the resolved
+transport through every launcher. Standard and OAuth Responses share a
+decoder that preserves opaque
 reasoning and known cache-read/write zeros. Session identity is frozen on each
 provider instance; configured cache-group keys take precedence. Cache options
 are not inferred from model names or advertised without backend verification.
 
-The Anthropic Messages and Gemini adapters translate frozen tool schemas and
-append-only history at the provider boundary. Native tool results, images,
-terminal events, and provider-reported usage map to the existing StreamOutcome.
-Anthropic thinking blocks and Gemini signed parts use the existing bounded
-private replay sidecars; chat bodies and exports omit opaque state.
 Copilot chooses Chat Completions or Responses from its model catalog, with
-jcode's known GPT-5.6 compatibility route when metadata is absent.
+jcode's known GPT-5.6 compatibility route when metadata is absent. The native
+account adapter consumes frozen tool schemas and append-only history and
+uses the shared streaming decoders, including private Responses replay sidecars.
 
 New account tokens stay in owner-only atomic stores beneath SUI_HOME or
 ~/.config/sui. In-process mutexes and Unix file locks serialize refreshes;
-refreshes retain or rotate the refresh token without racing other workers.
+Copilot refreshes retain the GitHub token while replacing the API token.
 OAuth endpoints are fixed and account API endpoints are pinned/validated;
 project config cannot choose a credential-bearing transport. Account profiles
 do not synthesize API billing costs, even if stale pricing exists in config.

@@ -561,9 +561,6 @@ pub async fn run_with_resume(
         // execute queued effects
         for e in std::mem::take(&mut app.effects) {
             match e {
-                Effect::OpenApiKeyPage => {
-                    crate::auth::login::open_browser("https://platform.claude.com/settings/keys")
-                }
                 Effect::SignIn { provider, request } => {
                     let (input, receiver) = tokio::sync::oneshot::channel();
                     let tx = ctl_tx.clone();

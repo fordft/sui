@@ -13,29 +13,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginProvider {
     Codex,
-    Gemini,
     Copilot,
 }
 impl LoginProvider {
     pub fn parse(name: &str) -> Result<Self> {
         match name {
             "codex" | "openai" | "chatgpt" => Ok(Self::Codex),
-            "gemini" => Ok(Self::Gemini),
             "copilot" => Ok(Self::Copilot),
-            _ => bail!("unknown sign-in provider; choose codex, gemini, or copilot; Claude uses API key setup"),
+            _ => bail!("unknown sign-in provider; choose codex or copilot"),
         }
     }
     pub fn id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
-            Self::Gemini => "gemini",
             Self::Copilot => "copilot",
         }
     }
     pub fn kind(self) -> &'static str {
         match self {
             Self::Codex => "codex-oauth",
-            Self::Gemini => "gemini-oauth",
             Self::Copilot => "copilot",
         }
     }
@@ -43,7 +39,6 @@ impl LoginProvider {
         use crate::config::Transport;
         match self {
             Self::Codex => Transport::CodexOauth,
-            Self::Gemini => Transport::GeminiOauth,
             Self::Copilot => Transport::Copilot,
         }
     }
@@ -56,21 +51,13 @@ impl LoginProvider {
     }
     fn lock_index(self) -> usize {
         match self {
-            Self::Gemini => 0,
-            Self::Copilot => 1,
+            Self::Copilot => 0,
             Self::Codex => unreachable!("Codex owns its refresh chain"),
         }
     }
 }
-pub(crate) const GEMINI_CLIENT_ID: &str =
-    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-// Public installed-application OAuth credentials, from Google's Gemini CLI.
-// This value identifies the desktop client; it is not a user's credential.
-pub(crate) const GEMINI_CLIENT_SECRET: &str = "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";
-pub(crate) const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub(crate) const COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 pub(crate) const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
-pub(crate) const GEMINI_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 pub(crate) const COPILOT_BASE: &str = "https://api.githubcopilot.com";
 
 // No Debug implementation: credential-bearing values must not be printable.
@@ -80,16 +67,13 @@ pub(crate) struct Credentials {
     pub refresh_token: String,
     pub expires_at: u64,
     #[serde(default)]
-    pub project: Option<String>,
-    #[serde(default)]
     pub api_base: Option<String>,
 }
 pub(crate) struct AccountToken {
     pub access: String,
     pub base: String,
-    pub project: Option<String>,
 }
-static REFRESH_LOCKS: LazyLock<[tokio::sync::Mutex<()>; 2]> =
+static REFRESH_LOCKS: LazyLock<[tokio::sync::Mutex<()>; 1]> =
     LazyLock::new(|| std::array::from_fn(|_| tokio::sync::Mutex::new(())));
 
 /// The file lock coordinates separate Sui processes; the mutex coordinates
@@ -241,31 +225,6 @@ pub(crate) async fn bounded_json(mut response: reqwest::Response, label: &str) -
     }
     serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("{label}: invalid JSON response"))
 }
-pub(crate) fn credentials_from_json(
-    v: &Value,
-    previous_refresh: Option<&str>,
-) -> Result<Credentials> {
-    let access = v["access_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .context("missing access token")?;
-    let refresh = v["refresh_token"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or(previous_refresh)
-        .context("missing refresh token; sign in again")?;
-    let expires = v["expires_in"]
-        .as_u64()
-        .filter(|n| *n > 0)
-        .context("missing token expiry")?;
-    Ok(Credentials {
-        access_token: access.into(),
-        refresh_token: refresh.into(),
-        expires_at: now().saturating_add(expires),
-        project: None,
-        api_base: None,
-    })
-}
 pub(crate) fn copilot_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     request
         .header("User-Agent", concat!("sui/", env!("CARGO_PKG_VERSION")))
@@ -298,12 +257,7 @@ pub(crate) async fn account_token(
     provider: LoginProvider,
     http: &reqwest::Client,
 ) -> Result<AccountToken> {
-    let endpoint = match provider {
-        LoginProvider::Gemini => GOOGLE_TOKEN_URL,
-        LoginProvider::Copilot => COPILOT_TOKEN_URL,
-        LoginProvider::Codex => unreachable!(),
-    };
-    account_token_at(provider, http, endpoint).await
+    account_token_at(provider, http, COPILOT_TOKEN_URL).await
 }
 async fn account_token_at(
     provider: LoginProvider,
@@ -314,127 +268,42 @@ async fn account_token_at(
     let _file = StoreLock::acquire(provider).await?;
     let mut stored = read_credentials(provider)?;
     if stored.expires_at <= now().saturating_add(60) {
-        let request = match provider {
-            LoginProvider::Gemini => http.post(endpoint).form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", GEMINI_CLIENT_ID),
-                ("client_secret", GEMINI_CLIENT_SECRET),
-                ("refresh_token", &stored.refresh_token),
-            ]),
-            LoginProvider::Copilot => copilot_headers(
-                http.get(endpoint)
-                    .header("Authorization", format!("Token {}", stored.refresh_token)),
-            ),
-            LoginProvider::Codex => unreachable!(),
-        };
-        let body = json_response(
-            request
-                .send()
-                .await
-                .map_err(crate::provider::failure::Failure::transport)?,
-            "account token refresh",
+        let response = copilot_headers(
+            http.get(endpoint)
+                .header("Authorization", format!("Token {}", stored.refresh_token)),
         )
-        .await?;
-        let mut refreshed = if provider == LoginProvider::Copilot {
-            Credentials {
-                access_token: body["token"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .context("missing Copilot token")?
-                    .into(),
-                refresh_token: stored.refresh_token.clone(),
-                expires_at: body["expires_at"]
-                    .as_u64()
-                    .filter(|n| *n > now())
-                    .context("invalid Copilot expiry")?,
-                project: None,
-                api_base: Some(copilot_base(body["endpoints"]["api"].as_str())?),
-            }
-        } else {
-            credentials_from_json(&body, Some(&stored.refresh_token))?
+        .send()
+        .await
+        .map_err(crate::provider::failure::Failure::transport)?;
+        let body = json_response(response, "account token refresh").await?;
+        let refreshed = Credentials {
+            access_token: body["token"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("missing Copilot token")?
+                .into(),
+            refresh_token: stored.refresh_token.clone(),
+            expires_at: body["expires_at"]
+                .as_u64()
+                .filter(|n| *n > now())
+                .context("invalid Copilot expiry")?,
+            api_base: Some(copilot_base(body["endpoints"]["api"].as_str())?),
         };
-        refreshed.project = stored.project.take();
         save_credentials(provider, &refreshed)?;
         stored = refreshed;
     }
-    let base = match provider {
-        LoginProvider::Gemini => GEMINI_BASE.into(),
-        LoginProvider::Copilot => copilot_base(stored.api_base.as_deref())?,
-        LoginProvider::Codex => unreachable!(),
-    };
     Ok(AccountToken {
+        base: copilot_base(stored.api_base.as_deref())?,
         access: stored.access_token,
-        base,
-        project: stored.project,
     })
 }
-pub(crate) async fn save_gemini_project(project: &str) -> Result<()> {
-    let _lock = REFRESH_LOCKS[LoginProvider::Gemini.lock_index()]
-        .lock()
-        .await;
-    let _file = StoreLock::acquire(LoginProvider::Gemini).await?;
-    let mut stored = read_credentials(LoginProvider::Gemini)?;
-    stored.project = Some(project.into());
-    save_credentials(LoginProvider::Gemini, &stored)?;
-    Ok(())
-}
 pub(crate) fn known_secrets() -> Vec<String> {
-    [LoginProvider::Gemini, LoginProvider::Copilot]
+    [LoginProvider::Copilot]
         .into_iter()
         .filter_map(|p| read_credentials(p).ok())
         .flat_map(|c| [c.access_token, c.refresh_token])
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-/// API keys are entered without echoing and without command-line arguments.
-pub fn read_api_key() -> Result<String> {
-    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        bail!("set ANTHROPIC_API_KEY or pass --key-env for non-interactive setup");
-    }
-    print!("Anthropic API key (hidden; saved to private Sui config)> ");
-    std::io::stdout().flush()?;
-    crossterm::terminal::enable_raw_mode()?;
-    struct Raw;
-    impl Drop for Raw {
-        fn drop(&mut self) {
-            let _ = crossterm::terminal::disable_raw_mode();
-        }
-    }
-    let raw = Raw;
-    let mut key = String::new();
-    loop {
-        if let Event::Key(event) = crossterm::event::read()? {
-            if event.kind == KeyEventKind::Release {
-                continue;
-            }
-            match event.code {
-                KeyCode::Enter => break,
-                KeyCode::Esc => bail!("API key setup canceled"),
-                KeyCode::Char('c' | 'd') if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    bail!("API key setup canceled")
-                }
-                KeyCode::Backspace => {
-                    key.pop();
-                }
-                KeyCode::Char(c) if !event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if key.len().saturating_add(c.len_utf8()) > 4096 {
-                        bail!("API key exceeds 4096 bytes");
-                    }
-                    key.push(c);
-                }
-                _ => {}
-            }
-        }
-    }
-    drop(raw);
-    println!();
-    if key.trim().is_empty() {
-        bail!("API key required");
-    }
-    Ok(key.trim().into())
 }
 
 #[cfg(test)]
@@ -446,17 +315,17 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let _home = crate::test_http::AuthHome::new();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let first = StoreLock::acquire(LoginProvider::Gemini).await.unwrap();
+            let first = StoreLock::acquire(LoginProvider::Copilot).await.unwrap();
             assert!(tokio::time::timeout(
                 Duration::from_millis(100),
-                StoreLock::acquire(LoginProvider::Gemini)
+                StoreLock::acquire(LoginProvider::Copilot)
             )
             .await
             .is_err());
             drop(first);
             assert!(tokio::time::timeout(
                 Duration::from_secs(1),
-                StoreLock::acquire(LoginProvider::Gemini)
+                StoreLock::acquire(LoginProvider::Copilot)
             )
             .await
             .unwrap()
@@ -464,23 +333,25 @@ mod tests {
         });
     }
     #[test]
-    fn concurrent_workers_refresh_once_and_write_a_private_rotated_store() {
+    fn concurrent_workers_refresh_once_and_write_a_private_copilot_store() {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let _home = crate::test_http::AuthHome::new();
         let stored = Credentials {
             access_token: "expired-access".into(),
             refresh_token: "initial-refresh".into(),
             expires_at: 0,
-            project: Some("project-1".into()),
             api_base: None,
         };
-        let path = save_credentials(LoginProvider::Gemini, &stored).unwrap();
-        let (endpoint,captured,task) = crate::test_http::server(vec![(200,"application/json",
-            json!({"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}).to_string())]);
+        let path = save_credentials(LoginProvider::Copilot, &stored).unwrap();
+        let (endpoint, captured, task) = crate::test_http::server(vec![(
+            200,
+            "application/json",
+            json!({"token":"rotated-access","expires_at":now()+3600}).to_string(),
+        )]);
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let client = client().unwrap();
             let requests =
-                (0..8).map(|_| account_token_at(LoginProvider::Gemini, &client, &endpoint));
+                (0..8).map(|_| account_token_at(LoginProvider::Copilot, &client, &endpoint));
             for result in futures_util::future::join_all(requests).await {
                 assert_eq!(result.unwrap().access, "rotated-access");
             }
@@ -488,20 +359,13 @@ mod tests {
         task.join().unwrap();
         let requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].1.contains("grant_type=refresh_token"));
-        assert!(requests[0].1.contains("refresh_token=initial-refresh"));
+        assert!(requests[0].0.starts_with("GET "));
+        assert!(requests[0].0.contains("Token initial-refresh"));
         assert_eq!(
-            read_credentials(LoginProvider::Gemini)
+            read_credentials(LoginProvider::Copilot)
                 .unwrap()
                 .refresh_token,
-            "rotated-refresh"
-        );
-        assert_eq!(
-            read_credentials(LoginProvider::Gemini)
-                .unwrap()
-                .project
-                .as_deref(),
-            Some("project-1")
+            "initial-refresh"
         );
         #[cfg(unix)]
         {
@@ -531,17 +395,7 @@ mod tests {
         task.join().unwrap();
     }
     #[test]
-    fn rotating_refresh_tokens_and_expiry_are_preserved() {
-        let fresh = credentials_from_json(
-            &json!({"access_token":"new","expires_in":3600}),
-            Some("old-refresh"),
-        )
-        .unwrap();
-        assert_eq!(fresh.refresh_token, "old-refresh");
-        assert!(fresh.expires_at > now());
-        assert!(
-            credentials_from_json(&json!({"access_token":"a","refresh_token":"r"}), None).is_err()
-        );
+    fn copilot_endpoints_must_be_trusted() {
         assert!(copilot_base(Some("https://attacker.example")).is_err());
         assert!(copilot_base(Some("https://api.githubcopilot.com@attacker.example")).is_err());
         assert!(copilot_base(Some("https://api.individual.githubcopilot.com")).is_ok());
