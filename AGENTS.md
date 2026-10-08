@@ -25,6 +25,17 @@ cargo clippy --all-targets -- -D warnings   # new code must be clean
 
 Integration binaries: `sui`, `sui-mission`, `sui-certify`.
 
+## Pushing to main
+
+- **Every push to `main` must include a fresh version bump.** This applies
+  to all changes, including TUI, documentation, and follow-up fixes. Update
+  the Sui package version in `Cargo.toml` and its entry in `Cargo.lock` together.
+- Fetch `origin/main` before pushing and confirm the version being pushed is
+  newer than the version on `origin/main`. A bump from an earlier push does
+  not cover later pushes; one bump may cover all commits in the same push.
+- Run the required checks on the final versioned state, include the version
+  bump in the same push as the changes, and report the new version afterward.
+
 ## Invariants — do not break these
 
 - **Contract proof is runtime-owned.** `end_turn` is never deliverable
