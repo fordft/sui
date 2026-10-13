@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>SUI Desktop</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark"><span></span></div><div><strong>SUI</strong><small>DESKTOP</small></div></div>
+      <button id="new-chat" class="primary wide">＋ <span>New chat</span></button>
+      <div class="section-heading"><span>PROJECTS</span><button id="add-project" title="Add project">＋</button></div>
+      <div id="project-list" class="sidebar-list"></div>
+      <div class="section-heading chats-heading"><span>RECENT CHATS</span><button id="refresh-sessions" title="Refresh chats">↻</button></div>
+      <div id="session-list" class="sidebar-list sessions"></div>
+      <div class="sidebar-bottom"><div class="help-dot">?</div><span>Runs stay on the project host</span></div>
+    </aside>
+
+    <main class="chat-panel">
+      <header class="chat-header"><div><div class="eyebrow">WORKSPACE</div><h1 id="workspace-title">Choose a project</h1><div id="workspace-subtitle">Connect to a local or SSH workspace to begin.</div></div><div id="connection-pill" class="status-pill">Disconnected</div></header>
+      <div id="transcript" class="transcript"><div id="welcome" class="welcome"><div class="hero-symbol">S</div><h2>Build from anywhere.</h2><p>Connect SUI to a workspace, talk to your agent, and review your app in the browser beside the chat.</p><button id="welcome-connect" class="secondary">Connect a project <span>→</span></button></div></div>
+      <div class="chat-bottom">
+        <div id="permission" class="permission hidden"><div><div class="eyebrow">ACTION REQUIRES APPROVAL</div><strong id="permission-summary"></strong></div><div class="permission-actions"><button data-choice="deny" class="small danger">Deny</button><button data-choice="once" class="small">Allow once</button><button data-choice="session" class="small primary">Allow session</button></div></div>
+        <div id="annotation-card" class="annotation-card hidden"><div class="annotation-head"><span class="annotation-icon">◎</span><strong>Browser annotation</strong><button id="remove-annotation" aria-label="Remove annotation">×</button></div><div id="annotation-target" class="annotation-target"></div><textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2"></textarea></div>
+        <div class="composer"><textarea id="message" rows="2" placeholder="Ask SUI to work on this project…" disabled></textarea><div class="composer-footer"><span id="composer-hint">Connect a project to start</span><div><button id="stop" class="stop hidden">Stop</button><button id="send" class="send" disabled aria-label="Send message">↑</button></div></div></div>
+      </div>
+    </main>
+
+    <section class="browser-panel"><div class="browser-top"><div class="browser-title"><span class="browser-glyph">◉</span><strong>Browser</strong><span class="browser-tag">PREVIEW</span></div><button id="annotate" class="annotation-button" disabled>◎ Annotate</button></div><div class="browser-nav"><button id="back" title="Back">←</button><button id="forward" title="Forward">→</button><button id="reload" title="Reload">↻</button><input id="browser-url" type="text" spellcheck="false" placeholder="http://localhost:3000" aria-label="Browser URL"><button id="go" title="Go">→</button></div><div id="remote-preview" class="remote-preview hidden"><span>REMOTE PREVIEW PORT</span><input id="remote-port" type="number" min="1" max="65535" value="3000"><button id="open-preview">Open</button></div><div id="browser-viewport" class="browser-viewport"><div class="browser-empty"><div class="empty-globe">◎</div><h3>See what you're building.</h3><p>Open a local URL or forward a port from your SSH workspace, then select anything on the page to leave a comment for SUI.</p></div></div><div class="browser-foot"><span class="live-dot"></span><span id="browser-status">Ready for a preview</span></div></section>
+  </div>
+
+  <dialog id="connect-dialog"><form method="dialog" id="connect-form"><div class="dialog-head"><div class="dialog-logo">S</div><button type="button" id="close-dialog" aria-label="Close">×</button></div><div class="eyebrow">GET STARTED</div><h2>Connect your workspace</h2><p>Work on this Mac or connect to a machine over SSH. The SUI agent runs where your code lives.</p><div class="mode-switch"><label><input type="radio" name="kind" value="ssh" checked><span>⌘ &nbsp; SSH host</span></label><label><input type="radio" name="kind" value="local"><span>▣ &nbsp; This Mac</span></label></div><label id="host-label" class="field">SSH host<input id="host" placeholder="you@dev-machine" autocomplete="off" required></label><label class="field">Workspace path<input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" required></label><label class="field">SUI model profile<input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label><button type="button" id="show-model-setup" class="setup-toggle">＋ Configure a model on this machine</button><div id="model-setup" class="model-setup hidden"><label class="field">Transport<select id="model-kind"><option value="chat-completions">OpenAI compatible</option><option value="openai-responses">OpenAI Responses</option><option value="ollama">Ollama</option></select></label><label class="field">API base URL<input id="model-url" value="https://api.openai.com/v1" spellcheck="false"></label><label class="field">Model ID<input id="model-id" placeholder="Enter the exact model ID"></label><label class="field">API key (saved privately on the host)<input id="model-key" type="password" autocomplete="new-password"></label><button type="button" id="save-model" class="secondary wide">Save model profile</button></div><p class="field-help">SSH uses your keys and host verification. New host keys are saved on first connection; changed keys are rejected.</p><button type="button" id="install-remote" class="setup-toggle">↓ Install or update SUI on SSH host</button><div id="connect-error" class="form-error hidden"></div><button type="submit" id="connect-button" class="primary wide">Connect to project <span>→</span></button></form></dialog>
+</body>
+</html>

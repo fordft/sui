@@ -1,0 +1,24 @@
+{
+  "name": "sui-desktop",
+  "version": "0.11.2",
+  "private": true,
+  "description": "SUI Desktop for macOS",
+  "main": "main.js",
+  "scripts": {
+    "dev": "cargo build --manifest-path ../Cargo.toml --bin sui && node node_modules/electron/install.js && electron .",
+    "test": "node --test test/*.test.js",
+    "dist:mac": "cargo build --manifest-path ../Cargo.toml --release --bin sui && node node_modules/electron/install.js && electron-builder --mac dmg zip"
+  },
+  "build": {
+    "appId": "dev.sui.desktop",
+    "productName": "SUI Desktop",
+    "files": ["main.js", "preload.js", "bridge.js", "index.html", "app.js", "styles.css"],
+    "extraResources": [{"from": "../target/release/sui", "to": "sui"}, {"from": "../install.sh", "to": "install.sh"}],
+    "mac": {"category": "public.app-category.developer-tools", "target": ["dmg", "zip"]},
+    "directories": {"output": "dist"}
+  },
+  "devDependencies": {
+    "electron": "44.7.1",
+    "electron-builder": "26.15.3"
+  }
+}
