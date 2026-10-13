@@ -59,7 +59,10 @@ fn desktop_setup_and_bridge_start_without_a_terminal() {
     let hello: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(hello["type"], "hello");
     assert_eq!(hello["profile"], "desktop-test");
-    assert_eq!(hello["workspace"], workspace.to_str().unwrap());
+    assert_eq!(
+        hello["workspace"],
+        workspace.canonicalize().unwrap().to_str().unwrap()
+    );
     bridge
         .stdin
         .take()
