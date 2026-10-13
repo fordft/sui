@@ -20,12 +20,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15-intel
             arch: intel
-          - runner: macos-14-arm64
+            cpu: x86_64
+          - runner: macos-14
             arch: apple-silicon
+            cpu: arm64
     runs-on: ${{ matrix.runner }}
     steps:
+      - run: test "$(uname -m)" = "${{ matrix.cpu }}"
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
