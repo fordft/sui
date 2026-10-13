@@ -9,6 +9,17 @@ use sui::{agent, config, context, journal, permission, provider, tools, web};
 enum Sub {
     /// Terminal UI (also the default when run bare on a terminal)
     Tui,
+    /// JSON-lines desktop transport over stdio (also works through SSH)
+    DesktopBridge {
+        #[arg(long)]
+        workspace: std::path::PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        resume: Option<String>,
+    },
+    /// Save a desktop model profile from one private JSON line on stdin
+    DesktopSetup,
     /// Sign in to an account or configure local/custom API access.
     #[command(alias = "login")]
     Auth {
@@ -169,6 +180,17 @@ async fn setup_endpoint(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Sub::DesktopBridge {
+        workspace,
+        profile,
+        resume,
+    }) = &cli.sub
+    {
+        return sui::desktop_bridge::run(workspace, profile, resume.as_deref()).await;
+    }
+    if let Some(Sub::DesktopSetup) = &cli.sub {
+        return sui::desktop_bridge::setup();
+    }
     if cli.prompt.as_deref() == Some("acp-bridge") {
         anyhow::bail!("ACP agents and acp-bridge have been removed; use Sui's native profiles");
     }

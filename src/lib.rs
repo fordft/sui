@@ -4,6 +4,7 @@ pub mod charter;
 pub mod codex;
 pub mod config;
 pub mod context;
+pub mod desktop_bridge;
 pub mod events;
 pub mod export;
 pub mod journal;

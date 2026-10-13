@@ -487,6 +487,21 @@ deliberately; repair cost/success is measured before any second strategy.
 Deferred: auto mode-selection, pools >2, persistent repository-wide indexing. Native proactive compaction
 uses an append-only summary request and an explicit checkpoint epoch transition.
 
+## Desktop transport
+
+`sui desktop-bridge --workspace <path> --profile <name>` is a private
+JSON-lines stdio transport for the desktop shell, including over SSH. It uses
+the existing native Solo driver, typed `UiEvent` observations, runtime-owned
+permission replies and native session replay. The process is the authority for
+tools, journals, workspace scope and stop state. The Electron shell only
+projects bounded events and sends user commands. `sui desktop-setup` accepts
+one private JSON line and saves a model profile using the existing owner-only
+global configuration path. Browser tabs are separate sandboxed Electron guest
+views; annotation becomes a labeled user message with URL, target and bounds.
+Remote loopback previews use SSH forwarding. Browser guest content receives no
+filesystem, shell, Electron IPC or agent permission authority.
+
+
 ## TUI
 
 `sui tui` — Ratatui/Crossterm shell over the frozen core. The UI renders
