@@ -10,8 +10,21 @@ ever covering it. The Rust agent runs on the machine holding the workspace;
 remote previews use SSH port forwarding. The app can install SUI on an SSH
 host and save a model profile from its connection screen. See
 [desktop/README.md](desktop/README.md) for build, setup, the Mac update button,
-and the current unsigned-app limitation.
+and the current notarization limitation.
 The terminal UI remains available.
+
+Mac Desktop releases from 0.11.6 use ad-hoc signatures, without Apple Developer
+ID signing or notarization. To install one, run the explicit installer:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/fordft/sui/releases/latest/download/install-desktop.sh | sh
+```
+
+It verifies the matching Apple Silicon or Intel DMG checksum and app signatures,
+then installs to `~/Applications/SUI Desktop.app` and removes download quarantine
+from that app only. Direct DMG downloads still require macOS approval. Releases
+before 0.11.6 do not include this installer.
 
 Cache-first multi-agent coding harness. A strong model decomposes and
 audits; cheap workers implement in isolated git worktrees; deterministic
