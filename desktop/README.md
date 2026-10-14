@@ -11,6 +11,11 @@ agent loop.
 - **Layout:** a collapsible sidebar (projects and recent chats), the
   conversation, and an optional browser preview panel. Below 1000 px wide,
   opening one of the sidebar or preview closes the other.
+- **Project navigation:** search saved projects by name, path, or host with
+  Find a project (⌘/Ctrl+K). Filtering the list keeps the current project open.
+- **Starting and following work:** starter cards fill an editable draft without
+  sending it. The composer shows the connected model, even in a narrow window.
+  Jump to latest returns to the end of a long conversation when you scroll up.
 - **Themes:** system, light, or dark, from Appearance & companion. Fonts are
   bundled (Inter, SIL OFL); Thai and other scripts use your system fonts.
 - **Window chrome:** macOS keeps its traffic lights in the title row, Windows
@@ -28,8 +33,8 @@ agent loop.
   color, accessory, size, and name — or turn it off — in Appearance &
   companion. Motion can be Full, Calm (it stays put), or Off; it defaults to Calm
   when the system asks for reduced motion.
-- **Shortcuts** (⌘ on macOS, Ctrl elsewhere): B sidebar, J preview, N new chat,
-  `,` appearance.
+- **Shortcuts** (⌘ on macOS, Ctrl elsewhere): B sidebar, J preview, K project
+  search, N new chat, `,` appearance.
 
 Appearance choices are stored on this device only and never sent to SUI.
 
@@ -55,6 +60,9 @@ architectures, runs the bundled Rust executable, and checks that the packaged
 app stays running on Mac runners. It also exercises installation and replacement
 with local release artifacts before attaching the packages to a tagged GitHub
 Release after the core release is ready.
+The same workflow runs the real Electron interface test on Linux, including
+project search, starter drafts, transcript navigation, annotations, and the
+minimum window size; Desktop publishing requires that test to pass too.
 The app's sidebar checks GitHub Releases for a newer Mac build and can download,
 verify, and open its DMG. Drag the app to Applications to finish updating.
 

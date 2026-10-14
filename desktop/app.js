@@ -4,10 +4,10 @@ const state = {
   browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: []
 };
 const SUGGESTIONS = [
-  'Explain how this codebase is organized',
-  'Find and fix a failing test',
-  'Review my uncommitted changes',
-  'Add tests for the riskiest code'
+  { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
+  { title: 'Fix a bug', detail: 'Track down a failing test', icon: 'terminal', prompt: 'Find and fix a failing test' },
+  { title: 'Review changes', detail: 'Get a second look before you ship', icon: 'chat', prompt: 'Review my uncommitted changes' },
+  { title: 'Add tests', detail: 'Cover the code that matters most', icon: 'shield', prompt: 'Add tests for the riskiest code' }
 ];
 const pet = () => window.SuiUI.pet;
 
@@ -53,6 +53,7 @@ function updateSend() {
 function setBusy(busy) {
   const ready = !!state.hello;
   $('message').disabled = !ready;
+  $('composer-context').classList.toggle('hidden', !ready);
   $('stop').classList.toggle('hidden', !busy);
   $('composer-hint').textContent = busy ? 'SUI is working…' : ready ? 'Enter to send · Shift+Enter for a new line' : 'Connect a project to start';
   $('connection-pill').classList.toggle('busy', busy && ready);
@@ -65,9 +66,13 @@ function setBusy(busy) {
 const transcript = () => $('transcript');
 const pinned = () => { const t = transcript(); return t.scrollHeight - t.scrollTop - t.clientHeight < 90; };
 function scrollToEnd(force = true) { if (force) transcript().scrollTop = transcript().scrollHeight; }
+function updateScrollButton() {
+  $('jump-to-latest').classList.toggle('hidden', state.messages === 0 || pinned());
+}
 
 function setStage() {
   $('stage').dataset.stage = state.messages === 0 ? 'hero' : 'chat';
+  updateScrollButton();
   pet().refresh();
 }
 
@@ -174,8 +179,12 @@ function displayProject(item, className = 'project-row') {
 }
 
 function renderProjects() {
-  $('project-list').replaceChildren(...state.projects.map(item => displayProject(item)));
-  if (!state.projects.length) $('project-list').append(h('div', 'sidebar-empty', 'No projects yet'));
+  const query = $('project-filter').value.trim().toLocaleLowerCase();
+  const projects = state.projects.filter(item => `${projectName(item)} ${hostLabel(item)} ${item.workspace}`.toLocaleLowerCase().includes(query));
+  $('project-list').replaceChildren(...projects.map(item => displayProject(item)));
+  $('project-count').textContent = String(state.projects.length);
+  $('clear-project-filter').classList.toggle('hidden', !query);
+  if (!projects.length) $('project-list').append(h('div', 'sidebar-empty', query ? 'No matching projects' : 'No projects yet'));
   renderWelcome();
 }
 
@@ -194,10 +203,15 @@ function renderWelcome() {
   const suggestions = $('suggestions');
   suggestions.classList.toggle('hidden', !connected);
   if (connected && !suggestions.childElementCount) {
-    for (const text of SUGGESTIONS) {
-      const chip = h('button', 'suggestion', text);
+    for (const suggestion of SUGGESTIONS) {
+      const chip = h('button', 'suggestion');
       chip.type = 'button';
-      chip.addEventListener('click', () => { $('message').value = text; window.SuiUI.autosize($('message')); updateSend(); $('message').focus(); });
+      const mark = h('span', 'suggestion-icon');
+      mark.append(icon(suggestion.icon));
+      const text = h('span', 'suggestion-text');
+      text.append(h('strong', '', suggestion.title), h('small', '', suggestion.detail));
+      chip.append(mark, text, icon('arrow-right'));
+      chip.addEventListener('click', () => { $('message').value = suggestion.prompt; window.SuiUI.autosize($('message')); updateSend(); $('message').focus(); });
       suggestions.append(chip);
     }
   }
@@ -288,6 +302,10 @@ async function connect(item, resume = null) {
     pet().setAsking(false);
     $('workspace-title').textContent = projectName(item);
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
+    $('composer-model').textContent = hello.model;
+    $('composer-model').title = hello.model;
+    $('composer-target').textContent = `${projectName(item)} · ${hostLabel(item)}`;
+    $('composer-target').title = `${hostLabel(item)} · ${item.workspace}`;
     document.title = `${projectName(item)} · SUI`;
     setStatus(item.kind === 'ssh' ? 'SSH connected' : 'Local', true);
     transcript().replaceChildren();
@@ -326,6 +344,7 @@ function clearAnnotation() {
   $('annotation-card').classList.add('hidden');
   $('annotation-comment').value = '';
   updateSend();
+  pet().refresh();
 }
 
 async function send() {
@@ -452,6 +471,7 @@ async function annotate() {
       state.annotation = selected;
       $('annotation-target').textContent = `${selected.url} · ${selected.selector || 'Selected area'}`;
       $('annotation-card').classList.remove('hidden');
+      pet().refresh();
       $('annotation-comment').focus();
       updateSend();
       $('browser-status').textContent = 'Selection ready · Write your comment beside the chat';
@@ -485,6 +505,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('close-dialog').addEventListener('click', () => $('connect-dialog').close());
   for (const id of ['add-project', 'welcome-connect']) $(id).addEventListener('click', () => showDialog());
   for (const id of ['new-chat', 'tb-new-chat']) $(id).addEventListener('click', newChat);
+  $('project-filter').addEventListener('input', renderProjects);
+  $('clear-project-filter').addEventListener('click', () => { $('project-filter').value = ''; renderProjects(); $('project-filter').focus(); });
+  $('jump-to-latest').addEventListener('click', () => scrollToEnd());
+  transcript().addEventListener('scroll', updateScrollButton, { passive: true });
+  new ResizeObserver(updateScrollButton).observe(transcript());
   $('refresh-sessions').addEventListener('click', () => window.sui.command({ type: 'list_sessions' }).catch(() => {}));
   $('send').addEventListener('click', send);
   $('message').addEventListener('input', () => { ui.autosize($('message')); updateSend(); pet().typing(); });

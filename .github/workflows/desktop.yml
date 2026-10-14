@@ -19,6 +19,29 @@ permissions:
   contents: read
 
 jobs:
+  linux-ui:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install Electron display dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2
+      - run: npm ci
+        working-directory: desktop
+      - run: cargo build --locked --bin sui
+      - run: npm test
+        working-directory: desktop
+      - name: Exercise the Desktop interface
+        run: xvfb-run -a node_modules/.bin/electron --no-sandbox test/electron-smoke.js
+        working-directory: desktop
+
   mac:
     strategy:
       fail-fast: false
@@ -154,7 +177,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: mac
+    needs: [mac, linux-ui]
     runs-on: ubuntu-latest
     permissions:
       contents: write

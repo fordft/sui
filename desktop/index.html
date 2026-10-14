@@ -43,6 +43,8 @@
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
     <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
   </svg>
 
   <div class="app">
@@ -67,12 +69,17 @@
         <div class="sb-inner">
           <div class="brand">
             <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="bm" x1="0" y1="0" x2="0" y2="1"><stop class="bm-a" offset="0"/><stop class="bm-b" offset="1"/></linearGradient></defs><path fill="url(#bm)" d="M4 22c0-8 5-15 12-15s12 7 12 15c0 3-3.5 4-12 4S4 25 4 22z"/><ellipse class="bm-eye" cx="12" cy="18" rx="1.7" ry="2.4"/><ellipse class="bm-eye" cx="20" cy="18" rx="1.7" ry="2.4"/><ellipse class="bm-gloss" cx="11" cy="12.5" rx="3.2" ry="1.6" transform="rotate(-24 11 12.5)"/></svg>
-            <span class="brand-name">SUI</span>
+            <span class="brand-name">SUI</span><span class="brand-edition">Desktop</span>
           </div>
           <button id="new-chat" class="btn btn-soft sb-new" type="button"><svg class="i"><use href="#i-plus"/></svg><span>New chat</span><kbd class="kbd" data-kbd="N"></kbd></button>
+          <div class="project-search">
+            <svg class="i" aria-hidden="true"><use href="#i-search"/></svg>
+            <input id="project-filter" type="search" placeholder="Find a project…" aria-label="Find a project" data-tip="Find a project" data-key="K" autocomplete="off" spellcheck="false">
+            <button id="clear-project-filter" class="icon-btn sm hidden" type="button" aria-label="Clear project search"><svg class="i"><use href="#i-x"/></svg></button>
+          </div>
           <nav class="sb-scroll" aria-label="Workspace navigation">
             <section class="sb-section">
-              <header class="sb-head"><h2>Projects</h2><button id="add-project" class="icon-btn sm" type="button" aria-label="Add project" data-tip="Add project"><svg class="i"><use href="#i-plus"/></svg></button></header>
+              <header class="sb-head"><h2>Projects <span id="project-count" class="project-count">0</span></h2><button id="add-project" class="icon-btn sm" type="button" aria-label="Add project" data-tip="Add project"><svg class="i"><use href="#i-plus"/></svg></button></header>
               <div id="project-list" class="sb-list"></div>
             </section>
             <section class="sb-section">
@@ -94,6 +101,7 @@
             <div id="transcript" class="transcript" tabindex="-1" aria-label="Conversation"></div>
             <section id="welcome" class="welcome" aria-labelledby="welcome-title">
               <div id="hero-slot" class="hero-slot" aria-hidden="true"></div>
+              <div class="welcome-eyebrow"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span>Your coding workspace</span></div>
               <h2 id="welcome-title">Build from anywhere.</h2>
               <p id="welcome-text">Connect SUI to a workspace, talk to your agent, and review your app in the preview beside the chat.</p>
               <div id="welcome-actions" class="welcome-actions">
@@ -102,6 +110,7 @@
               <div id="suggestions" class="suggestions hidden"></div>
               <div id="welcome-recents" class="recents hidden"></div>
             </section>
+            <button id="jump-to-latest" class="jump-latest hidden" type="button" aria-label="Jump to latest message"><svg class="i"><use href="#i-arrow-down"/></svg><span>Jump to latest</span></button>
           </div>
 
           <div id="pet-lane" class="lane" aria-hidden="true"></div>
@@ -122,6 +131,10 @@
               <textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2" aria-label="Annotation comment"></textarea>
             </div>
             <div class="composer">
+              <div id="composer-context" class="composer-context hidden">
+                <span class="model-pill"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span></span>
+                <span id="composer-target" class="composer-target"></span>
+              </div>
               <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>
               <div class="composer-foot">
                 <span id="composer-hint" class="hint">Connect a project to start</span>
