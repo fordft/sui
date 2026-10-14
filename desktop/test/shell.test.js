@@ -10,6 +10,10 @@ const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 const html = read('index.html');
 const pkg = JSON.parse(read('package.json'));
 
+test('Mac artifact names include architecture without spaces', () => {
+  assert.equal(pkg.build.mac.artifactName, 'SUI.Desktop-${version}-${arch}.${ext}');
+});
+
 function covered(file) {
   return pkg.build.files.some(pattern => pattern === file || (pattern.endsWith('/*') && file.startsWith(pattern.slice(0, -1))));
 }
