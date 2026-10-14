@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('sui', {
   platform: process.platform,
+  checkUpdate: () => ipcRenderer.invoke('sui:update-check'),
+  downloadUpdate: () => ipcRenderer.invoke('sui:update-download'),
   projects: () => ipcRenderer.invoke('sui:projects'),
   connect: (item, resume) => ipcRenderer.invoke('sui:connect', item, resume),
   configure: (item, profile) => ipcRenderer.invoke('sui:configure', item, profile),

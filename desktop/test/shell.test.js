@@ -24,7 +24,8 @@ test('every asset the page loads exists and is packaged', () => {
   const fonts = [...read('styles.css').matchAll(/url\("([^"]+)"\)/g)].map(m => m[1]);
   assert.ok(fonts.length >= 1);
   for (const font of fonts) { assert.ok(fs.existsSync(path.join(root, font)), font); assert.ok(covered(font), `${font} is packaged`); }
-  for (const main of [pkg.main, 'preload.js', 'bridge.js']) assert.ok(covered(main), `${main} is packaged`);
+  for (const main of [pkg.main, 'preload.js', 'bridge.js', 'update.js']) assert.ok(covered(main), `${main} is packaged`);
+  assert.ok(fs.existsSync(path.join(root, 'build/icon.svg')), 'the packaged app has a SUI icon');
 });
 
 test('markup stays inside the CSP: no inline script, style, or handlers', () => {

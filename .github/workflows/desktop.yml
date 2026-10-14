@@ -1,6 +1,9 @@
 name: Desktop
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
   pull_request:
     paths:
       - 'desktop/**'
@@ -45,6 +48,20 @@ jobs:
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Inspect packaged DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg=$(find desktop/dist -maxdepth 1 -name '*.dmg' -print -quit)
+          mkdir "$RUNNER_TEMP/sui-mounted"
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/sui-mounted" "$dmg"
+          trap 'hdiutil detach "$RUNNER_TEMP/sui-mounted"' EXIT
+          bundle="$RUNNER_TEMP/sui-mounted/SUI Desktop.app"
+          test -d "$bundle"
+          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$bundle/Contents/Info.plist")
+          test -f "$bundle/Contents/Resources/${icon%.icns}.icns"
+          lipo "$bundle/Contents/MacOS/SUI Desktop" -verify_arch "${{ matrix.cpu }}"
+          test -f "$bundle/Contents/Resources/sui"
       - uses: actions/upload-artifact@v4
         with:
           name: sui-desktop-${{ matrix.arch }}
@@ -52,3 +69,35 @@ jobs:
             desktop/dist/*.dmg
             desktop/dist/*.zip
           if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: mac
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sui-desktop-*
+          path: desktop-assets
+          merge-multiple: true
+      - name: Upload desktop assets to the core release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd desktop-assets
+          sha256sum *.dmg *.zip > "SUI-Desktop-${TAG#v}-SHA256SUMS.txt"
+          for attempt in {1..60}; do
+            if gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx false; then
+              gh release upload "$TAG" ./*.dmg ./*.zip ./SUI-Desktop-*.txt --clobber
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Core release $TAG was not published within 30 minutes" >&2
+          exit 1

@@ -50,8 +50,18 @@ npm run dist:mac
 ```
 
 Artifacts appear in `desktop/dist/`. The GitHub `Desktop` workflow builds both
-Apple Silicon and Intel artifacts. macOS may require one-time approval to open
-an unsigned local build. Release signing and notarization are not configured.
+Apple Silicon and Intel DMG/ZIP files, inspects their contents on Mac runners,
+and attaches them to a tagged GitHub Release after the core release is ready.
+The app's sidebar checks GitHub Releases for a newer Mac build and can download,
+verify, and open its DMG. Drag the app to Applications to finish updating.
+
+**Mac download limit:** release signing and Apple notarization are not yet
+configured. macOS Gatekeeper can show “SUI Desktop.app is damaged and can't be
+opened” for the downloaded app, including when its SHA-256 matches the release.
+The in-app update button cannot remove this restriction. If you trust this
+release and macOS offers it, use System Settings → Privacy & Security → Open
+Anyway after attempting to open the app. A normal first-launch experience and
+automatic install/restart require Apple Developer ID signing and notarization.
 
 On Linux, `npm run dist:linux` builds an AppImage (x86-64 or ARM64, matching the
 machine). It is not built in CI. Native Windows is not supported because SUI does

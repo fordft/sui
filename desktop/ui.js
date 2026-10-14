@@ -178,6 +178,42 @@
 
   // ── boot ──────────────────────────────────────────────────────────────
 
+  function wireUpdates() {
+    if (!isMac) return;
+    const button = $('update-button');
+    const label = button.querySelector('span');
+    button.classList.remove('hidden');
+    let available = false;
+    let busy = false;
+    const check = async () => {
+      busy = true; button.disabled = true; label.textContent = 'Checking for updates…';
+      try {
+        const result = await window.sui.checkUpdate();
+        available = result.available;
+        label.textContent = available ? `Download v${result.version}` : 'Up to date · Check again';
+        button.title = available ? 'Download and open the new DMG' : 'Check for updates';
+      } catch (error) {
+        available = false;
+        label.textContent = 'Update check failed · Retry';
+        button.title = error.message;
+      } finally { busy = false; button.disabled = false; }
+    };
+    button.addEventListener('click', async () => {
+      if (busy) return;
+      if (!available) return check();
+      busy = true; button.disabled = true; label.textContent = 'Downloading update…';
+      try {
+        await window.sui.downloadUpdate();
+        label.textContent = 'DMG opened · Drag to Applications';
+        button.title = 'After copying, reopen SUI Desktop from Applications.';
+      } catch (error) {
+        label.textContent = 'Download failed · Retry';
+        button.title = error.message;
+      } finally { busy = false; button.disabled = false; }
+    });
+    check();
+  }
+
   function autosize(el, max = 220) {
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, max) + 'px';
@@ -225,6 +261,7 @@
       e.preventDefault();
     });
     wireAppearance();
+    wireUpdates();
   }
 
   const api = {
