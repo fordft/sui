@@ -26,6 +26,7 @@ async function run() {
     const win = BrowserWindow.getAllWindows()[0];
     assert.ok(win, 'SUI window opened');
     await new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+    const ui = code => win.webContents.executeJavaScript(code);
     const ready = await win.webContents.executeJavaScript('document.getElementById("connect-dialog").open && !!window.sui');
     assert.equal(ready, true, 'connection form is visible and preload bridge works');
     await win.webContents.executeJavaScript(`{
@@ -39,6 +40,25 @@ async function run() {
       await pause(50);
     }
     assert.equal(await win.webContents.executeJavaScript('document.getElementById("connection-pill").textContent'), 'Local', 'local SUI bridge connected');
+    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'test-model', 'the connected model is visible beside the draft');
+    assert.equal(await ui('document.querySelectorAll(".suggestion").length'), 4, 'starter cards are available');
+    await ui('document.querySelector(".suggestion").click()');
+    assert.equal(await ui('document.getElementById("message").value'), 'Explain how this codebase is organized');
+    assert.equal(await ui('state.activeRun'), null, 'a starter card only fills the draft');
+    await ui('document.getElementById("message").value = ""; document.getElementById("message").dispatchEvent(new Event("input"))');
+    await ui('document.getElementById("project-filter").value = "no-matching-project"; document.getElementById("project-filter").dispatchEvent(new Event("input"))');
+    assert.equal(await ui('document.getElementById("project-list").textContent'), 'No matching projects');
+    assert.equal(await ui('document.getElementById("connection-pill").textContent'), 'Local', 'filtering keeps the project connected');
+    await ui('document.getElementById("clear-project-filter").click()');
+    assert.equal(await ui('document.querySelectorAll(".project-row").length'), 1);
+    assert.equal(await ui('document.getElementById("project-count").textContent'), '1');
+    await ui('window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: SuiUI.platform !== "darwin", metaKey: SuiUI.platform === "darwin", bubbles: true }))');
+    assert.equal(await ui('document.activeElement.id'), 'project-filter', 'project search shortcut focuses the search');
+    await ui('document.getElementById("sb-appearance").click(); document.querySelector(\'input[name="motion"][value="off"]\').click(); document.getElementById("appearance-dialog").close(); document.getElementById("project-filter").blur()');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) {
+      await pause(200);
+      fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-welcome.png'), (await win.capturePage()).toPNG());
+    }
     const url = `http://127.0.0.1:${server.address().port}/`;
     await win.webContents.executeJavaScript(`{document.getElementById('browser-url').value=${JSON.stringify(url)};document.getElementById('go').click()}`);
     await pause(200);
@@ -79,7 +99,6 @@ async function run() {
     // The guest page is a native view above the renderer: it must step aside for
     // dialogs and leave with its panel, then come back.
     const attached = () => win.contentView.children.some(view => view.webContents);
-    const ui = code => win.webContents.executeJavaScript(code);
     assert.equal(attached(), true);
     await ui('document.getElementById("sb-appearance").click()');
     await pause(150);
@@ -112,6 +131,35 @@ async function run() {
     })`);
     assert.ok(laneGeometry.petTop >= laneGeometry.laneTop - 1, 'chat companion stays below the transcript');
     assert.ok(laneGeometry.petBottom <= laneGeometry.laneBottom + 1, 'chat companion stays above the composer');
+    await ui('appendMessage("assistant", "I’ll inspect the project, make a focused change, and verify the result.\\n\\n```sh\\ncargo test\\n```")');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) {
+      await pause(100);
+      fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-chat.png'), (await win.capturePage()).toPNG());
+    }
+    await ui('for (let i = 0; i < 18; i++) appendMessage(i % 2 ? "assistant" : "user", "Conversation scroll test " + i + "\\n" + "A longer explanation to exercise navigation. ".repeat(12)); document.getElementById("transcript").scrollTop = 0');
+    await pause(500);
+    assert.equal(await ui('document.getElementById("jump-to-latest").classList.contains("hidden")'), false, 'scrolling up reveals Jump to latest');
+    await ui('document.getElementById("jump-to-latest").click()');
+    for (let n = 0; n < 40; n++) {
+      if (await ui('document.getElementById("jump-to-latest").classList.contains("hidden")')) break;
+      await pause(50);
+    }
+    assert.equal(await ui('document.getElementById("jump-to-latest").classList.contains("hidden")'), true, 'Jump to latest returns to the end');
+    win.setSize(720, 560);
+    await pause(400);
+    assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'the minimum window width has no page overflow');
+    assert.equal(await ui('document.getElementById("composer-model").getBoundingClientRect().width > 0'), true, 'the model remains visible in a small window');
+    assert.equal(await ui('document.getElementById("send").getBoundingClientRect().right <= innerWidth'), true, 'the send control stays inside the window');
+    await ui('newChat()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello !== null && document.getElementById("stage").dataset.stage === "hero"')) break;
+      await pause(50);
+    }
+    await pause(200);
+    assert.equal(await ui('document.querySelector(".suggestion:last-child").getBoundingClientRect().bottom <= document.getElementById("composer-context").getBoundingClientRect().top'), true, 'starter cards fit above the composer in a small window');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) {
+      fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-compact.png'), (await win.capturePage()).toPNG());
+    }
     console.log('DESKTOP_SMOKE_OK');
   } finally { server.close(); fs.rmSync(tempHome, { recursive: true, force: true }); fs.rmSync(workspace, { recursive: true, force: true }); app.quit(); }
 }

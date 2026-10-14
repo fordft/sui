@@ -257,6 +257,7 @@
       if (k === 'b') toggleSidebar();
       else if (k === 'j') togglePreview();
       else if (k === 'n') $('new-chat').click();
+      else if (k === 'k') { setSidebar(true); $('project-filter').focus(); $('project-filter').select(); }
       else return;
       e.preventDefault();
     });
