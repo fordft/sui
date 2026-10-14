@@ -1,38 +1,265 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-platform="linux" data-motion="full" data-sidebar="open" data-preview="closed" data-pet="on">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'">
+  <meta name="color-scheme" content="dark light">
   <title>SUI Desktop</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="pet.css">
+  <script src="boot.js"></script>
+  <script src="markdown.js" defer></script>
+  <script src="pet.js" defer></script>
+  <script src="ui.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand"><div class="brand-mark"><span></span></div><div><strong>SUI</strong><small>DESKTOP</small></div></div>
-      <button id="new-chat" class="primary wide">＋ <span>New chat</span></button>
-      <div class="section-heading"><span>PROJECTS</span><button id="add-project" title="Add project">＋</button></div>
-      <div id="project-list" class="sidebar-list"></div>
-      <div class="section-heading chats-heading"><span>RECENT CHATS</span><button id="refresh-sessions" title="Refresh chats">↻</button></div>
-      <div id="session-list" class="sidebar-list sessions"></div>
-      <div class="sidebar-bottom"><div class="help-dot">?</div><span>Runs stay on the project host</span></div>
-    </aside>
+  <svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+    <symbol id="i-panel-left" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+    <symbol id="i-panel-right" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14-4M4 5v4h4"/><path d="M4 13a8 8 0 0 0 14 4M20 19v-4h-4"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="i-slime" viewBox="0 0 24 24"><path d="M4.5 17.5c0-5 3.2-9.5 7.5-9.5s7.5 4.5 7.5 9.5c0 1.6-2.2 2-7.5 2s-7.5-.4-7.5-2z"/><path d="M9.5 14h.01M14.5 14h.01"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="i-reload" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></symbol>
+    <symbol id="i-crosshair" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6z"/></symbol>
+    <symbol id="i-shield-alert" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6z"/><path d="M12 8v4.5M12 15.5h.01"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M5 7l5 5-5 5M12 18h7"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4 6.5 6.5 0 0 0 20 14.5z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></symbol>
+  </svg>
 
-    <main class="chat-panel">
-      <header class="chat-header"><div><div class="eyebrow">WORKSPACE</div><h1 id="workspace-title">Choose a project</h1><div id="workspace-subtitle">Connect to a local or SSH workspace to begin.</div></div><div id="connection-pill" class="status-pill">Disconnected</div></header>
-      <div id="transcript" class="transcript"><div id="welcome" class="welcome"><div class="hero-symbol">S</div><h2>Build from anywhere.</h2><p>Connect SUI to a workspace, talk to your agent, and review your app in the browser beside the chat.</p><button id="welcome-connect" class="secondary">Connect a project <span>→</span></button></div></div>
-      <div class="chat-bottom">
-        <div id="permission" class="permission hidden"><div><div class="eyebrow">ACTION REQUIRES APPROVAL</div><strong id="permission-summary"></strong></div><div class="permission-actions"><button data-choice="deny" class="small danger">Deny</button><button data-choice="once" class="small">Allow once</button><button data-choice="session" class="small primary">Allow session</button></div></div>
-        <div id="annotation-card" class="annotation-card hidden"><div class="annotation-head"><span class="annotation-icon">◎</span><strong>Browser annotation</strong><button id="remove-annotation" aria-label="Remove annotation">×</button></div><div id="annotation-target" class="annotation-target"></div><textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2"></textarea></div>
-        <div class="composer"><textarea id="message" rows="2" placeholder="Ask SUI to work on this project…" disabled></textarea><div class="composer-footer"><span id="composer-hint">Connect a project to start</span><div><button id="stop" class="stop hidden">Stop</button><button id="send" class="send" disabled aria-label="Send message">↑</button></div></div></div>
+  <div class="app">
+    <header class="titlebar">
+      <div class="tb-group tb-start">
+        <button id="toggle-sidebar" class="icon-btn" type="button" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true" data-tip="Toggle sidebar" data-key="B"><svg class="i"><use href="#i-panel-left"/></svg></button>
+        <button id="tb-new-chat" class="icon-btn tb-new" type="button" aria-label="New chat" data-tip="New chat" data-key="N"><svg class="i"><use href="#i-plus"/></svg></button>
       </div>
-    </main>
+      <div class="tb-title">
+        <h1 id="workspace-title">Choose a project</h1>
+        <span id="workspace-subtitle" class="tb-sub">Connect to a local or SSH workspace to begin.</span>
+        <span id="connection-pill" class="status-pill" role="status">Disconnected</span>
+      </div>
+      <div class="tb-group tb-end">
+        <button id="toggle-preview" class="icon-btn" type="button" aria-label="Toggle preview" aria-controls="preview" aria-pressed="false" data-tip="Toggle preview" data-key="J"><svg class="i"><use href="#i-panel-right"/></svg></button>
+        <button id="open-appearance" class="icon-btn" type="button" aria-label="Appearance and companion" data-tip="Appearance &amp; companion" data-key=","><svg class="i"><use href="#i-slime"/></svg></button>
+      </div>
+    </header>
 
-    <section class="browser-panel"><div class="browser-top"><div class="browser-title"><span class="browser-glyph">◉</span><strong>Browser</strong><span class="browser-tag">PREVIEW</span></div><button id="annotate" class="annotation-button" disabled>◎ Annotate</button></div><div class="browser-nav"><button id="back" title="Back">←</button><button id="forward" title="Forward">→</button><button id="reload" title="Reload">↻</button><input id="browser-url" type="text" spellcheck="false" placeholder="http://localhost:3000" aria-label="Browser URL"><button id="go" title="Go">→</button></div><div id="remote-preview" class="remote-preview hidden"><span>REMOTE PREVIEW PORT</span><input id="remote-port" type="number" min="1" max="65535" value="3000"><button id="open-preview">Open</button></div><div id="browser-viewport" class="browser-viewport"><div class="browser-empty"><div class="empty-globe">◎</div><h3>See what you're building.</h3><p>Open a local URL or forward a port from your SSH workspace, then select anything on the page to leave a comment for SUI.</p></div></div><div class="browser-foot"><span class="live-dot"></span><span id="browser-status">Ready for a preview</span></div></section>
+    <div class="body">
+      <aside id="sidebar" class="sidebar" aria-label="Projects and chats">
+        <div class="sb-inner">
+          <div class="brand">
+            <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><defs><linearGradient id="bm" x1="0" y1="0" x2="0" y2="1"><stop class="bm-a" offset="0"/><stop class="bm-b" offset="1"/></linearGradient></defs><path fill="url(#bm)" d="M4 22c0-8 5-15 12-15s12 7 12 15c0 3-3.5 4-12 4S4 25 4 22z"/><ellipse class="bm-eye" cx="12" cy="18" rx="1.7" ry="2.4"/><ellipse class="bm-eye" cx="20" cy="18" rx="1.7" ry="2.4"/><ellipse class="bm-gloss" cx="11" cy="12.5" rx="3.2" ry="1.6" transform="rotate(-24 11 12.5)"/></svg>
+            <span class="brand-name">SUI</span>
+          </div>
+          <button id="new-chat" class="btn btn-soft sb-new" type="button"><svg class="i"><use href="#i-plus"/></svg><span>New chat</span><kbd class="kbd" data-kbd="N"></kbd></button>
+          <nav class="sb-scroll" aria-label="Workspace navigation">
+            <section class="sb-section">
+              <header class="sb-head"><h2>Projects</h2><button id="add-project" class="icon-btn sm" type="button" aria-label="Add project" data-tip="Add project"><svg class="i"><use href="#i-plus"/></svg></button></header>
+              <div id="project-list" class="sb-list"></div>
+            </section>
+            <section class="sb-section">
+              <header class="sb-head"><h2>Recent chats</h2><button id="refresh-sessions" class="icon-btn sm" type="button" aria-label="Refresh chats" data-tip="Refresh chats"><svg class="i"><use href="#i-refresh"/></svg></button></header>
+              <div id="session-list" class="sb-list sessions"></div>
+            </section>
+          </nav>
+          <footer class="sb-foot">
+            <button id="sb-appearance" class="sb-foot-btn" type="button"><svg class="i"><use href="#i-slime"/></svg><span>Appearance &amp; companion</span></button>
+            <p class="sb-note"><svg class="i"><use href="#i-shield"/></svg><span>Runs stay on the project host</span></p>
+          </footer>
+        </div>
+      </aside>
+
+      <main id="chat" class="chat">
+        <div id="stage" class="stage" data-stage="hero">
+          <div class="transcript-wrap">
+            <div id="transcript" class="transcript" tabindex="-1" aria-label="Conversation"></div>
+            <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+              <div id="hero-slot" class="hero-slot" aria-hidden="true"></div>
+              <h2 id="welcome-title">Build from anywhere.</h2>
+              <p id="welcome-text">Connect SUI to a workspace, talk to your agent, and review your app in the preview beside the chat.</p>
+              <div id="welcome-actions" class="welcome-actions">
+                <button id="welcome-connect" class="btn btn-primary" type="button"><span>Connect a project</span><svg class="i"><use href="#i-arrow-right"/></svg></button>
+              </div>
+              <div id="suggestions" class="suggestions hidden"></div>
+              <div id="welcome-recents" class="recents hidden"></div>
+            </section>
+          </div>
+
+          <div id="pet-lane" class="lane" aria-hidden="true"></div>
+
+          <div class="dock">
+            <div id="permission" class="permission hidden" role="group" aria-label="Approval required">
+              <span class="permission-icon"><svg class="i"><use href="#i-shield-alert"/></svg></span>
+              <div class="permission-text"><div class="eyebrow">Needs your approval</div><strong id="permission-summary"></strong></div>
+              <div class="permission-actions">
+                <button data-choice="deny" class="btn btn-sm btn-danger-soft" type="button">Deny</button>
+                <button data-choice="once" class="btn btn-sm btn-ghost" type="button">Allow once</button>
+                <button data-choice="session" class="btn btn-sm btn-primary" type="button">Allow session</button>
+              </div>
+            </div>
+            <div id="annotation-card" class="annotation-card hidden">
+              <div class="annotation-head"><svg class="i"><use href="#i-crosshair"/></svg><strong>Browser annotation</strong><button id="remove-annotation" class="icon-btn sm" type="button" aria-label="Remove annotation"><svg class="i"><use href="#i-x"/></svg></button></div>
+              <div id="annotation-target" class="annotation-target"></div>
+              <textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2" aria-label="Annotation comment"></textarea>
+            </div>
+            <div class="composer">
+              <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>
+              <div class="composer-foot">
+                <span id="composer-hint" class="hint">Connect a project to start</span>
+                <div class="composer-actions">
+                  <button id="stop" class="btn btn-sm btn-stop hidden" type="button"><svg class="i"><use href="#i-stop"/></svg><span>Stop</span></button>
+                  <button id="send" class="send" type="button" disabled aria-label="Send message"><svg class="i"><use href="#i-arrow-up"/></svg></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="pet-layer" class="pet-layer" aria-hidden="true"></div>
+        </div>
+      </main>
+
+      <section id="preview" class="preview" aria-label="Browser preview">
+        <div class="pv-inner">
+          <div class="pv-head">
+            <div class="pv-title"><svg class="i"><use href="#i-globe"/></svg><strong>Preview</strong></div>
+            <button id="annotate" class="btn btn-sm btn-soft" type="button" disabled><svg class="i"><use href="#i-crosshair"/></svg><span>Annotate</span></button>
+          </div>
+          <div class="pv-nav">
+            <button id="back" class="icon-btn sm" type="button" aria-label="Back" data-tip="Back"><svg class="i"><use href="#i-arrow-left"/></svg></button>
+            <button id="forward" class="icon-btn sm" type="button" aria-label="Forward" data-tip="Forward"><svg class="i"><use href="#i-arrow-right"/></svg></button>
+            <button id="reload" class="icon-btn sm" type="button" aria-label="Reload" data-tip="Reload"><svg class="i"><use href="#i-reload"/></svg></button>
+            <input id="browser-url" class="url" type="text" spellcheck="false" placeholder="http://localhost:3000" aria-label="Browser URL">
+            <button id="go" class="icon-btn sm" type="button" aria-label="Open URL" data-tip="Open URL"><svg class="i"><use href="#i-arrow-right"/></svg></button>
+          </div>
+          <div id="remote-preview" class="remote-preview hidden">
+            <span>Remote port</span>
+            <input id="remote-port" type="number" min="1" max="65535" value="3000" aria-label="Remote preview port">
+            <button id="open-preview" class="btn btn-sm btn-soft" type="button">Forward &amp; open</button>
+          </div>
+          <div id="browser-viewport" class="browser-viewport">
+            <div class="browser-empty">
+              <div class="empty-globe"><svg class="i"><use href="#i-globe"/></svg></div>
+              <h3>See what you're building.</h3>
+              <p>Open a local URL or forward a port from your SSH workspace, then select anything on the page to leave a comment for SUI.</p>
+            </div>
+          </div>
+          <div class="pv-foot"><span class="live-dot"></span><span id="browser-status">Ready for a preview</span></div>
+        </div>
+      </section>
+    </div>
   </div>
 
-  <dialog id="connect-dialog"><form method="dialog" id="connect-form"><div class="dialog-head"><div class="dialog-logo">S</div><button type="button" id="close-dialog" aria-label="Close">×</button></div><div class="eyebrow">GET STARTED</div><h2>Connect your workspace</h2><p>Work on this Mac or connect to a machine over SSH. The SUI agent runs where your code lives.</p><div class="mode-switch"><label><input type="radio" name="kind" value="ssh" checked><span>⌘ &nbsp; SSH host</span></label><label><input type="radio" name="kind" value="local"><span>▣ &nbsp; This Mac</span></label></div><label id="host-label" class="field">SSH host<input id="host" placeholder="you@dev-machine" autocomplete="off" required></label><label class="field">Workspace path<input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" required></label><label class="field">SUI model profile<input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label><button type="button" id="show-model-setup" class="setup-toggle">＋ Configure a model on this machine</button><div id="model-setup" class="model-setup hidden"><label class="field">Transport<select id="model-kind"><option value="chat-completions">OpenAI compatible</option><option value="openai-responses">OpenAI Responses</option><option value="ollama">Ollama</option></select></label><label class="field">API base URL<input id="model-url" value="https://api.openai.com/v1" spellcheck="false"></label><label class="field">Model ID<input id="model-id" placeholder="Enter the exact model ID"></label><label class="field">API key (saved privately on the host)<input id="model-key" type="password" autocomplete="new-password"></label><button type="button" id="save-model" class="secondary wide">Save model profile</button></div><p class="field-help">SSH uses your keys and host verification. New host keys are saved on first connection; changed keys are rejected.</p><button type="button" id="install-remote" class="setup-toggle">↓ Install or update SUI on SSH host</button><div id="connect-error" class="form-error hidden"></div><button type="submit" id="connect-button" class="primary wide">Connect to project <span>→</span></button></form></dialog>
+  <dialog id="connect-dialog" class="dialog" aria-labelledby="connect-title">
+    <form method="dialog" id="connect-form">
+      <header class="dlg-head">
+        <div class="dlg-mark"><svg class="i"><use href="#i-slime"/></svg></div>
+        <div class="dlg-titles"><h2 id="connect-title">Connect your workspace</h2><p id="connect-lead">Work on this computer or connect to a machine over SSH. The SUI agent runs where your code lives.</p></div>
+        <button type="button" id="close-dialog" class="icon-btn" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="dlg-body">
+        <div class="segmented" role="radiogroup" aria-label="Where does your code live?">
+          <label><input type="radio" name="kind" value="ssh" checked><span><svg class="i"><use href="#i-server"/></svg>SSH host</span></label>
+          <label><input type="radio" name="kind" value="local"><span><svg class="i"><use href="#i-monitor"/></svg><span id="local-label">This computer</span></span></label>
+        </div>
+        <label id="host-label" class="field"><span>SSH host</span><input id="host" placeholder="you@dev-machine" autocomplete="off" required autofocus></label>
+        <label class="field"><span>Workspace path</span><input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" required autofocus></label>
+        <label class="field"><span>SUI model profile</span><input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label>
+        <button type="button" id="show-model-setup" class="link-btn">+ Configure a model on this machine</button>
+        <div id="model-setup" class="model-setup hidden">
+          <label class="field"><span>Transport</span><select id="model-kind"><option value="chat-completions">OpenAI compatible</option><option value="openai-responses">OpenAI Responses</option><option value="ollama">Ollama</option></select></label>
+          <label class="field"><span>API base URL</span><input id="model-url" value="https://api.openai.com/v1" spellcheck="false"></label>
+          <label class="field"><span>Model ID</span><input id="model-id" placeholder="Enter the exact model ID"></label>
+          <label class="field"><span>API key <em>saved privately on the host</em></span><input id="model-key" type="password" autocomplete="new-password"></label>
+          <button type="button" id="save-model" class="btn btn-soft">Save model profile</button>
+        </div>
+        <p class="field-help">SSH uses your keys and host verification. New host keys are saved on first connection; changed keys are rejected.</p>
+        <button type="button" id="install-remote" class="link-btn"><svg class="i"><use href="#i-download"/></svg>Install or update SUI on SSH host</button>
+        <div id="connect-error" class="form-error hidden" role="alert"></div>
+      </div>
+      <footer class="dlg-foot"><button type="submit" id="connect-button" class="btn btn-primary btn-lg"><span>Connect to project</span><svg class="i"><use href="#i-arrow-right"/></svg></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="appearance-dialog" class="dialog dialog-wide" aria-labelledby="appearance-title">
+    <header class="dlg-head">
+      <div class="dlg-mark"><svg class="i"><use href="#i-slime"/></svg></div>
+      <div class="dlg-titles"><h2 id="appearance-title">Appearance &amp; companion</h2><p>Make SUI yours. These choices stay on this device.</p></div>
+      <button type="button" id="close-appearance" class="icon-btn" aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="dlg-body ap">
+      <section class="ap-group">
+        <h3>Theme</h3>
+        <div class="segmented" role="radiogroup" aria-label="Theme">
+          <label><input type="radio" name="theme" value="system"><span><svg class="i"><use href="#i-monitor"/></svg>System</span></label>
+          <label><input type="radio" name="theme" value="light"><span><svg class="i"><use href="#i-sun"/></svg>Light</span></label>
+          <label><input type="radio" name="theme" value="dark"><span><svg class="i"><use href="#i-moon"/></svg>Dark</span></label>
+        </div>
+      </section>
+      <section class="ap-group">
+        <h3>Motion</h3>
+        <div class="segmented" role="radiogroup" aria-label="Motion">
+          <label><input type="radio" name="motion" value="full"><span>Full</span></label>
+          <label><input type="radio" name="motion" value="calm"><span>Calm</span></label>
+          <label><input type="radio" name="motion" value="off"><span>Off</span></label>
+        </div>
+        <p class="ap-help">Calm keeps the companion in place; Off is fully static. Follows your system's reduced-motion setting until you choose.</p>
+      </section>
+      <section class="ap-group ap-pet">
+        <div class="ap-pet-head">
+          <h3>Companion</h3>
+          <label class="switch"><input type="checkbox" id="pet-on"><span class="track" aria-hidden="true"></span><span class="switch-label">Show companion</span></label>
+        </div>
+        <div class="pet-preview">
+          <div id="pet-preview-stage" class="pet-preview-stage" aria-hidden="true"></div>
+          <div class="pet-moods" role="group" aria-label="Preview moods">
+            <button type="button" class="chip" data-mood="idle">Idle</button>
+            <button type="button" class="chip" data-mood="think">Thinking</button>
+            <button type="button" class="chip" data-mood="ask">Asking</button>
+            <button type="button" class="chip" data-mood="happy">Happy</button>
+            <button type="button" class="chip" data-mood="oops">Oops</button>
+            <button type="button" class="chip" data-mood="sleep">Sleepy</button>
+          </div>
+        </div>
+        <div class="ap-row"><span class="ap-label">Color</span>
+          <div class="swatches" role="radiogroup" aria-label="Companion color" id="pet-colors"></div>
+        </div>
+        <div class="ap-row"><span class="ap-label">Accessory</span>
+          <div class="segmented compact" role="radiogroup" aria-label="Accessory" id="pet-accessories"></div>
+        </div>
+        <div class="ap-row"><span class="ap-label">Size</span>
+          <div class="segmented compact" role="radiogroup" aria-label="Companion size">
+            <label><input type="radio" name="pet-size" value="s"><span>Small</span></label>
+            <label><input type="radio" name="pet-size" value="m"><span>Medium</span></label>
+            <label><input type="radio" name="pet-size" value="l"><span>Large</span></label>
+          </div>
+        </div>
+        <div class="ap-row"><label class="ap-label" for="pet-name">Name</label><input id="pet-name" class="field-input" maxlength="20" placeholder="Sui" autocomplete="off" spellcheck="false"></div>
+        <div class="ap-row"><span class="ap-label">Behavior</span>
+          <label class="switch"><input type="checkbox" id="pet-follow"><span class="track" aria-hidden="true"></span><span class="switch-label">Follow my cursor</span></label>
+        </div>
+      </section>
+    </div>
+    <footer class="dlg-foot split"><button type="button" id="pet-reset" class="link-btn">Reset companion</button><button type="button" id="done-appearance" class="btn btn-primary">Done</button></footer>
+  </dialog>
+
+  <div id="sr-status" class="sr-only" role="status" aria-live="polite"></div>
 </body>
 </html>

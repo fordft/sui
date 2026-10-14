@@ -58,6 +58,11 @@ Integration binaries: `sui`, `sui-mission`, `sui-certify`.
 - Bounded output everywhere — truncate, never drop silently.
 - New provider transports thread through `ProfileCfg`/`Transport`,
   never as special cases in the agent loop.
+- The desktop renderer (`desktop/`) is plain files under a strict CSP: no
+  inline `style`/script, no innerHTML for model output, every asset listed in
+  `build.files` (`npm test` checks this). Theme, motion, and the slime
+  companion are local presentation preferences — they never reach the bridge,
+  and the companion never approves or auto-answers a permission.
 - TUI motion (`src/tui/{gfx,hero,fx,slime,runner}.rs`) is presentation only:
   `draw` stays a pure function of `(App, clock)` (pin it with
   `slime::freeze_clock` in tests), essential text never depends on

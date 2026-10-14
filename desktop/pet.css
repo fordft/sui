@@ -1,0 +1,141 @@
+/* SUI Desktop — the slime companion.
+ *
+ * `.slime` is the character (pure presentation, driven by data attributes
+ * and a few CSS custom properties); `.pet` is how the companion engine
+ * places it on the chat stage. Body colour comes from --pet-* variables so
+ * customization never touches the artwork. Mood extras (props) are SVG
+ * groups that only show for their mood. */
+
+.pet-layer { position: absolute; inset: 0; z-index: 4; overflow: hidden; pointer-events: none; }
+:root[data-pet="off"] .pet-layer { display: none; }
+
+.pet {
+  position: absolute; left: 0; top: 0; width: var(--pet-w, 72px); height: calc(var(--pet-w, 72px) * .84);
+  transform-origin: 50% 100%; will-change: transform; pointer-events: auto; cursor: grab; touch-action: none; user-select: none;
+}
+.pet.dragging { cursor: grabbing; }
+
+/* ── the slime ────────────────────────────────────────────────────────── */
+
+.slime {
+  --pet-light: #b2d6ff; --pet-body: #4280f8; --pet-deep: #14308e; --pet-rim: #d0e6ff;
+  --pet-aura: rgba(66, 128, 248, .38);
+  --lift: 0; --sx: 1; --sy: 1; --ex: 0; --ey: 0;
+  position: relative; width: 100%; height: 100%;
+}
+.slime-shadow {
+  position: absolute; left: 50%; bottom: -3%; width: 78%; height: 12%; border-radius: 50%;
+  background: rgba(0, 0, 0, .34); filter: blur(2px);
+  transform: translateX(-50%) scale(calc(1 - var(--lift) / 340));
+  opacity: calc(1 - var(--lift) / 260);
+}
+:root[data-theme="light"] .slime-shadow { background: rgba(15, 23, 42, .22); }
+.slime-body { position: absolute; inset: 0; transform-origin: 50% 100%; transform: translateY(calc(var(--lift) * -1px)) scale(var(--sx), var(--sy)); }
+.slime-svg { display: block; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 5px 12px var(--pet-aura)); transition: filter var(--dur-3, 300ms); }
+
+.sg-a { stop-color: var(--pet-light); }
+.sg-b { stop-color: var(--pet-body); }
+.sg-c { stop-color: var(--pet-deep); }
+.slime-body-shape { stroke: var(--pet-deep); stroke-opacity: .5; stroke-width: 1.4; }
+.slime-rim-light { fill: none; stroke: var(--pet-rim); stroke-opacity: .6; stroke-width: 2.4; stroke-linecap: round; }
+.slime-bubble { fill: none; stroke: #fff; stroke-opacity: .38; stroke-width: 1.1; }
+.slime-gloss { fill: #fff; opacity: .62; }
+.slime-gloss-dot { fill: #fff; opacity: .8; }
+.cheek { fill: #ff8fb4; opacity: .55; }
+.eye { fill: #0b1a44; }
+.glint { fill: #fff; }
+.stroke-ink { fill: none; stroke: #0b1a44; stroke-linecap: round; stroke-linejoin: round; }
+.fill-mouth { fill: #5c1631; }
+.fill-tongue { fill: #ff8aa0; }
+
+.slime-breathe { transform-box: view-box; transform-origin: 50px 78px; animation: slime-breathe 3.6s ease-in-out infinite; }
+.slime-eye { transform-box: fill-box; transform-origin: center; animation: slime-blink 5.6s infinite; }
+.slime-eye.r { animation-delay: .02s; }
+.slime-look { transform: translate(calc(var(--ex) * 1px), calc(var(--ey) * 1px)); transition: transform 90ms linear; }
+.slime-bubbles .slime-bubble { animation: slime-drift 7s ease-in infinite; }
+.slime-bubbles .slime-bubble:nth-child(2) { animation-delay: -2.4s; animation-duration: 8.5s; }
+.slime-bubbles .slime-bubble:nth-child(3) { animation-delay: -4.8s; animation-duration: 6s; }
+
+@keyframes slime-breathe { 50% { transform: scale(1.014, .974); } }
+@keyframes slime-blink { 0%, 91%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.08); } }
+@keyframes slime-drift { 0% { transform: translateY(6px); opacity: 0; } 25% { opacity: 1; } 100% { transform: translateY(-26px); opacity: 0; } }
+
+/* faces: exactly one eye set and one mouth per mood */
+.eyes, .mouth, .brows, .acc, .prop { display: none; }
+.slime[data-mood="idle"] .eyes-open, .slime[data-mood="think"] .eyes-open, .slime[data-mood="oops"] .eyes-open { display: inline; }
+.slime[data-mood="ask"] .eyes-wide, .slime[data-poke="1"] .eyes-wide, .slime[data-drag="1"] .eyes-wide { display: inline; }
+.slime[data-poke="1"] .eyes-open, .slime[data-drag="1"] .eyes-open, .slime[data-mood="ask"] .eyes-open { display: none; }
+.slime[data-mood="happy"] .eyes-happy { display: inline; }
+.slime[data-mood="sleep"] .eyes-closed { display: inline; }
+.slime[data-poke="1"] .eyes-happy, .slime[data-drag="1"] .eyes-happy, .slime[data-poke="1"] .eyes-closed, .slime[data-drag="1"] .eyes-closed { display: none; }
+.slime[data-mood="oops"] .brows { display: inline; }
+
+.slime[data-mood="idle"] .m-idle, .slime[data-mood="happy"] .m-happy, .slime[data-mood="oops"] .m-oops, .slime[data-mood="think"] .m-think,
+.slime[data-mood="ask"] .m-ask, .slime[data-mood="sleep"] .m-sleep { display: inline; }
+.slime[data-poke="1"] .mouth, .slime[data-drag="1"] .mouth { display: none; }
+.slime[data-poke="1"] .m-poke, .slime[data-drag="1"] .m-poke { display: inline; }
+.slime[data-mood="sleep"] .m-sleep { transform-box: fill-box; transform-origin: center; animation: slime-snore 3.4s ease-in-out infinite; }
+@keyframes slime-snore { 50% { transform: scale(1.35, 1.2); } }
+
+/* mood aura */
+.slime[data-mood="think"] { --pet-aura: rgba(64, 204, 238, .5); }
+.slime[data-mood="ask"] { --pet-aura: rgba(242, 185, 75, .55); }
+.slime[data-mood="oops"] { --pet-aura: rgba(255, 107, 130, .45); }
+.slime[data-mood="happy"] { --pet-aura: rgba(110, 240, 190, .42); }
+.slime[data-mood="sleep"] { --pet-aura: rgba(66, 128, 248, .14); }
+.slime[data-mood="sleep"] .slime-breathe { animation-duration: 5.2s; }
+.slime[data-mood="oops"] .slime-breathe { animation-duration: 6s; }
+
+/* accessories */
+.slime[data-acc="crown"] .acc-crown, .slime[data-acc="sprout"] .acc-sprout, .slime[data-acc="bow"] .acc-bow, .slime[data-acc="shades"] .acc-shades { display: inline; }
+.slime[data-acc="shades"] .eyes { display: none !important; }
+.acc-sprout { transform-box: fill-box; transform-origin: 50% 100%; animation: slime-sway 3s ease-in-out infinite; }
+@keyframes slime-sway { 50% { transform: rotate(7deg); } }
+
+/* mood props */
+.slime[data-mood="ask"] .prop-q, .slime[data-mood="sleep"] .prop-z, .slime[data-mood="think"] .prop-think,
+.slime[data-mood="oops"] .prop-sweat, .slime[data-mood="happy"] .prop-hearts { display: inline; }
+.prop-q { transform-box: fill-box; transform-origin: 50% 100%; animation: slime-q 1s ease-in-out infinite; }
+.prop-q .q-bg { fill: #ffe28a; }
+.prop-q .q-mark { fill: #5a3b00; font: 800 13px var(--font-ui, system-ui); text-anchor: middle; }
+@keyframes slime-q { 50% { transform: translateY(-4px) rotate(-6deg); } }
+.prop-z text { fill: var(--pet-rim); font: 700 11px var(--font-ui, system-ui); opacity: 0; animation: slime-z 3.2s ease-in-out infinite; }
+.prop-z text:nth-child(2) { animation-delay: 1.05s; }
+.prop-z text:nth-child(3) { animation-delay: 2.1s; }
+@keyframes slime-z { 0% { opacity: 0; transform: translate(0, 6px) scale(.7); } 30% { opacity: .95; } 100% { opacity: 0; transform: translate(10px, -16px) scale(1.2); } }
+.prop-think circle { fill: var(--pet-rim); opacity: .25; animation: slime-think 1.2s ease-in-out infinite; }
+.prop-think circle:nth-child(2) { animation-delay: .2s; }
+.prop-think circle:nth-child(3) { animation-delay: .4s; }
+@keyframes slime-think { 40% { opacity: .95; transform: translateY(-2px); } }
+.prop-sweat { fill: #9fd4ff; animation: slime-sweat 2.2s ease-in infinite; }
+@keyframes slime-sweat { 0% { opacity: 0; transform: translateY(-4px); } 25% { opacity: .95; } 100% { opacity: 0; transform: translateY(14px); } }
+.prop-hearts path { fill: #ff7fae; opacity: 0; animation: slime-heart 1.9s ease-out infinite; }
+.prop-hearts path:nth-child(2) { animation-delay: .6s; }
+.prop-hearts path:nth-child(3) { animation-delay: 1.2s; }
+@keyframes slime-heart { 0% { opacity: 0; transform: translateY(8px) scale(.6); } 25% { opacity: 1; } 100% { opacity: 0; transform: translateY(-22px) scale(1.15); } }
+
+/* demo instances (appearance preview) hop on their own; the engine never touches them */
+.slime.demo[data-mood="think"] .slime-body { animation: demo-run 1s var(--ease, ease) infinite; }
+.slime.demo[data-mood="happy"] .slime-body { animation: demo-hop .64s var(--ease, ease) infinite; }
+.slime.demo[data-mood="ask"] .slime-body { animation: demo-bounce .55s ease-in-out infinite; }
+@keyframes demo-hop { 0%, 100% { transform: translateY(0) scale(1.12, .84); } 20% { transform: translateY(0) scale(.96, 1.08); } 50% { transform: translateY(-20px) scale(.94, 1.12); } 85% { transform: translateY(0) scale(1.06, .94); } }
+@keyframes demo-run { 0%, 100% { transform: translate(-26px, 0) scale(1.1, .86); } 25% { transform: translate(-13px, -14px) scale(.95, 1.1); } 50% { transform: translate(0, 0) scale(1.1, .86); } 75% { transform: translate(13px, -14px) scale(.95, 1.1); } 100% { transform: translate(26px, 0) scale(1.1, .86); } }
+@keyframes demo-bounce { 50% { transform: translateY(-7px) scale(.97, 1.04); } }
+
+/* ── speech bubble and effects (children of .pet-layer) ───────────────── */
+
+.pet-bubble {
+  position: absolute; left: 0; top: 0; max-width: 220px; padding: 6px 11px; border-radius: 12px;
+  font: 500 12px/1.4 var(--font-ui, system-ui); color: var(--text); white-space: nowrap;
+  background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--shadow-1);
+  opacity: 0; pointer-events: none; transition: opacity var(--dur-2, 200ms);
+}
+.pet-bubble.show { opacity: 1; }
+.pet-spark { position: absolute; width: 7px; height: 7px; background: var(--sp, #8ab8ff); border-radius: 2px; transform: rotate(45deg); animation: pet-spark 900ms ease-out forwards; }
+@keyframes pet-spark { from { opacity: 1; transform: translate(0, 0) rotate(45deg) scale(1); } to { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(200deg) scale(.3); } }
+.pet-puff { position: absolute; width: 14px; height: 14px; border-radius: 50%; background: color-mix(in srgb, var(--text) 22%, transparent); animation: pet-puff 520ms ease-out forwards; }
+@keyframes pet-puff { from { opacity: .7; transform: translate(0, 0) scale(.5); } to { opacity: 0; transform: translate(var(--dx), -10px) scale(1.7); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .slime-breathe, .slime-eye, .slime-bubbles .slime-bubble { animation: none; }
+}
