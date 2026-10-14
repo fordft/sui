@@ -58,13 +58,24 @@ test('remote directory script preserves spaces, quotes, Unicode, newlines and sh
   for (const name of [...names, '.hidden']) await fs.mkdir(path.join(home, name));
   await fs.writeFile(path.join(home, 'not-a-folder'), '');
   const listing = localListing(home);
-  assert.equal(listing.path, home);
+  assert.equal(listing.path, await fs.realpath(home));
   assert.deepEqual(new Set(listing.directories), new Set(names));
   assert.equal(listing.truncated, false);
   assert.ok(localListing(home, true).directories.includes('.hidden'));
   assert.equal(localListing(path.join(home, "quote's project")).directories.length, 0);
-  assert.equal(localListing(`~/${path.relative(os.homedir(), path.join(home, 'my app'))}`).path, path.join(home, 'my app'));
+  assert.equal(localListing(`~/${path.relative(os.homedir(), path.join(home, 'my app'))}`).path, await fs.realpath(path.join(home, 'my app')));
   await assert.rejects(fs.stat(path.join(home, 'should-not-exist')), { code: 'ENOENT' });
+}));
+
+test('directory browser resolves a symlink to the physical workspace path', () => fixture(async home => {
+  const directory = path.join(home, 'real folder');
+  const alias = path.join(home, 'shortcut');
+  await fs.mkdir(directory);
+  await fs.symlink(directory, alias);
+  const listing = localListing(alias);
+  assert.equal(listing.path, await fs.realpath(directory));
+  assert.equal(listing.parent, await fs.realpath(home));
+  assert.deepEqual(listing.directories, []);
 }));
 
 test('remote directory script bounds large listings and rejects missing or relative paths', () => fixture(async home => {
