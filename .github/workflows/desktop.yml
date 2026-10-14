@@ -48,6 +48,15 @@ jobs:
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check architecture-specific asset names
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./desktop/package.json').version")
+          arch="${{ matrix.cpu }}"
+          if [ "$arch" = x86_64 ]; then arch=x64; fi
+          test -f "desktop/dist/SUI.Desktop-${version}-${arch}.dmg"
+          test -f "desktop/dist/SUI.Desktop-${version}-${arch}.zip"
       - name: Inspect packaged DMG
         shell: bash
         run: |
@@ -91,6 +100,10 @@ jobs:
         run: |
           set -euo pipefail
           cd desktop-assets
+          for arch in arm64 x64; do
+            test -f "SUI.Desktop-${TAG#v}-${arch}.dmg"
+            test -f "SUI.Desktop-${TAG#v}-${arch}.zip"
+          done
           sha256sum *.dmg *.zip > "SUI-Desktop-${TAG#v}-SHA256SUMS.txt"
           for attempt in {1..60}; do
             if gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx false; then
