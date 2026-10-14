@@ -48,6 +48,15 @@ jobs:
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check architecture-specific asset names
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./desktop/package.json').version")
+          arch="${{ matrix.cpu }}"
+          if [ "$arch" = x86_64 ]; then arch=x64; fi
+          test -f "desktop/dist/SUI.Desktop-${version}-${arch}.dmg"
+          test -f "desktop/dist/SUI.Desktop-${version}-${arch}.zip"
       - name: Inspect packaged DMG
         shell: bash
         run: |
