@@ -81,9 +81,10 @@ async function run() {
     const attached = () => win.contentView.children.some(view => view.webContents);
     const ui = code => win.webContents.executeJavaScript(code);
     assert.equal(attached(), true);
-    await ui('SuiUI.openDialog(document.getElementById("appearance-dialog"))');
+    await ui('document.getElementById("sb-appearance").click()');
     await pause(150);
     assert.equal(attached(), false, 'preview hides while a dialog is open');
+    assert.equal(await ui('document.getElementById("pet-on").checked'), true, 'appearance reflects the visible companion');
     if (process.env.SUI_DESKTOP_SCREENSHOT) {
       fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-appearance.png'), (await win.capturePage()).toPNG());
     }
