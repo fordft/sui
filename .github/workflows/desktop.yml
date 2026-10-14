@@ -32,7 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - name: Install Electron display dependencies
-        run: sudo apt-get update && sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgtk-3-0 libnss3 libasound2 openssh-server
       - run: npm ci
         working-directory: desktop
       - run: cargo build --locked --bin sui
@@ -40,6 +40,9 @@ jobs:
         working-directory: desktop
       - name: Exercise the Desktop interface
         run: xvfb-run -a node_modules/.bin/electron --no-sandbox test/electron-smoke.js
+        working-directory: desktop
+      - name: Select a workspace over real SSH
+        run: xvfb-run -a node_modules/.bin/electron --no-sandbox test/workspace-smoke.js
         working-directory: desktop
 
   mac:

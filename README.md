@@ -8,7 +8,9 @@ It has a light and a dark theme, a collapsible sidebar, and a customizable
 slime companion that works, hops, and asks beside your conversation without
 ever covering it. The Rust agent runs on the machine holding the workspace;
 remote previews use SSH port forwarding. The app can install SUI on an SSH
-host and save a model profile from its connection screen. See
+host and save a model profile from its connection screen. Choose local folders
+with the system picker, or select an alias from `~/.ssh/config` and browse
+folders on the SSH host. Recent workspaces are remembered per host. See
 [desktop/README.md](desktop/README.md) for build, setup, the Mac update button,
 and the current notarization limitation.
 The terminal UI remains available.

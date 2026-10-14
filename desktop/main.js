@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeTheme, session, shell } = require('electron');
+const { app, BrowserWindow, WebContentsView, dialog, ipcMain, nativeTheme, session, shell } = require('electron');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const net = require('node:net');
@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { spawnBridge, spawnSetup, validateHost } = require('./bridge');
 const updates = require('./update');
+const { sshHosts, remoteFolders } = require('./workspaces');
 
 let window;
 let bridge;
@@ -15,6 +16,9 @@ let target;
 let localPort;
 let remotePort;
 let offeredUpdate;
+let folderBrowse;
+
+function cancelFolderBrowse() { folderBrowse?.abort(); folderBrowse = undefined; }
 
 function emit(value) {
   if (window && !window.isDestroyed()) window.webContents.send('sui:event', value);
@@ -260,6 +264,19 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('sui:projects', () => readProjects());
+  ipcMain.handle('sui:ssh-hosts', () => sshHosts(app.getPath('home')));
+  ipcMain.handle('sui:pick-workspace', async () => {
+    const selected = await dialog.showOpenDialog(window, { title: 'Choose your workspace', buttonLabel: 'Use this folder', properties: ['openDirectory'] });
+    return selected.canceled ? null : selected.filePaths[0];
+  });
+  ipcMain.handle('sui:remote-folders', async (_event, host, directory, hidden) => {
+    cancelFolderBrowse();
+    const controller = new AbortController();
+    folderBrowse = controller;
+    try { return await remoteFolders(host, directory, hidden === true, { signal: controller.signal }); }
+    finally { if (folderBrowse === controller) folderBrowse = undefined; }
+  });
+  ipcMain.handle('sui:cancel-folder-browse', () => { cancelFolderBrowse(); return true; });
   ipcMain.handle('sui:connect', (_event, item, resume) => startBridge(item, resume));
   ipcMain.handle('sui:configure', (_event, item, profile) => configureProfile(item, profile));
   ipcMain.handle('sui:install-remote', (_event, item) => installRemoteSui(item));
@@ -318,9 +335,9 @@ app.whenReady().then(() => {
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.loadFile(path.join(__dirname, 'index.html'));
   createBrowser();
-  window.on('closed', () => { stopBridge(); if (browser) browser.webContents.close(); browser = undefined; window = undefined; });
+  window.on('closed', () => { cancelFolderBrowse(); stopBridge(); if (browser) browser.webContents.close(); browser = undefined; window = undefined; });
 });
 
-app.on('before-quit', stopBridge);
+app.on('before-quit', () => { cancelFolderBrowse(); stopBridge(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!window) app.relaunch(); });

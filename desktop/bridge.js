@@ -13,6 +13,10 @@ function shellQuote(value) {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
+function sshArgs(host, command) {
+  return ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', validateHost(host), command];
+}
+
 function remoteCommand(workspace, profile, resume) {
   const args = ` desktop-bridge --workspace ${shellQuote(workspace)} --profile ${shellQuote(profile)}` +
     (resume ? ` --resume ${shellQuote(resume)}` : '');
@@ -33,12 +37,12 @@ function localBinary(app) {
 }
 
 function bridgeSpec(app, target, resume) {
-  const workspace = String(target.workspace || '').trim();
+  const workspace = String(target.workspace || '');
   const profile = String(target.profile || '').trim();
-  if (!workspace || !profile) throw new Error('Workspace and model profile are required.');
+  if (!workspace.trim() || !profile) throw new Error('Workspace and model profile are required.');
   if (target.kind === 'ssh') {
     const host = validateHost(target.host);
-    return { command: 'ssh', args: ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, remoteCommand(workspace, profile, resume)] };
+    return { command: 'ssh', args: sshArgs(host, remoteCommand(workspace, profile, resume)) };
   }
   if (target.kind !== 'local') throw new Error('Choose Local or SSH.');
   return { command: localBinary(app), args: ['desktop-bridge', '--workspace', workspace, '--profile', profile, ...(resume ? ['--resume', resume] : [])] };
@@ -50,9 +54,9 @@ function spawnBridge(app, target, resume) {
 }
 
 function spawnSetup(app, target) {
-  if (target.kind === 'ssh') return spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', validateHost(target.host), remoteSetupCommand()], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  if (target.kind === 'ssh') return spawn('ssh', sshArgs(target.host, remoteSetupCommand()), { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   if (target.kind === 'local') return spawn(localBinary(app), ['desktop-setup'], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   throw new Error('Choose Local or SSH.');
 }
 
-module.exports = { validateHost, shellQuote, remoteCommand, bridgeSpec, spawnBridge, spawnSetup };
+module.exports = { validateHost, shellQuote, sshArgs, remoteCommand, bridgeSpec, spawnBridge, spawnSetup };
