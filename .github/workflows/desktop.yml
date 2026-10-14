@@ -60,7 +60,7 @@ jobs:
           test -d "$bundle"
           icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$bundle/Contents/Info.plist")
           test -f "$bundle/Contents/Resources/${icon%.icns}.icns"
-          lipo -verify_arch "${{ matrix.cpu }}" "$bundle/Contents/MacOS/SUI Desktop"
+          lipo "$bundle/Contents/MacOS/SUI Desktop" -verify_arch "${{ matrix.cpu }}"
           test -f "$bundle/Contents/Resources/sui"
       - uses: actions/upload-artifact@v4
         with:
