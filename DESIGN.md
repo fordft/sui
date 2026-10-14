@@ -501,6 +501,24 @@ views; annotation becomes a labeled user message with URL, target and bounds.
 Remote loopback previews use SSH forwarding. Browser guest content receives no
 filesystem, shell, Electron IPC or agent permission authority.
 
+Renderer: plain HTML/CSS/JS with no build step, under a strict CSP
+(`style-src 'self'`: no inline styles; dynamic values are CSS custom properties
+set from script). `styles.css` holds the design tokens (one set of names for
+the dark and light palettes) and layout, `pet.css`/`pet.js` the companion,
+`markdown.js` a safe renderer for assistant text (DOM construction only — model
+output never reaches `innerHTML`), `ui.js` local preferences and chrome, and
+`app.js` the conversation and bridge events. Appearance preferences (theme,
+motion, sidebar/preview state, companion choices) live in the renderer's
+`localStorage` and never reach the bridge, journals, or model requests. The
+companion is presentation only: it reacts to bridge events but cannot approve
+anything, and its permission "ask" state is a visual cue — approval remains the
+three explicit buttons. It rests in a lane the layout reserves above the
+composer (and on the empty state), so on its own it never covers transcript
+text (only a user dragging it there can). The
+browser guest is a native view above the renderer, so `syncBrowser` shows it
+only while the preview panel is open and no dialog is up. Window chrome follows
+the platform: macOS inset traffic lights, Windows caption-button overlay, native
+frame on Linux.
 
 ## TUI
 

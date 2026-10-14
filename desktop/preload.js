@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('sui', {
+  platform: process.platform,
   projects: () => ipcRenderer.invoke('sui:projects'),
   connect: (item, resume) => ipcRenderer.invoke('sui:connect', item, resume),
   configure: (item, profile) => ipcRenderer.invoke('sui:configure', item, profile),
@@ -10,11 +11,13 @@ contextBridge.exposeInMainWorld('sui', {
   openBrowser: url => ipcRenderer.invoke('sui:open-browser', url),
   previewRemote: port => ipcRenderer.invoke('sui:preview-remote', port),
   browserBounds: bounds => ipcRenderer.invoke('sui:browser-bounds', bounds),
+  browserShow: () => ipcRenderer.invoke('sui:browser-show'),
   hideBrowser: () => ipcRenderer.invoke('sui:browser-hide'),
   back: () => ipcRenderer.invoke('sui:browser-back'),
   forward: () => ipcRenderer.invoke('sui:browser-forward'),
   reload: () => ipcRenderer.invoke('sui:browser-reload'),
   annotate: () => ipcRenderer.invoke('sui:annotate'),
+  setChrome: theme => ipcRenderer.invoke('sui:chrome', theme),
   onEvent: callback => {
     const handler = (_event, value) => callback(value);
     ipcRenderer.on('sui:event', handler);

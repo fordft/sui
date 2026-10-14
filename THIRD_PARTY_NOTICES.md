@@ -26,3 +26,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Inter (SUI Desktop)
+
+`desktop/fonts/inter-latin-wght.woff2` is the Latin subset of the Inter
+variable font, Copyright 2016 The Inter Project Authors
+(<https://github.com/rsms/inter>), redistributed from the
+`@fontsource-variable/inter` 5.3.0 package under the SIL Open Font License,
+Version 1.1. The license text is in `desktop/fonts/OFL.txt`.

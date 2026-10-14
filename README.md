@@ -1,13 +1,16 @@
 # sui
 
-## Desktop app (macOS)
+## Desktop app (macOS and Linux)
 
 SUI Desktop is a native app window with projects, streaming chats, tool
 approvals, SSH workspaces, a browser preview and element/area annotations.
-The Rust agent runs on the machine holding the workspace; remote previews use
-SSH port forwarding. The app can install SUI on an SSH host and save a model
-profile from its connection screen. See [desktop/README.md](desktop/README.md) for build,
-setup and current limits. The terminal UI remains available.
+It has a light and a dark theme, a collapsible sidebar, and a customizable
+slime companion that works, hops, and asks beside your conversation without
+ever covering it. The Rust agent runs on the machine holding the workspace;
+remote previews use SSH port forwarding. The app can install SUI on an SSH
+host and save a model profile from its connection screen. See
+[desktop/README.md](desktop/README.md) for build, setup and current limits.
+The terminal UI remains available.
 
 Cache-first multi-agent coding harness. A strong model decomposes and
 audits; cheap workers implement in isolated git worktrees; deterministic

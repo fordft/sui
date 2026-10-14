@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, session } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeTheme, session } = require('electron');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const net = require('node:net');
@@ -252,7 +252,14 @@ function registerIpc() {
   ipcMain.handle('sui:open-browser', async (_event, url) => { showBrowser(); const address = validUrl(url); await browser.webContents.loadURL(address); return address; });
   ipcMain.handle('sui:preview-remote', (_event, port) => openRemotePreview(port));
   ipcMain.handle('sui:browser-bounds', (_event, bounds) => { browserBounds(bounds); return true; });
+  ipcMain.handle('sui:browser-show', () => { showBrowser(); return true; });
   ipcMain.handle('sui:browser-hide', () => { if (window.contentView.children.includes(browser)) window.contentView.removeChildView(browser); return true; });
+  ipcMain.handle('sui:chrome', (_event, theme) => {
+    if (!CHROME[theme] || !window || window.isDestroyed()) return false;
+    window.setBackgroundColor(CHROME[theme].color);
+    if (process.platform === 'win32') window.setTitleBarOverlay({ ...CHROME[theme], height: TITLEBAR_HEIGHT });
+    return true;
+  });
   ipcMain.handle('sui:browser-back', () => { if (browser.webContents.navigationHistory.canGoBack()) browser.webContents.navigationHistory.goBack(); });
   ipcMain.handle('sui:browser-forward', () => { if (browser.webContents.navigationHistory.canGoForward()) browser.webContents.navigationHistory.goForward(); });
   ipcMain.handle('sui:browser-reload', () => browser.webContents.reload());
@@ -265,12 +272,32 @@ function registerIpc() {
   });
 }
 
+// Window chrome follows the platform: macOS keeps its traffic lights inset in
+// our title row, Windows draws its caption buttons over it, and Linux keeps
+// the native frame (always works, whatever the compositor or window manager).
+const CHROME = {
+  dark: { color: '#0a0d12', symbolColor: '#aab5c6' },
+  light: { color: '#eceff4', symbolColor: '#475266' }
+};
+const TITLEBAR_HEIGHT = 48;
+
+function windowOptions() {
+  const chrome = CHROME[nativeTheme.shouldUseDarkColors ? 'dark' : 'light'];
+  const base = {
+    width: 1440, height: 900, minWidth: 720, minHeight: 560, show: false,
+    backgroundColor: chrome.color, title: 'SUI Desktop',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: true, contextIsolation: true, nodeIntegration: false }
+  };
+  if (process.platform === 'darwin') return { ...base, titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 17 } };
+  if (process.platform === 'win32') return { ...base, titleBarStyle: 'hidden', titleBarOverlay: { ...chrome, height: TITLEBAR_HEIGHT } };
+  return { ...base, autoHideMenuBar: true };
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId('dev.sui.desktop');
   registerIpc();
-  window = new BrowserWindow({ width: 1440, height: 900, minWidth: 1040, minHeight: 680,
-    backgroundColor: '#08111f', title: 'SUI Desktop',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  window = new BrowserWindow(windowOptions());
+  window.once('ready-to-show', () => window.show());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.loadFile(path.join(__dirname, 'index.html'));

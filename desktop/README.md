@@ -1,11 +1,39 @@
 # SUI Desktop
 
-SUI Desktop is a Mac app shell for SUI's native Rust agent. The app owns the
-project list, chat surface, SSH connection and browser preview. The Rust process
-on the selected machine owns model requests, tools, permission decisions,
-journals and session recovery. The desktop does not reimplement the agent loop.
+SUI Desktop is an app shell for SUI's native Rust agent on macOS and Linux. The
+app owns the project list, chat surface, SSH connection and browser preview. The
+Rust process on the selected machine owns model requests, tools, permission
+decisions, journals and session recovery. The desktop does not reimplement the
+agent loop.
 
-## Development on macOS
+## Interface
+
+- **Layout:** a collapsible sidebar (projects and recent chats), the
+  conversation, and an optional browser preview panel. Below 1000 px wide,
+  opening one of the sidebar or preview closes the other.
+- **Themes:** system, light, or dark, from Appearance & companion. Fonts are
+  bundled (Inter, SIL OFL); Thai and other scripts use your system fonts.
+- **Window chrome:** macOS keeps its traffic lights in the title row, Windows
+  draws its caption buttons over it, and Linux keeps the native window frame.
+- **Conversation:** assistant text renders markdown (code blocks have Copy);
+  tool activity collapses into one work log per burst; approvals appear above
+  the composer with Deny / Allow once / Allow session. Enter sends (not while an
+  input method is composing), Shift+Enter inserts a newline, and you can keep
+  drafting while SUI works.
+- **Companion:** a slime that lives in a strip above the composer, so it never
+  covers messages on its own. It runs back and forth while SUI works, bounces
+  and asks `?` when it needs an approval (the buttons remain the only way to
+  approve), cheers or frets when a run ends, naps after 45 seconds, follows your
+  cursor, looks down while you type, and can be clicked or picked up. Choose its
+  color, accessory, size, and name — or turn it off — in Appearance &
+  companion. Motion can be Full, Calm (it stays put), or Off; it defaults to Calm
+  when the system asks for reduced motion.
+- **Shortcuts** (⌘ on macOS, Ctrl elsewhere): B sidebar, J preview, N new chat,
+  `,` appearance.
+
+Appearance choices are stored on this device only and never sent to SUI.
+
+## Development on macOS and Linux
 
 Install Rust, Node.js 22.12+ and npm. From this directory:
 
@@ -24,6 +52,11 @@ npm run dist:mac
 Artifacts appear in `desktop/dist/`. The GitHub `Desktop` workflow builds both
 Apple Silicon and Intel artifacts. macOS may require one-time approval to open
 an unsigned local build. Release signing and notarization are not configured.
+
+On Linux, `npm run dist:linux` builds an AppImage (x86-64 or ARM64, matching the
+machine). It is not built in CI. Native Windows is not supported because SUI does
+not ship a Windows binary (use SSH to a Linux host or WSL2). The window chrome
+has a Windows path (caption-button overlay) that has not been run on Windows.
 
 ## Use
 
@@ -63,7 +96,13 @@ npm test
 xvfb-run -a node_modules/.bin/electron --no-sandbox test/electron-smoke.js
 ```
 
+`npm test` covers the bridge command construction, the markdown renderer, the
+companion's math and preference validation, and the page shell (every asset
+exists and is packaged, markup stays inside the CSP, every element the scripts
+use exists, every preload call is exposed).
+
 The GUI smoke test opens the actual Electron window, connects to a local SUI
-bridge, opens a test web page and checks element annotation. Live SSH and model
-requests need a configured host and credentials; these are separate from the
-local smoke test.
+bridge, opens a test web page and checks element annotation, then that the
+native preview view steps aside for dialogs and leaves with its panel. Live SSH
+and model requests need a configured host and credentials; these are separate
+from the local smoke test.
