@@ -13,6 +13,7 @@ on:
       - 'src/agent.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'install-desktop.sh'
       - '.github/workflows/desktop.yml'
 permissions:
   contents: read
@@ -48,6 +49,8 @@ jobs:
         working-directory: desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # Ad-hoc signing uses no certificate or secret, including on PRs.
+          CSC_FOR_PULL_REQUEST: 'true'
       - name: Check architecture-specific asset names
         shell: bash
         run: |
@@ -57,20 +60,90 @@ jobs:
           if [ "$arch" = x86_64 ]; then arch=x64; fi
           test -f "desktop/dist/SUI.Desktop-${version}-${arch}.dmg"
           test -f "desktop/dist/SUI.Desktop-${version}-${arch}.zip"
-      - name: Inspect packaged DMG
+      - name: Verify Mac package signatures and architectures
         shell: bash
         run: |
           set -euo pipefail
-          dmg=$(find desktop/dist -maxdepth 1 -name '*.dmg' -print -quit)
+          version=$(node -p "require('./desktop/package.json').version")
+          arch="${{ matrix.cpu }}"
+          if [ "$arch" = x86_64 ]; then arch=x64; fi
+          verify_bundle() {
+            local bundle="$1"
+            test -d "$bundle"
+            local icon
+            icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$bundle/Contents/Info.plist")
+            test -f "$bundle/Contents/Resources/${icon%.icns}.icns"
+            lipo "$bundle/Contents/MacOS/SUI Desktop" -verify_arch "${{ matrix.cpu }}"
+            lipo "$bundle/Contents/Resources/sui" -verify_arch "${{ matrix.cpu }}"
+            codesign --verify --deep --strict "$bundle"
+            codesign --verify --strict "$bundle/Contents/Resources/sui"
+            test "$("$bundle/Contents/Resources/sui" --version)" = "sui $version"
+          }
           mkdir "$RUNNER_TEMP/sui-mounted"
-          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/sui-mounted" "$dmg"
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/sui-mounted" "desktop/dist/SUI.Desktop-${version}-${arch}.dmg"
           trap 'hdiutil detach "$RUNNER_TEMP/sui-mounted"' EXIT
-          bundle="$RUNNER_TEMP/sui-mounted/SUI Desktop.app"
-          test -d "$bundle"
-          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$bundle/Contents/Info.plist")
-          test -f "$bundle/Contents/Resources/${icon%.icns}.icns"
-          lipo "$bundle/Contents/MacOS/SUI Desktop" -verify_arch "${{ matrix.cpu }}"
-          test -f "$bundle/Contents/Resources/sui"
+          verify_bundle "$RUNNER_TEMP/sui-mounted/SUI Desktop.app"
+          ditto -x -k "desktop/dist/SUI.Desktop-${version}-${arch}.zip" "$RUNNER_TEMP/sui-unzipped"
+          verify_bundle "$RUNNER_TEMP/sui-unzipped/SUI Desktop.app"
+      - name: Exercise the Desktop installer on Mac
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./desktop/package.json').version")
+          arch="${{ matrix.cpu }}"
+          if [ "$arch" = x86_64 ]; then arch=x64; fi
+          asset="SUI.Desktop-${version}-${arch}.dmg"
+          export SUI_TAG="v$version"
+          export SUI_TEST_DOWNLOADS="$GITHUB_WORKSPACE/desktop/dist"
+          (cd desktop/dist && shasum -a 256 "$asset" > "SUI-Desktop-${version}-SHA256SUMS.txt")
+          mkdir "$RUNNER_TEMP/sui-download-shim"
+          # Substitute the download only; installation uses real Mac tools.
+          cat > "$RUNNER_TEMP/sui-download-shim/curl" <<'JS'
+          #!/usr/bin/env node
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const args = process.argv.slice(2);
+          const url = args.at(-1);
+          const name = path.basename(url);
+          if (url !== `https://github.com/fordft/sui/releases/download/${process.env.SUI_TAG}/${name}`) throw new Error('Unexpected download URL');
+          fs.copyFileSync(path.join(process.env.SUI_TEST_DOWNLOADS, name), args[args.indexOf('-o') + 1]);
+          JS
+          chmod +x "$RUNNER_TEMP/sui-download-shim/curl"
+          # Install and reinstall to exercise replacement of an existing app.
+          for attempt in 1 2; do
+            PATH="$RUNNER_TEMP/sui-download-shim:$PATH" sh install-desktop.sh "$RUNNER_TEMP/sui-installed"
+          done
+          test -z "$(xattr -r "$RUNNER_TEMP/sui-installed/SUI Desktop.app" | grep com.apple.quarantine || true)"
+          codesign --verify --deep --strict "$RUNNER_TEMP/sui-installed/SUI Desktop.app"
+      - name: Smoke test the packaged Mac app
+        shell: bash
+        run: |
+          python3 - "$RUNNER_TEMP/sui-installed/SUI Desktop.app/Contents/MacOS/SUI Desktop" "$RUNNER_TEMP/sui-launch" <<'PY'
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[2])
+          root.mkdir()
+          env = dict(os.environ, SUI_HOME=str(root / "sui"))
+          with (root / "launch.log").open("wb+") as log:
+              child = subprocess.Popen([sys.argv[1], "--user-data-dir=" + str(root / "desktop")], env=env, stdout=log, stderr=log)
+              try:
+                  try:
+                      code = child.wait(timeout=8)
+                  except subprocess.TimeoutExpired:
+                      print("Packaged SUI Desktop stayed running for 8 seconds")
+                  else:
+                      log.seek(0, 2)
+                      log.seek(max(0, log.tell() - 4000))
+                      print(log.read().decode(errors="replace"))
+                      raise SystemExit(f"Packaged SUI Desktop exited early ({code})")
+              finally:
+                  if child.poll() is None:
+                      child.terminate()
+                      try:
+                          child.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          child.kill()
+                          child.wait(timeout=5)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: sui-desktop-${{ matrix.arch }}

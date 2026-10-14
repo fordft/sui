@@ -14,6 +14,18 @@ test('Mac artifact names include architecture without spaces', () => {
   assert.equal(pkg.build.mac.artifactName, 'SUI.Desktop-${version}-${arch}.${ext}');
 });
 
+test('ad-hoc Mac packages require signing and Electron launch entitlements', () => {
+  const mac = pkg.build.mac;
+  assert.equal(mac.identity, '-');
+  assert.equal(mac.forceCodeSigning, true);
+  assert.equal(mac.hardenedRuntime, true);
+  assert.equal(mac.notarize, false);
+  const entitlements = read(mac.entitlements);
+  assert.match(entitlements, /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/);
+  assert.match(entitlements, /<key>com\.apple\.security\.cs\.disable-library-validation<\/key>\s*<true\/>/);
+  assert.equal(mac.entitlementsInherit, mac.entitlements);
+});
+
 function covered(file) {
   return pkg.build.files.some(pattern => pattern === file || (pattern.endsWith('/*') && file.startsWith(pattern.slice(0, -1))));
 }

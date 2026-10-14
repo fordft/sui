@@ -43,25 +43,52 @@ npm run dev
 ```
 
 `npm run dev` builds `target/debug/sui`, installs Electron's runtime if needed,
-and opens the app. To create an unsigned Mac DMG and ZIP on a Mac:
+and opens the app. To create an ad-hoc-signed Mac DMG and ZIP on a Mac:
 
 ```bash
 npm run dist:mac
 ```
 
 Artifacts appear in `desktop/dist/`. The GitHub `Desktop` workflow builds both
-Apple Silicon and Intel DMG/ZIP files, inspects their contents on Mac runners,
-and attaches them to a tagged GitHub Release after the core release is ready.
+Apple Silicon and Intel DMG/ZIP files, verifies both bundles' signatures and
+architectures, runs the bundled Rust executable, and checks that the packaged
+app stays running on Mac runners. It also exercises installation and replacement
+with local release artifacts before attaching the packages to a tagged GitHub
+Release after the core release is ready.
 The app's sidebar checks GitHub Releases for a newer Mac build and can download,
 verify, and open its DMG. Drag the app to Applications to finish updating.
 
-**Mac download limit:** release signing and Apple notarization are not yet
-configured. macOS Gatekeeper can show “SUI Desktop.app is damaged and can't be
-opened” for the downloaded app, including when its SHA-256 matches the release.
-The in-app update button cannot remove this restriction. If you trust this
-release and macOS offers it, use System Settings → Privacy & Security → Open
-Anyway after attempting to open the app. A normal first-launch experience and
-automatic install/restart require Apple Developer ID signing and notarization.
+**Mac installation without an Apple Developer account (0.11.6 and newer):**
+the app and its embedded binaries are ad-hoc signed, with the JIT and library
+validation entitlements Electron needs on Apple Silicon. Ad-hoc signatures
+verify package integrity; they do not provide Apple Developer ID trust or
+notarization. Gatekeeper can still block a downloaded DMG app.
+
+The explicit [Desktop installer](../install-desktop.sh) verifies the release's
+SHA-256 checksum, bundle identity, architectures, and signatures before copying
+the app to `~/Applications/SUI Desktop.app`. It removes download quarantine from
+that copy only, runs the bundled SUI version check, and then replaces an existing
+SUI Desktop installation. It leaves the existing app in place if verification
+fails and restores it if replacement fails. It needs no sudo or Apple account.
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/fordft/sui/releases/latest/download/install-desktop.sh | sh
+open "$HOME/Applications/SUI Desktop.app"
+```
+
+To inspect the installer first, download it to a file and run
+`sh install-desktop.sh`. An optional absolute directory argument changes the
+installation location; `SUI_TAG=v0.11.6 sh install-desktop.sh` pins a release.
+Use the same location for later updates. If you installed manually in
+`/Applications`, pass `/Applications` when it is writable to your user, or
+remove the older copy after installing to `~/Applications`.
+
+The in-app update button still opens a DMG for manual installation. For a
+blocked direct download, use System Settings → Privacy & Security → Open Anyway
+if macOS offers it, or rerun the explicit installer. Normal Finder first launch
+without an exception, and automatic install/restart, still require an Apple
+Developer Program account, Developer ID signing, and notarization.
 
 On Linux, `npm run dist:linux` builds an AppImage (x86-64 or ARM64, matching the
 machine). It is not built in CI. Native Windows is not supported because SUI does
