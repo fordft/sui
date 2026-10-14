@@ -235,28 +235,199 @@ function renderSessions(items) {
 
 // ── connection dialog ────────────────────────────────────────────────────
 
+let folderListing = null, folderRequest = 0, hostRequest = 0, connectionBusy = false, selectedWorkspace = '';
+let dialogLocation = '';
+
+function closeFolders() {
+  folderRequest++;
+  folderListing = null;
+  $('folder-browser').classList.add('hidden');
+  $('browse-workspace').disabled = false;
+  window.sui.cancelFolderBrowse().catch(() => {});
+}
+
+function setWorkspace(directory) {
+  selectedWorkspace = directory;
+  $('workspace').value = directory;
+  $('workspace-selected').textContent = directory;
+  $('workspace-selected').classList.toggle('hidden', !directory);
+  updateConnectForm();
+}
+
+function updateConnectForm() {
+  const item = formTarget();
+  const browsing = !$('folder-browser').classList.contains('hidden');
+  $('connect-button').disabled = connectionBusy || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
+  $('browse-workspace').disabled = connectionBusy || browsing || (item.kind === 'ssh' && !item.host);
+}
+
+function renderRecentWorkspaces() {
+  const item = formTarget();
+  const recents = state.projects.filter(p => p.kind === item.kind && (p.host || '') === item.host);
+  $('recent-workspaces').replaceChildren(h('option', '', 'Choose a recent folder…'));
+  $('recent-workspaces').firstChild.value = '';
+  for (const project of recents) {
+    const option = h('option', '', project.workspace);
+    option.value = project.workspace;
+    $('recent-workspaces').append(option);
+  }
+  $('recent-workspaces-label').classList.toggle('hidden', !recents.length);
+}
+
+function hostChanged() {
+  const item = formTarget();
+  const location = `${item.kind}:${item.host}`;
+  if (location !== dialogLocation) {
+    dialogLocation = location;
+    closeFolders();
+    setWorkspace('');
+    $('connect-error').classList.add('hidden');
+  }
+  renderRecentWorkspaces();
+  updateConnectForm();
+}
+
+function selectHost() {
+  const choice = $('host-choice').value;
+  $('host-label').classList.toggle('hidden', choice !== ':manual');
+  $('host').value = choice === ':manual' ? '' : choice;
+  hostChanged();
+  if (choice === ':manual') $('host').focus();
+}
+
+async function refreshHosts() {
+  const request = ++hostRequest;
+  const original = $('host').value;
+  $('refresh-hosts').disabled = true;
+  try {
+    const result = await window.sui.sshHosts();
+    if (request !== hostRequest) return;
+    const select = $('host-choice');
+    const manual = select.value === ':manual';
+    const option = (value, label) => { const node = h('option', '', label); node.value = value; return node; };
+    const recent = [...new Set(state.projects.filter(p => p.kind === 'ssh').map(p => p.host))].filter(host => !result.hosts.includes(host));
+    select.replaceChildren(option('', 'Choose an SSH host…'));
+    for (const [label, hosts] of [['From ~/.ssh/config', result.hosts], ['Recent hosts', recent]]) {
+      if (!hosts.length) continue;
+      const group = h('optgroup'); group.label = label;
+      group.append(...hosts.map(host => option(host, host)));
+      select.append(group);
+    }
+    select.append(option(':manual', 'Enter another host…'));
+    // Do not overwrite a host typed or selected while discovery was pending.
+    const current = $('host').value;
+    const known = [...result.hosts, ...recent].includes(current);
+    select.value = known ? current : (current || manual || (!result.hosts.length && !recent.length)) ? ':manual' : '';
+    const remote = formTarget().kind === 'ssh';
+    $('host-label').classList.toggle('hidden', !remote || select.value !== ':manual');
+    $('host-help').textContent = result.warnings.length ? result.warnings.join(' ') : result.hosts.length
+      ? `${result.hosts.length} hosts from ~/.ssh/config and its Include files. Your SSH settings are used automatically.`
+      : 'No saved SSH aliases found in ~/.ssh/config. Enter a host below, or reload after adding one.';
+    if (current === original) updateConnectForm();
+  } catch (error) {
+    if (request !== hostRequest) return;
+    $('host-choice').replaceChildren(h('option', '', 'Enter another host…'));
+    $('host-choice').firstChild.value = ':manual';
+    $('host-label').classList.toggle('hidden', formTarget().kind !== 'ssh');
+    $('host-help').textContent = String(error.message || error);
+  } finally { if (request === hostRequest) $('refresh-hosts').disabled = false; }
+}
+
+function renderFolders() {
+  const query = $('folder-filter').value.toLocaleLowerCase();
+  const list = $('folder-list');
+  list.replaceChildren();
+  if (!folderListing) return;
+  for (const name of folderListing.directories.filter(name => name.toLocaleLowerCase().includes(query))) {
+    const row = h('button', 'folder-row'); row.type = 'button';
+    row.append(icon('folder'), h('span', '', name)); row.title = name;
+    row.addEventListener('click', () => browseFolders(`${folderListing.path.replace(/\/$/, '')}/${name}`));
+    list.append(row);
+  }
+  if (!list.childElementCount) list.append(h('p', 'field-help', query ? 'No matching folders' : 'No subfolders. You can use this folder.'));
+}
+
+async function browseFolders(directory = '') {
+  const item = formTarget();
+  const request = ++folderRequest;
+  $('connect-error').classList.add('hidden');
+  if (item.kind === 'local') {
+    $('browse-workspace').disabled = true;
+    try {
+      const chosen = await window.sui.pickWorkspace();
+      if (request === folderRequest && chosen) setWorkspace(chosen);
+    } catch (error) {
+      if (request === folderRequest) showConnectError(error);
+    } finally { if (request === folderRequest) updateConnectForm(); }
+    return;
+  }
+  if (!item.host) return;
+  folderListing = null;
+  $('folder-browser').classList.remove('hidden');
+  $('folder-browser').setAttribute('aria-busy', 'true');
+  $('folder-list').replaceChildren();
+  $('folder-status').textContent = `Connecting to ${item.host}…`;
+  $('folder-path').textContent = directory || 'Home folder';
+  for (const id of ['choose-folder', 'folder-up', 'folder-home', 'folder-show-hidden']) $(id).disabled = true;
+  updateConnectForm();
+  try {
+    const listing = await window.sui.remoteFolders(item.host, directory, $('folder-show-hidden').checked);
+    if (request !== folderRequest) return;
+    folderListing = listing;
+    $('folder-path').textContent = listing.path;
+    $('folder-filter').value = '';
+    renderFolders();
+    $('folder-status').textContent = `Connected to ${item.host}. ${listing.truncated ? 'Showing the first 500 folders; enter a path for folders outside this list.' : 'Open a subfolder or use the current folder.'}`;
+    $('choose-folder').disabled = false;
+    $('folder-up').disabled = listing.parent === listing.path;
+    $('folder-home').disabled = false;
+    $('folder-show-hidden').disabled = false;
+    $('folder-filter').focus();
+  } catch (error) {
+    if (request !== folderRequest) return;
+    folderListing = null;
+    $('folder-status').textContent = 'Could not list this folder. Retry Home or enter a path manually.';
+    $('folder-home').disabled = false;
+    showConnectError(error);
+  } finally {
+    if (request === folderRequest) $('folder-browser').setAttribute('aria-busy', 'false');
+  }
+}
+
+function showConnectError(error) {
+  $('connect-error').textContent = String(error.message || error);
+  $('connect-error').classList.remove('hidden', 'success');
+}
+
 function showDialog(item) {
+  closeFolders();
   $('connect-error').classList.add('hidden');
   if (item) {
     document.querySelector(`input[name="kind"][value="${item.kind}"]`).checked = true;
     $('host').value = item.host || '';
-    $('workspace').value = item.workspace;
+    selectedWorkspace = item.workspace;
     $('profile').value = item.profile || 'codex';
   }
+  const current = formTarget();
+  dialogLocation = `${current.kind}:${current.host}`;
   updateMode();
+  setWorkspace(selectedWorkspace);
   window.SuiUI.openDialog($('connect-dialog'));
+  refreshHosts();
 }
 
 function updateMode() {
   const remote = document.querySelector('input[name="kind"]:checked').value === 'ssh';
-  $('host-label').classList.toggle('hidden', !remote);
+  $('ssh-hosts').classList.toggle('hidden', !remote);
+  $('host-label').classList.toggle('hidden', !remote || $('host-choice').value !== ':manual');
   $('install-remote').classList.toggle('hidden', !remote);
-  $('host').required = remote;
+  $('browse-workspace-label').textContent = remote ? 'Connect & choose folder' : 'Choose a folder…';
+  hostChanged();
 }
 
 function formTarget() {
   const kind = document.querySelector('input[name="kind"]:checked').value;
-  return { kind, host: kind === 'ssh' ? $('host').value.trim() : '', workspace: $('workspace').value.trim(), profile: $('profile').value.trim() };
+  return { kind, host: kind === 'ssh' ? $('host').value.trim() : '', workspace: selectedWorkspace, profile: $('profile').value.trim() };
 }
 
 async function installRemote() {
@@ -289,6 +460,8 @@ async function saveModel() {
 
 async function connect(item, resume = null) {
   if (state.activeRun !== null) return;
+  connectionBusy = true;
+  closeFolders();
   state.hello = null;
   setBusy(false);
   setStatus('Connecting…', false, true);
@@ -328,7 +501,7 @@ async function connect(item, resume = null) {
     $('connect-error').textContent = String(error.message || error);
     $('connect-error').classList.remove('hidden');
     if (!$('connect-dialog').open) showDialog(item);
-  } finally { $('connect-button').disabled = false; }
+  } finally { connectionBusy = false; updateConnectForm(); }
 }
 
 // ── sending and bridge events ────────────────────────────────────────────
@@ -492,9 +665,32 @@ window.addEventListener('DOMContentLoaded', async () => {
   setStage();
   $('connect-form').addEventListener('submit', event => {
     event.preventDefault();
+    if ($('connect-button').disabled || $('folder-browser').contains(document.activeElement)) return;
     connect(formTarget());
   });
   document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', updateMode));
+  $('host-choice').addEventListener('change', selectHost);
+  $('refresh-hosts').addEventListener('click', refreshHosts);
+  $('host').addEventListener('input', hostChanged);
+  $('workspace').addEventListener('input', () => { closeFolders(); setWorkspace($('workspace').value); });
+  $('profile').addEventListener('input', updateConnectForm);
+  $('browse-workspace').addEventListener('click', () => browseFolders(formTarget().workspace));
+  $('recent-workspaces').addEventListener('change', () => {
+    if ($('recent-workspaces').value) { closeFolders(); setWorkspace($('recent-workspaces').value); }
+  });
+  $('folder-filter').addEventListener('input', renderFolders);
+  $('folder-home').addEventListener('click', () => browseFolders());
+  $('folder-up').addEventListener('click', () => { if (folderListing) browseFolders(folderListing.parent); });
+  $('folder-show-hidden').addEventListener('change', () => { if (folderListing) browseFolders(folderListing.path); });
+  $('close-folder-browser').addEventListener('click', () => { closeFolders(); updateConnectForm(); });
+  $('choose-folder').addEventListener('click', () => {
+    if (!folderListing) return;
+    setWorkspace(folderListing.path);
+    closeFolders();
+    updateConnectForm();
+    $('connect-button').focus();
+  });
+  $('connect-dialog').addEventListener('close', closeFolders);
   $('show-model-setup').addEventListener('click', () => $('model-setup').classList.toggle('hidden'));
   $('save-model').addEventListener('click', saveModel);
   $('install-remote').addEventListener('click', installRemote);

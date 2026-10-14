@@ -193,8 +193,32 @@
           <label><input type="radio" name="kind" value="ssh" checked><span><svg class="i"><use href="#i-server"/></svg>SSH host</span></label>
           <label><input type="radio" name="kind" value="local"><span><svg class="i"><use href="#i-monitor"/></svg><span id="local-label">This computer</span></span></label>
         </div>
-        <label id="host-label" class="field"><span>SSH host</span><input id="host" placeholder="you@dev-machine" autocomplete="off" required autofocus></label>
-        <label class="field"><span>Workspace path</span><input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" required autofocus></label>
+        <div id="ssh-hosts" class="host-picker">
+          <label class="field"><span>SSH host</span><select id="host-choice" aria-describedby="host-help"><option value="">Loading SSH hosts…</option></select></label>
+          <button type="button" id="refresh-hosts" class="icon-btn" aria-label="Reload SSH config" title="Reload SSH config"><svg class="i"><use href="#i-refresh"/></svg></button>
+          <p id="host-help" class="field-help">Choose a host from ~/.ssh/config, or enter another host.</p>
+        </div>
+        <label id="host-label" class="field hidden"><span>Host name or SSH alias</span><input id="host" placeholder="you@dev-machine" autocomplete="off" spellcheck="false"></label>
+        <div class="workspace-picker">
+          <span class="picker-label">Workspace</span>
+          <button type="button" id="browse-workspace" class="btn btn-soft"><svg class="i"><use href="#i-folder"/></svg><span id="browse-workspace-label">Connect &amp; choose folder</span></button>
+          <p id="workspace-selected" class="selected-path hidden"></p>
+          <label id="recent-workspaces-label" class="field hidden"><span>Recent folders on this host</span><select id="recent-workspaces"><option value="">Choose a recent folder…</option></select></label>
+          <div id="folder-browser" class="folder-browser hidden" aria-label="Remote folder browser">
+            <div class="folder-toolbar">
+              <button type="button" id="folder-home" class="btn btn-ghost btn-sm">Home</button>
+              <button type="button" id="folder-up" class="btn btn-ghost btn-sm" aria-label="Parent folder"><svg class="i"><use href="#i-arrow-up"/></svg>Up</button>
+              <button type="button" id="close-folder-browser" class="icon-btn" aria-label="Close folder browser"><svg class="i"><use href="#i-x"/></svg></button>
+            </div>
+            <p id="folder-path" class="folder-path"></p>
+            <label class="field"><span class="sr-only">Filter folders</span><input id="folder-filter" type="search" placeholder="Filter folders…" autocomplete="off"></label>
+            <label class="folder-hidden"><input id="folder-show-hidden" type="checkbox">Show hidden folders</label>
+            <div id="folder-list" class="folder-list" aria-label="Folders"></div>
+            <p id="folder-status" class="field-help" role="status"></p>
+            <button type="button" id="choose-folder" class="btn btn-soft" disabled>Use this folder</button>
+          </div>
+          <details id="manual-workspace"><summary>Enter a path manually</summary><label class="field"><span class="sr-only">Workspace path</span><input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" spellcheck="false"></label></details>
+        </div>
         <label class="field"><span>SUI model profile</span><input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label>
         <button type="button" id="show-model-setup" class="link-btn">+ Configure a model on this machine</button>
         <div id="model-setup" class="model-setup hidden">
@@ -208,7 +232,7 @@
         <button type="button" id="install-remote" class="link-btn"><svg class="i"><use href="#i-download"/></svg>Install or update SUI on SSH host</button>
         <div id="connect-error" class="form-error hidden" role="alert"></div>
       </div>
-      <footer class="dlg-foot"><button type="submit" id="connect-button" class="btn btn-primary btn-lg"><span>Connect to project</span><svg class="i"><use href="#i-arrow-right"/></svg></button></footer>
+      <footer class="dlg-foot"><button type="submit" id="connect-button" class="btn btn-primary btn-lg" disabled><span>Open workspace</span><svg class="i"><use href="#i-arrow-right"/></svg></button></footer>
     </form>
   </dialog>
 

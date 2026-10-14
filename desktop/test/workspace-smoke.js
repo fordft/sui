@@ -1,0 +1,131 @@
+// Real Electron + loopback OpenSSH. No external host, user config changes or
+// live model requests. Requires openssh-server and an existing /run/sshd.
+const { app, BrowserWindow } = require('electron');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const net = require('node:net');
+const { spawn, execFileSync } = require('node:child_process');
+const { shellQuote } = require('../bridge');
+const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-ssh-smoke-'));
+const fixtureHome = path.join(temporary, 'desktop-home');
+const workspace = path.join(temporary, 'projects', 'งาน my app');
+const slowWorkspace = path.join(temporary, 'sui-browse-slow');
+fs.mkdirSync(path.join(fixtureHome, '.ssh'), { recursive: true });
+fs.mkdirSync(workspace, { recursive: true });
+fs.mkdirSync(slowWorkspace);
+fs.mkdirSync(path.join(temporary, 'projects', '.hidden'));
+app.setPath('userData', fixtureHome);
+app.setPath('home', fixtureHome);
+process.env.SUI_HOME = path.join(temporary, 'model-config');
+fs.mkdirSync(process.env.SUI_HOME);
+fs.writeFileSync(path.join(process.env.SUI_HOME, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "workspace-test-model"\n', { mode: 0o600 });
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+let sshd, failed = false;
+
+async function freePort() {
+  const server = net.createServer();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  await new Promise(resolve => server.close(resolve));
+  return port;
+}
+
+async function run() {
+  const port = await freePort();
+  for (const key of ['host-key', 'client-key']) execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', path.join(temporary, key)]);
+  const wrapper = path.join(temporary, 'remote-command');
+  const bin = path.join(temporary, 'bin');
+  fs.mkdirSync(bin);
+  const binary = process.env.SUI_DESKTOP_CLI || path.resolve(__dirname, '../../target/debug/sui');
+  fs.symlinkSync(binary, path.join(bin, 'sui'));
+  // Route the standard SUI install location to the built fixture binary too,
+  // so an older ~/.sui/bin/sui on the test runner cannot take precedence.
+  const rewriteBinary = 's|"$HOME/.sui/bin/sui"|"' + binary.replace(/[\\&|]/g, '\\$&') + '"|g';
+  fs.writeFileSync(wrapper, `#!/bin/sh\nPATH=${shellQuote(bin)}:"$PATH"\nSUI_HOME=${shellQuote(process.env.SUI_HOME)}\nexport PATH SUI_HOME\ncase "$SSH_ORIGINAL_COMMAND" in *sui-browse-slow*) sleep 1 ;; esac\nsui_fixture_command=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | sed ${shellQuote(rewriteBinary)})\nexec sh -c "$sui_fixture_command"\n`, { mode: 0o700 });
+  const serverConfig = path.join(temporary, 'sshd-config');
+  fs.writeFileSync(serverConfig, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${temporary}/host-key\nPidFile ${temporary}/sshd.pid\nAuthorizedKeysFile ${temporary}/client-key.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nForceCommand ${wrapper}\n`);
+  sshd = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', serverConfig], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let serverErrors = '';
+  sshd.stderr.on('data', chunk => { serverErrors = (serverErrors + chunk).slice(-4000); });
+  sshd.on('error', error => { serverErrors = error.message; });
+  const sshConfig = path.join(fixtureHome, '.ssh', 'config');
+  fs.writeFileSync(sshConfig, `Include ${fixtureHome}/.ssh/hosts.conf\n`);
+  fs.writeFileSync(path.join(fixtureHome, '.ssh', 'hosts.conf'), `Host sui-smoke\n HostName 127.0.0.1\n Port ${port}\n User ${os.userInfo().username}\n IdentityFile ${temporary}/client-key\n IdentitiesOnly yes\n UserKnownHostsFile ${temporary}/known-hosts\n`);
+  // Keep the real user's SSH config untouched. The shim only selects this
+  // fixture's config; /usr/bin/ssh still owns auth, host verification and I/O.
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\nexec /usr/bin/ssh -F ${shellQuote(sshConfig)} "$@"\n`, { mode: 0o700 });
+  process.env.PATH = bin + path.delimiter + process.env.PATH;
+  await pause(200);
+  assert.equal(sshd.exitCode, null, `fixture SSH server started: ${serverErrors}`);
+  fs.writeFileSync(path.join(fixtureHome, 'projects.json'), JSON.stringify([{ kind: 'ssh', host: 'sui-smoke', workspace: path.dirname(workspace), profile: 'test' }]));
+  require('../main');
+  for (let n = 0; n < 100 && !BrowserWindow.getAllWindows().length; n++) await pause(30);
+  const win = BrowserWindow.getAllWindows()[0];
+  assert.ok(win);
+  await new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+  const ui = code => win.webContents.executeJavaScript(code);
+  const waitFor = async (expression, message) => {
+    for (let n = 0; n < 200; n++) { if (await ui(expression)) return; await pause(30); }
+    throw new Error(message + ': ' + await ui('document.getElementById("connect-error").textContent'));
+  };
+  await ui('showDialog()');
+  await waitFor('!!document.querySelector(\'#host-choice option[value="sui-smoke"]\')', 'SSH alias imported from Include');
+  await ui('document.getElementById("host-choice").value="sui-smoke"; document.getElementById("host-choice").dispatchEvent(new Event("change"))');
+  assert.equal(await ui('document.getElementById("host").value'), 'sui-smoke');
+  assert.equal(await ui('document.getElementById("connect-button").disabled'), true, 'choose a workspace before opening');
+  await ui('document.getElementById("browse-workspace").click()');
+  await waitFor('!document.getElementById("choose-folder").disabled', 'real SSH home listing');
+  assert.equal(await ui('state.hello'), null, 'folder browsing does not start the agent');
+  assert.ok(fs.existsSync(path.join(temporary, 'known-hosts')), 'SSH verified and stored the loopback host key');
+  await ui('document.getElementById("close-folder-browser").click(); document.getElementById("recent-workspaces").selectedIndex=1; document.getElementById("recent-workspaces").dispatchEvent(new Event("change")); document.getElementById("browse-workspace").click()');
+  await waitFor('!document.getElementById("choose-folder").disabled', 'recent folder listing');
+  assert.equal(await ui('document.getElementById("folder-path").textContent'), path.dirname(workspace));
+  assert.equal(await ui('document.querySelectorAll(".folder-row").length'), 1, 'hidden folders are omitted by default');
+  await ui('document.getElementById("folder-show-hidden").click()');
+  await waitFor('!document.getElementById("choose-folder").disabled && document.querySelectorAll(".folder-row").length===2', 'hidden folders can be shown');
+  await ui('document.getElementById("folder-filter").value="งาน"; document.getElementById("folder-filter").dispatchEvent(new Event("input"))');
+  assert.equal(await ui('document.querySelectorAll(".folder-row").length'), 1);
+  if (process.env.SUI_DESKTOP_SCREENSHOT) { await pause(200); fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-folders.png'), (await win.capturePage()).toPNG()); }
+  await ui('document.querySelector(".folder-row").click()');
+  await waitFor('!document.getElementById("choose-folder").disabled', 'folder opened');
+  assert.equal(await ui('document.getElementById("folder-path").textContent'), workspace);
+  await ui('document.getElementById("folder-up").click()');
+  await waitFor('!document.getElementById("choose-folder").disabled', 'parent folder opened');
+  assert.equal(await ui('document.getElementById("folder-path").textContent'), path.dirname(workspace));
+  await ui('document.querySelectorAll(".folder-row")[1].click()');
+  await waitFor('!document.getElementById("choose-folder").disabled', 'project folder reopened');
+  await ui('document.getElementById("choose-folder").click(); document.getElementById("profile").value="test"; document.getElementById("profile").dispatchEvent(new Event("input"))');
+  assert.equal(await ui('document.getElementById("workspace").value'), workspace);
+  assert.equal(await ui('document.getElementById("connect-button").disabled'), false);
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('state.hello !== null', 'workspace connected over real SSH');
+  assert.equal(await ui('document.getElementById("composer-model").textContent'), 'workspace-test-model');
+  assert.equal(await ui('state.hello.workspace'), workspace);
+  assert.equal(await ui('document.getElementById("connect-dialog").open'), false);
+  // Returning to the dialog preserves the recent path; changing the host must
+  // invalidate it and cancel a pending listing instead of applying stale data.
+  await ui('showDialog()');
+  await waitFor('!document.getElementById("refresh-hosts").disabled', 'host list refreshed');
+  await ui(`void browseFolders(${JSON.stringify(slowWorkspace)})`);
+  await pause(100);
+  await ui('document.getElementById("host-choice").value=":manual"; document.getElementById("host-choice").dispatchEvent(new Event("change"))');
+  assert.equal(await ui('document.getElementById("workspace").value'), '');
+  assert.equal(await ui('document.getElementById("connect-button").disabled'), true);
+  await pause(1100);
+  assert.equal(await ui('folderListing'), null, 'a cancelled host request cannot repopulate the folder browser');
+  assert.equal(await ui('document.getElementById("folder-browser").classList.contains("hidden")'), true);
+  assert.equal(await ui('state.hello.model'), 'workspace-test-model', 'browsing and cancellation preserve the connected project');
+  await ui('refreshHosts()');
+  assert.equal(await ui('document.getElementById("host-label").classList.contains("hidden")'), false, 'reloading preserves the choice to enter a host manually');
+  win.setSize(720, 560);
+  await pause(400);
+  const layout = await ui(`({ width: innerWidth, scroll: document.documentElement.scrollWidth, outside: [...document.querySelectorAll('body *')].filter(el => { const r=el.getBoundingClientRect(); return r.width && r.right > innerWidth+1; }).slice(0, 12).map(el => ({ id: el.id, class: el.className, right: el.getBoundingClientRect().right })) })`);
+  assert.ok(layout.scroll <= layout.width, JSON.stringify(layout));
+  assert.equal(await ui('document.getElementById("connect-button").getBoundingClientRect().bottom <= innerHeight'), true, 'open workspace remains visible in a small window');
+  console.log('WORKSPACE_SSH_SMOKE_OK');
+}
+
+app.whenReady().then(run).then(() => app.quit()).catch(error => { console.error(error); failed = true; app.quit(); });
+app.on('will-quit', () => { sshd?.kill(); fs.rmSync(temporary, { recursive: true, force: true }); if (failed) app.exit(1); });

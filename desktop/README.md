@@ -87,7 +87,7 @@ open "$HOME/Applications/SUI Desktop.app"
 
 To inspect the installer first, download it to a file and run
 `sh install-desktop.sh`. An optional absolute directory argument changes the
-installation location; `SUI_TAG=v0.11.6 sh install-desktop.sh` pins a release.
+installation location; `SUI_TAG=v0.11.7 sh install-desktop.sh` pins a release.
 Use the same location for later updates. If you installed manually in
 `/Applications`, pass `/Applications` when it is writable to your user, or
 remove the older copy after installing to `~/Applications`.
@@ -105,9 +105,19 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
 
 ## Use
 
-1. Add a local project or an SSH host (`user@host`) and an existing workspace
-   directory. SSH uses your normal keys and host configuration. New host keys
-   are saved on first connection; changed keys are rejected. If needed, choose
+1. Choose **This Mac / This computer → Choose a folder** to use the system's
+   folder chooser. For SSH, select a host alias imported from `~/.ssh/config`
+   (including `Include` files), or choose **Enter another host** for a new
+   `user@host`. **Reload SSH config** picks up changes without restarting SUI.
+   **Connect & choose folder** opens a folder browser on that host, starting
+   at your home directory. Open subfolders, go Up or Home, filter names, or
+   show hidden folders, then choose **Use this folder → Open workspace**.
+   Browsing does not start the agent and does not require SUI on the host.
+   Recent folders are offered separately for each host; a manual path remains
+   available. SSH uses your normal user, port, keys, agent and jump-host
+   configuration. New host keys are saved on first connection; changed keys
+   are rejected. Password/passphrase prompts are noninteractive; unlock your
+   key in ssh-agent or macOS Keychain before connecting. If needed, choose
    **Install or update SUI on SSH host** in the dialog. It runs the repository's
    checksum-checking `install.sh` over SSH on that host.
 2. Select a SUI model profile on that machine. The dialog can save an Ollama,
@@ -132,6 +142,15 @@ The app first uses `~/.sui/bin/sui`, then `sui` from the remote PATH. API keys
 entered in the setup dialog travel through local stdio or
 SSH stdin and are stored by SUI in the selected host's owner-only global config.
 The app stores project locations and profile names locally, never API keys.
+Host discovery reads only aliases, without evaluating config commands or
+reading key files. OpenSSH interprets the connection settings when you connect.
+Wildcard and negated `Host` patterns are settings, not selectable host names.
+Discovery is bounded to 64 config files, 256 KiB per file, 2 MiB total and 500
+aliases; a warning reports any limit reached. The remote folder browser shows
+at most 500 folders per directory and reports truncation; a manual path can
+reach folders outside that list. Closing the browser, changing host or closing
+the dialog cancels its pending SSH request. An SSH listing times out after
+20 seconds and never changes the currently connected project.
 
 ## Verification
 
@@ -139,15 +158,20 @@ The app stores project locations and profile names locally, never API keys.
 npm test
 # Linux GUI smoke test, when Xvfb is installed:
 xvfb-run -a node_modules/.bin/electron --no-sandbox test/electron-smoke.js
+# Workspace flow through a temporary loopback SSH server (openssh-server):
+xvfb-run -a node_modules/.bin/electron --no-sandbox test/workspace-smoke.js
 ```
 
 `npm test` covers the bridge command construction, the markdown renderer, the
 companion's math and preference validation, and the page shell (every asset
 exists and is packaged, markup stays inside the CSP, every element the scripts
-use exists, every preload call is exposed).
+use exists, every preload call is exposed). Host discovery, safe directory
+names, listing bounds, SSH failures, timeouts and cancellation are covered too.
 
 The GUI smoke test opens the actual Electron window, connects to a local SUI
 bridge, opens a test web page and checks element annotation, then that the
-native preview view steps aside for dialogs and leaves with its panel. Live SSH
-and model requests need a configured host and credentials; these are separate
-from the local smoke test.
+native preview view steps aside for dialogs and leaves with its panel. The
+workspace smoke test uses real OpenSSH, temporary keys and an isolated config
+to import a host, browse and filter remote folders, then open a workspace in
+the native bridge. CI runs both. External SSH hosts, macOS's native chooser UI
+and live model requests require separate validation on those systems.

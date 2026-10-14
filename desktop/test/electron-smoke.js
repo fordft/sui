@@ -1,5 +1,5 @@
 // Run with: xvfb-run -a electron --no-sandbox test/electron-smoke.js
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -11,6 +11,13 @@ app.setPath('userData', tempHome);
 process.env.SUI_HOME = tempHome;
 fs.writeFileSync(path.join(tempHome, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "test-model"\n', { mode: 0o600 });
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-workspace-'));
+let pickerCalls = 0;
+dialog.showOpenDialog = async (_window, options) => {
+  assert.deepEqual(options.properties, ['openDirectory']);
+  pickerCalls++;
+  if (pickerCalls === 1) return { canceled: true, filePaths: [] };
+  return { canceled: false, filePaths: [workspace] };
+};
 require('../main');
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -31,8 +38,22 @@ async function run() {
     assert.equal(ready, true, 'connection form is visible and preload bridge works');
     await win.webContents.executeJavaScript(`{
       document.querySelector('input[name="kind"][value="local"]').click();
-      document.getElementById('workspace').value = ${JSON.stringify(workspace)};
+      document.getElementById('browse-workspace').click();
+    }`);
+    for (let n = 0; n < 100 && !pickerCalls; n++) await pause(30);
+    await pause(50);
+    assert.equal(await ui('document.getElementById("workspace").value'), '', 'cancelling the native chooser leaves the workspace empty');
+    assert.equal(await ui('document.getElementById("connect-button").disabled'), true);
+    await ui('document.getElementById("browse-workspace").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('document.getElementById("workspace").value') === workspace) break;
+      await pause(30);
+    }
+    assert.equal(pickerCalls, 2, 'local workspace uses the native folder chooser');
+    assert.equal(await ui('document.getElementById("workspace").value'), workspace);
+    await ui(`{
       document.getElementById('profile').value = 'test';
+      document.getElementById('profile').dispatchEvent(new Event('input'));
       document.getElementById('connect-button').click();
     }`);
     for (let n = 0; n < 100; n++) {
