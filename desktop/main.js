@@ -1,10 +1,11 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, nativeTheme, session } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, nativeTheme, session, shell } = require('electron');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const net = require('node:net');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { spawnBridge, spawnSetup, validateHost } = require('./bridge');
+const updates = require('./update');
 
 let window;
 let bridge;
@@ -13,6 +14,7 @@ let tunnel;
 let target;
 let localPort;
 let remotePort;
+let offeredUpdate;
 
 function emit(value) {
   if (window && !window.isDestroyed()) window.webContents.send('sui:event', value);
@@ -243,6 +245,20 @@ function annotationUrl(url) {
 }
 
 function registerIpc() {
+  ipcMain.handle('sui:update-check', async () => {
+    if (process.platform !== 'darwin') return { supported: false };
+    offeredUpdate = await updates.latest(app.getVersion(), process.arch);
+    return { supported: true, available: offeredUpdate.available, version: offeredUpdate.version };
+  });
+  ipcMain.handle('sui:update-download', async () => {
+    if (process.platform !== 'darwin' || !offeredUpdate?.available) throw new Error('Check for an update first.');
+    const fresh = await updates.latest(app.getVersion(), process.arch);
+    if (!fresh.available || fresh.version !== offeredUpdate.version) throw new Error('Release changed. Check again.');
+    const file = await updates.download(fresh, app.getPath('temp'));
+    const error = await shell.openPath(file);
+    if (error) throw new Error(error);
+    return true;
+  });
   ipcMain.handle('sui:projects', () => readProjects());
   ipcMain.handle('sui:connect', (_event, item, resume) => startBridge(item, resume));
   ipcMain.handle('sui:configure', (_event, item, profile) => configureProfile(item, profile));
