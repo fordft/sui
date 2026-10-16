@@ -1,5 +1,5 @@
 // Run with: xvfb-run -a electron --no-sandbox test/electron-smoke.js
-const { app, BrowserWindow, dialog } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-smoke-'));
 app.setPath('userData', tempHome);
 process.env.SUI_HOME = tempHome;
-fs.writeFileSync(path.join(tempHome, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "test-model"\n', { mode: 0o600 });
+fs.writeFileSync(path.join(tempHome, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "test-model"\n[profiles.alternative]\nkind = "ollama"\nmodel = "other-model"\n', { mode: 0o600 });
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-workspace-'));
 let pickerCalls = 0;
 dialog.showOpenDialog = async (_window, options) => {
@@ -18,6 +18,34 @@ dialog.showOpenDialog = async (_window, options) => {
   if (pickerCalls === 1) return { canceled: true, filePaths: [] };
   return { canceled: false, filePaths: [workspace] };
 };
+// UI-only ChatGPT fixture: native OAuth/JWT/transport and private IPC are
+// exercised separately; this never opens a real account or spends plan usage.
+let fixtureChatgpt = false;
+const originalHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
+  if (channel === 'sui:provider' && fixtureChatgpt) {
+    const [target, request] = args;
+    assert.equal(target.kind, 'local');
+    if (request.action === 'login') {
+      fs.appendFileSync(path.join(tempHome, 'config.toml'), '\n[profiles.chatgpt]\nkind = "chatgpt"\nmodel = ""\n');
+      fs.mkdirSync(path.join(tempHome, 'chatgpt'), { recursive: true });
+      fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com', access_token: 'private-smoke-access', refresh_token: 'private-smoke-refresh', scopes: ['chatgpt.tokens.use.direct'], expires_at: Math.floor(Date.now() / 1000) + 3600 }), { mode: 0o600 });
+      return { type: 'account', account: { email: 'fixture@example.com', connected: true, sharing: true } };
+    }
+    if (request.action === 'models') return { type: 'models', items: [{ id: 'account-model-slug', name: 'Account model display name' }] };
+    if (request.action === 'logout') {
+      fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com' }), { mode: 0o600 });
+      return { type: 'account', account: { email: 'fixture@example.com', connected: false, sharing: false }, revocation_confirmed: true };
+    }
+    if (request.action === 'select') {
+      assert.equal(request.model, 'account-model-slug');
+      const config = path.join(tempHome, 'config.toml');
+      fs.writeFileSync(config, fs.readFileSync(config, 'utf8').replace('model = ""', 'model = "account-model-slug"'));
+      return { type: 'profile_saved', name: request.name };
+    }
+  }
+  return handler(event, ...args);
+});
 require('../main');
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -33,7 +61,9 @@ async function run() {
     const win = BrowserWindow.getAllWindows()[0];
     assert.ok(win, 'SUI window opened');
     await new Promise(resolve => win.webContents.once('did-finish-load', resolve));
-    const ui = code => win.webContents.executeJavaScript(code);
+    const ui = code => win.webContents.executeJavaScript(code).catch(error => {
+      throw new Error(`Renderer check failed: ${code}`, { cause: error });
+    });
     const ready = await win.webContents.executeJavaScript('document.getElementById("connect-dialog").open && !!window.sui');
     assert.equal(ready, true, 'connection form is visible and preload bridge works');
     await win.webContents.executeJavaScript(`{
@@ -62,6 +92,40 @@ async function run() {
     }
     assert.equal(await win.webContents.executeJavaScript('document.getElementById("connection-pill").textContent'), 'Local', 'local SUI bridge connected');
     assert.equal(await ui('document.getElementById("composer-model").textContent'), 'test-model', 'the connected model is visible beside the draft');
+    const originalRun = await ui('state.hello.run_id');
+    await ui('document.getElementById("choose-model").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('document.querySelectorAll(".model-option").length >= 2')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('document.getElementById("model-dialog").open'), true, 'the model badge opens the picker');
+    assert.equal(await ui('document.querySelector(".model-option[aria-current=true]").textContent'), 'test-modeltest · Current');
+    await ui('document.getElementById("model-filter").value = "missing-model"; document.getElementById("model-filter").dispatchEvent(new Event("input"))');
+    assert.equal(await ui('document.getElementById("model-picker-status").textContent'), 'No matching models.');
+    await ui('document.getElementById("model-filter").value = "OTHER-MODEL"; document.getElementById("model-filter").dispatchEvent(new Event("input"))');
+    assert.equal(await ui('document.querySelectorAll(".model-option").length'), 1, 'search matches model IDs without case sensitivity');
+    await ui('document.getElementById("message").value = "Keep this draft"; document.querySelector(".model-option").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.model === "other-model" && !connectionBusy')) break;
+      await pause(50);
+    }
+    assert.equal(await ui('state.hello.model'), 'other-model', 'selection connects to the chosen profile');
+    assert.notEqual(await ui('state.hello.run_id'), originalRun, 'switching starts a new session');
+    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'other-model');
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep this draft', 'switching preserves the draft');
+    assert.equal(await ui('document.getElementById("model-dialog").open'), false);
+    await ui('document.getElementById("choose-model").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('document.querySelector(".model-option[aria-current=true]") !== null')) break;
+      await pause(30);
+    }
+    const switchedRun = await ui('state.hello.run_id');
+    await ui('document.querySelector(".model-option[aria-current=true]").click()');
+    assert.equal(await ui('state.hello.run_id'), switchedRun, 'selecting the current model keeps this session');
+    await ui('state.activeRun = 99; setBusy(true); document.getElementById("choose-model").click()');
+    assert.equal(await ui('document.getElementById("choose-model").disabled'), true, 'switching is disabled during a turn');
+    assert.equal(await ui('document.getElementById("model-dialog").open'), false);
+    await ui('state.activeRun = null; setBusy(false); document.getElementById("message").value = ""');
     assert.equal(await ui('document.querySelectorAll(".suggestion").length'), 4, 'starter cards are available');
     await ui('document.querySelector(".suggestion").click()');
     assert.equal(await ui('document.getElementById("message").value'), 'Explain how this codebase is organized');
@@ -181,6 +245,67 @@ async function run() {
     if (process.env.SUI_DESKTOP_SCREENSHOT) {
       fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-compact.png'), (await win.capturePage()).toPNG());
     }
+    await ui('showDialog(state.target); showProviderSetup()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('document.querySelectorAll("#saved-profile option").length >= 3')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('document.querySelectorAll("#saved-profile option").length >= 3'), true, 'setup discovers saved profiles without typing names');
+    assert.equal(await ui('document.getElementById("model-kind").value'), 'chatgpt');
+    assert.equal(await ui('document.getElementById("api-setup").classList.contains("hidden")'), true, 'ChatGPT setup has no API key form');
+    assert.equal(await ui('document.getElementById("chatgpt-login").textContent'), 'Continue with ChatGPT');
+    if (process.env.SUI_DESKTOP_SETUP_SCREENSHOT) {
+      win.setSize(1280, 900);
+      await pause(150);
+      await ui('document.getElementById("model-setup").scrollIntoView({block:"nearest"})');
+      fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SETUP_SCREENSHOT), (await win.capturePage()).toPNG());
+    }
+    await ui('document.getElementById("model-kind").value = "openai-responses"; document.getElementById("model-kind").dispatchEvent(new Event("change"))');
+    assert.equal(await ui('document.getElementById("model-url-field").classList.contains("hidden")'), true, 'OpenAI API uses a preset endpoint');
+    assert.equal(await ui('document.getElementById("save-model").disabled'), true, 'API setup requires model and key');
+    await ui('document.getElementById("model-kind").value = "ollama"; document.getElementById("model-kind").dispatchEvent(new Event("change")); document.getElementById("model-id").value = "local-fixture"; document.getElementById("model-id").dispatchEvent(new Event("input"))');
+    assert.equal(await ui('document.getElementById("model-key-field").classList.contains("hidden")'), true, 'Ollama hides the API key');
+    assert.equal(await ui('document.getElementById("save-model").disabled'), false, 'Ollama can be configured without a key');
+    await ui('document.getElementById("save-model").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('!providerBusy && document.getElementById("profile").value === "ollama"')) break;
+      await pause(30);
+    }
+    assert.match(fs.readFileSync(path.join(tempHome, 'config.toml'), 'utf8'), /local-fixture/);
+    fixtureChatgpt = true;
+    await ui('showProviderSetup(); document.getElementById("model-kind").value = "chatgpt"; document.getElementById("model-kind").dispatchEvent(new Event("change")); document.getElementById("chatgpt-login").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('!providerBusy && document.querySelectorAll("#chatgpt-model option").length === 2')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('document.querySelector("#chatgpt-model option:last-child").textContent'), 'Account model display name');
+    assert.equal(await ui('document.querySelector("#chatgpt-model option:last-child").value'), 'account-model-slug', 'display labels never become model IDs');
+    assert.match(await ui('document.getElementById("chatgpt-status").textContent'), /fixture@example.com.*plan usage enabled/);
+    await ui('document.getElementById("chatgpt-model").value = "account-model-slug"; document.getElementById("chatgpt-model").dispatchEvent(new Event("change")); document.getElementById("save-model").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('!providerBusy && document.getElementById("profile").value === "chatgpt"')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('document.getElementById("profile").value'), 'chatgpt');
+    await ui('document.getElementById("connect-button").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.model === "account-model-slug" && !connectionBusy')) break;
+      await pause(50);
+    }
+    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'account-model-slug');
+    assert.equal(await ui('document.getElementById("composer-usage").classList.contains("hidden")'), false, 'ChatGPT usage control is visible beside the model');
+    win.setSize(720, 560);
+    await pause(150);
+    assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'ChatGPT model and usage controls fit the narrow window');
+    await ui('showDialog(state.target)');
+    await ui('document.getElementById("saved-profile").value = "chatgpt"; document.getElementById("saved-profile").dispatchEvent(new Event("change"))');
+    await ui('document.getElementById("chatgpt-logout").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('!providerBusy && state.hello === null')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('state.hello'), null, 'signing out disconnects the active account');
+    assert.equal(await ui('document.getElementById("connect-button").disabled'), true, 'a signed-out ChatGPT profile must reconnect before use');
     console.log('DESKTOP_SMOKE_OK');
   } finally { server.close(); fs.rmSync(tempHome, { recursive: true, force: true }); fs.rmSync(workspace, { recursive: true, force: true }); app.quit(); }
 }

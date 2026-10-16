@@ -25,9 +25,10 @@ function remoteCommand(workspace, profile, resume) {
     `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi`;
 }
 
-function remoteSetupCommand() {
-  return `if test -x "$HOME/.sui/bin/sui"; then exec "$HOME/.sui/bin/sui" desktop-setup; ` +
-    `elif command -v sui >/dev/null 2>&1; then exec sui desktop-setup; ` +
+function remoteSetupCommand(subcommand = 'desktop-setup') {
+  if (!['desktop-setup', 'desktop-provider'].includes(subcommand)) throw new Error('Invalid setup command');
+  return `if test -x "$HOME/.sui/bin/sui"; then exec "$HOME/.sui/bin/sui" ${subcommand}; ` +
+    `elif command -v sui >/dev/null 2>&1; then exec sui ${subcommand}; ` +
     `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi`;
 }
 
@@ -53,9 +54,9 @@ function spawnBridge(app, target, resume) {
   return spawn(spec.command, spec.args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
 }
 
-function spawnSetup(app, target) {
-  if (target.kind === 'ssh') return spawn('ssh', sshArgs(target.host, remoteSetupCommand()), { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
-  if (target.kind === 'local') return spawn(localBinary(app), ['desktop-setup'], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+function spawnSetup(app, target, subcommand = 'desktop-setup') {
+  if (target.kind === 'ssh') return spawn('ssh', sshArgs(target.host, remoteSetupCommand(subcommand)), { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  if (target.kind === 'local') return spawn(localBinary(app), [subcommand], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   throw new Error('Choose Local or SSH.');
 }
 

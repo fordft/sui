@@ -28,6 +28,7 @@ enum Inner {
     Responses {
         url: String,
         api_key: Option<String>,
+        chatgpt_profile: Option<String>,
     },
     Chat {
         url: String,
@@ -78,7 +79,13 @@ impl Provider {
         // carry credentials to whatever the endpoint points at. Codex's
         // token never travels anywhere but chatgpt.com / auth.openai.com.
         let b = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-        let inner = if base_url.starts_with("codex://") {
+        let inner = if let Some(profile) = base_url.strip_prefix("chatgpt://") {
+            Inner::Responses {
+                url: "https://api.openai.com/v1/responses".into(),
+                api_key: None,
+                chatgpt_profile: Some(profile.into()),
+            }
+        } else if base_url.starts_with("codex://") {
             Inner::Codex(std::sync::OnceLock::new())
         } else {
             Inner::Chat {
@@ -102,8 +109,15 @@ impl Provider {
     }
 
     pub fn from_profile(profile: &crate::config::Profile) -> Self {
+        let account_url;
+        let base_url = if profile.transport == crate::config::Transport::Chatgpt {
+            account_url = format!("chatgpt://{}", profile.name);
+            &account_url
+        } else {
+            &profile.base_url
+        };
         Self::new(
-            &profile.base_url,
+            base_url,
             profile.api_key.clone(),
             profile.model.clone(),
             profile.prompt_cache_key.clone(),
@@ -122,11 +136,27 @@ impl Provider {
         if transport == crate::config::Transport::CodexOauth {
             self.inner = Inner::Codex(Default::default());
         }
+        if transport == Transport::Chatgpt
+            && !matches!(
+                &self.inner,
+                Inner::Responses {
+                    chatgpt_profile: Some(_),
+                    ..
+                }
+            )
+        {
+            self.inner = Inner::Responses {
+                url: "https://api.openai.com/v1/responses".into(),
+                api_key: None,
+                chatgpt_profile: Some("chatgpt".into()),
+            };
+        }
         if transport == crate::config::Transport::OpenaiResponses {
             if let Inner::Chat { url, api_key } = self.inner {
                 self.inner = Inner::Responses {
                     url: format!("{}/responses", url.trim_end_matches("/chat/completions")),
                     api_key,
+                    chatgpt_profile: None,
                 };
             }
         }
@@ -148,6 +178,11 @@ impl Provider {
     pub fn resume_fingerprint(&self) -> String {
         let (transport, endpoint) = match &self.inner {
             Inner::Chat { url, .. } => ("chat-completions", url.as_str()),
+            Inner::Responses {
+                chatgpt_profile: Some(profile),
+                url,
+                ..
+            } => return crate::context::sha256_hex(json!({"wire_version":1,"transport":"chatgpt","endpoint":url,"account_profile":profile,"model":self.model,"image_input":self.image_input,"prompt_cache_key":self.prompt_cache_key}).to_string().as_bytes()),
             Inner::Responses { url, .. } => ("openai-responses", url.as_str()),
             Inner::Codex(_) => ("codex-oauth", "chatgpt.com/backend-api/codex/responses"),
             Inner::Native { .. } => ("copilot", crate::config::Transport::Copilot.default_url()),
@@ -211,7 +246,11 @@ impl Provider {
                 )
                 .await;
             }
-            Inner::Responses { url, api_key } => {
+            Inner::Responses {
+                url,
+                api_key,
+                chatgpt_profile,
+            } => {
                 let start = Instant::now();
                 let (instructions, input) = crate::codex::build_input(messages);
                 let mut body = json!({
@@ -230,14 +269,25 @@ impl Provider {
                         self.prompt_cache_key.as_deref().unwrap_or(&self.session_id),
                     )
                     .json(&body);
-                if let Some(key) = api_key {
+                let oauth = match chatgpt_profile {
+                    Some(profile) => Some(crate::chatgpt::access(profile).await?),
+                    None => None,
+                };
+                if let Some(key) = oauth.as_ref().or(api_key.as_ref()) {
                     http = http.bearer_auth(key);
                 }
                 let response = http.send().await.map_err(failure::Failure::transport)?;
                 if !response.status().is_success() {
                     return Err(failure::Failure::response(response).await.into());
                 }
-                return responses::read(response, start, on_delta, on_reasoning).await;
+                return responses::read_mode(
+                    response,
+                    start,
+                    on_delta,
+                    on_reasoning,
+                    chatgpt_profile.is_some(),
+                )
+                .await;
             }
             Inner::Chat { url, api_key } => (url.clone(), api_key.clone()),
         };
@@ -434,6 +484,19 @@ pub struct ModelInfo {
 /// GET {base}/models. Auth header when a key is present. No path munging —
 /// whatever the user configured is where we go.
 pub async fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelInfo>> {
+    if let Some(profile) = base_url.strip_prefix("chatgpt://") {
+        return Ok(crate::chatgpt::models(profile)
+            .await?
+            .into_iter()
+            .map(|(id, _)| ModelInfo {
+                id,
+                context_length: None,
+                price_in: None,
+                price_out: None,
+                tools_claimed: None,
+            })
+            .collect());
+    }
     if base_url.starts_with("codex://") {
         if crate::codex::CodexAuth::session_exists() {
             return crate::codex::list_models().await;
@@ -606,5 +669,102 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
     } else {
         let i = crate::context::floor_char_boundary(s, n);
         format!("{}...", &s[..i])
+    }
+}
+
+#[cfg(test)]
+mod chatgpt_tests {
+    use super::*;
+    #[test]
+    fn chatgpt_uses_public_responses_account_credentials_and_stateless_streaming() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let home = crate::test_http::AuthHome::new();
+        let directory = home.path.join("chatgpt");
+        std::fs::create_dir_all(&directory).unwrap();
+        crate::auth::write_secret(&directory.join("work.json"), &serde_json::to_vec(&json!({"client_id":"oaiapp_fixture","subject":"fixture-sub","access_token":"private-account-access","refresh_token":"private-account-refresh","scopes":["chatgpt.tokens.use.direct"],"expires_at":crate::auth::now()+3600})).unwrap()).unwrap();
+        let profile = crate::config::Profile {
+            name: "work".into(),
+            transport: crate::config::Transport::Chatgpt,
+            base_url: "chatgpt://work".into(),
+            model: "account-model".into(),
+            api_key: Some("ignored-api-key".into()),
+            image_input: true,
+            pricing: None,
+            prompt_cache_key: None,
+        };
+        let mut provider = Provider::from_profile(&profile);
+        let Inner::Responses {
+            url,
+            api_key,
+            chatgpt_profile,
+        } = &provider.inner
+        else {
+            panic!("wrong transport")
+        };
+        assert_eq!(url, "https://api.openai.com/v1/responses");
+        assert!(api_key.is_none());
+        assert_eq!(chatgpt_profile.as_deref(), Some("work"));
+        let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"account-model\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n";
+        let (base, requests, task) =
+            crate::test_http::server(vec![(200, "text/event-stream", sse.into())]);
+        // Only a test fixture may replace the fixed production endpoint.
+        if let Inner::Responses { url, .. } = &mut provider.inner {
+            *url = base;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut text = String::new();
+            let outcome = provider
+                .stream_chat(
+                    &crate::context::Compiled::view(&[crate::types::Message::User {
+                        content: "hello".into(),
+                    }]),
+                    &[],
+                    |delta| text.push_str(delta),
+                    |_| {},
+                )
+                .await
+                .unwrap();
+            assert_eq!(text, "hello");
+            assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
+            assert_eq!(outcome.usage.unwrap().input_tokens, Some(10));
+        });
+        task.join().unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(requests[0]
+            .0
+            .to_lowercase()
+            .contains("authorization: bearer private-account-access"));
+        assert!(!requests[0].0.contains("ignored-api-key"));
+        let body: Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(body["model"], "account-model");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert!(!body.to_string().contains("private-account"));
+    }
+    #[test]
+    fn chatgpt_requires_response_completed_and_stops_on_plan_limit_errors() {
+        for (event, terminal) in [
+            (json!({"type":"response.done","response":{}}), false),
+            (json!({"type":"response.completed","response":{}}), true),
+        ] {
+            let (base, _, task) = crate::test_http::server(vec![(
+                200,
+                "text/event-stream",
+                format!("data: {event}\n\n"),
+            )]);
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let response = reqwest::get(base).await.unwrap();
+                let result = responses::read_mode(response, Instant::now(), |_| {}, |_| {}, true)
+                    .await
+                    .unwrap();
+                assert_eq!(result.finish_reason.is_some(), terminal);
+            });
+            task.join().unwrap();
+        }
+        let error = failure::Failure::stream(
+            &json!({"code":"subscription_sharing_usage_limit_exceeded","message":"private-secret"}),
+        );
+        assert!(!error.retryable);
+        assert!(!error.to_string().contains("private-secret"));
     }
 }

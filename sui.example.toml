@@ -4,7 +4,7 @@
 
 [provider]
 # Trusted GLOBAL/--config only: "chat-completions" (default),
-# "openai-responses" (standard Responses API), "codex-oauth",
+# "openai-responses" (standard Responses API), "chatgpt", "codex-oauth",
 # "copilot", or "ollama".
 # kind = "openai-responses"
 # Any OpenAI-compatible endpoint:
@@ -89,7 +89,15 @@ bash_timeout_max_ms = 600000
 #
 # Certify with: sui-certify --profile cheap --profile strong
 
-# ChatGPT-sign-in profile: uses your `codex login` session (or
+# Public Sign in with ChatGPT: created by Desktop → Add a provider → ChatGPT.
+# The runtime stores its issued registration and tokens privately, not in TOML.
+# Choose the exact account-specific model slug in setup; no API key/base_url.
+# [profiles.chatgpt]
+# kind = "chatgpt"
+# model = "your-account-model-slug"
+# Multiple named ChatGPT profiles keep their registrations separate.
+#
+# Legacy Codex-sign-in profile: uses your `codex login` session (or
 # `sui auth`) to call the Codex backend — no API key, no base_url.
 # With a discoverable session this profile is auto-registered — writing
 # it explicitly only matters to pin a different model.

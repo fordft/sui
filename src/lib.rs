@@ -1,10 +1,12 @@
 pub mod agent;
 pub mod auth;
 pub mod charter;
+pub mod chatgpt;
 pub mod codex;
 pub mod config;
 pub mod context;
 pub mod desktop_bridge;
+pub mod desktop_setup;
 pub mod events;
 pub mod export;
 pub mod journal;

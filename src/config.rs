@@ -12,6 +12,7 @@ pub enum Transport {
     ChatCompletions,
     OpenaiResponses,
     CodexOauth,
+    Chatgpt,
     Copilot,
     Ollama,
 }
@@ -22,6 +23,7 @@ impl Transport {
             None | Some("chat-completions") => Ok(Self::ChatCompletions),
             Some("openai-responses") => Ok(Self::OpenaiResponses),
             Some("codex-oauth") => Ok(Self::CodexOauth),
+            Some("chatgpt") => Ok(Self::Chatgpt),
             Some("copilot") => Ok(Self::Copilot),
             Some("ollama") => Ok(Self::Ollama),
             Some(other) => bail!("unsupported provider kind: {other}"),
@@ -29,12 +31,13 @@ impl Transport {
     }
 
     pub fn is_account(self) -> bool {
-        matches!(self, Self::CodexOauth | Self::Copilot)
+        matches!(self, Self::CodexOauth | Self::Copilot | Self::Chatgpt)
     }
 
     pub fn default_url(self) -> &'static str {
         match self {
             Self::CodexOauth => "codex://oauth",
+            Self::Chatgpt => "chatgpt://chatgpt",
             Self::Copilot => "copilot://oauth",
             Self::Ollama => "http://127.0.0.1:11434/v1",
             Self::ChatCompletions | Self::OpenaiResponses => "https://api.openai.com/v1",
@@ -47,6 +50,7 @@ impl Transport {
                 .unwrap_or_else(|| "gpt-5.3-codex".into()),
             Self::Copilot => "gpt-4.1".into(),
             Self::Ollama => String::new(),
+            Self::Chatgpt => String::new(),
             Self::ChatCompletions | Self::OpenaiResponses => "gpt-5".into(),
         }
     }
@@ -56,6 +60,12 @@ impl Transport {
     }
 
     pub fn resolve_url(self, configured: Option<&str>) -> String {
+        if self == Self::Chatgpt {
+            return configured
+                .filter(|s| s.starts_with("chatgpt://"))
+                .unwrap_or(self.default_url())
+                .into();
+        }
         if self.is_account() {
             self.default_url().into()
         } else {
@@ -163,6 +173,7 @@ impl Profile {
     pub fn credentials_available(&self) -> bool {
         match self.transport {
             Transport::CodexOauth => crate::codex::CodexAuth::session_exists(),
+            Transport::Chatgpt => crate::chatgpt::connected(&self.name),
             Transport::Copilot => crate::auth::LoginProvider::Copilot.session_exists(),
             Transport::Ollama => true,
             _ => {
@@ -446,7 +457,11 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
     Ok(Profile {
         transport,
         name: name.to_string(),
-        base_url: transport.resolve_url(p.base_url.as_deref()),
+        base_url: if transport == Transport::Chatgpt {
+            format!("chatgpt://{name}")
+        } else {
+            transport.resolve_url(p.base_url.as_deref())
+        },
         model: p.model.clone().unwrap_or_else(|| transport.default_model()),
         image_input: p.image_input.unwrap_or(transport.default_image_input()),
         api_key: if transport.is_account() {

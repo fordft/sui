@@ -16,6 +16,11 @@ agent loop.
 - **Starting and following work:** starter cards fill an editable draft without
   sending it. The composer shows the connected model, even in a narrow window.
   Jump to latest returns to the end of a long conversation when you scroll up.
+- **Model picker:** click the model badge above the composer to search profiles
+  configured on the workspace host (local or SSH). The current profile is marked.
+  Selecting another profile starts a new chat and preserves the draft; the previous
+  chat remains in recent chats. Switching is disabled while a turn runs. Use
+  Configure a model to add another profile through the connection screen.
 - **Themes:** system, light, or dark, from Appearance & companion. Fonts are
   bundled (Inter, SIL OFL); Thai and other scripts use your system fonts.
 - **Window chrome:** macOS keeps its traffic lights in the title row, Windows
@@ -120,8 +125,12 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
    key in ssh-agent or macOS Keychain before connecting. If needed, choose
    **Install or update SUI on SSH host** in the dialog. It runs the repository's
    checksum-checking `install.sh` over SSH on that host.
-2. Select a SUI model profile on that machine. The dialog can save an Ollama,
-   OpenAI Responses, or OpenAI-compatible API profile without a terminal.
+2. Choose a saved model profile from the host's dropdown, or choose **Add a
+   provider**. For **ChatGPT**, click **Continue with ChatGPT**, approve ChatGPT
+   plan usage in your system browser, choose an available model, then click
+   **Use this model**. No API key is needed. **OpenAI API** uses an API key and
+   its preset Responses endpoint; **Ollama** uses a local endpoint without a key.
+   Other compatible Chat Completions and Responses endpoints can be entered too.
 3. Send a task. The app streams agent output and shows each tool approval with
    Once, Session and Deny choices. Recent chats can be resumed when the native
    replay checks allow it.
@@ -137,11 +146,35 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
 
 The remote workspace must exist. The remote installation button requires HTTPS
 access to GitHub Releases on that host; it installs the latest released SUI, so
-the release must include `desktop-bridge` and `desktop-setup` for this app.
+the release must include `desktop-bridge`, `desktop-setup`, and `desktop-provider`
+for this app.
 The app first uses `~/.sui/bin/sui`, then `sui` from the remote PATH. API keys
 entered in the setup dialog travel through local stdio or
 SSH stdin and are stored by SUI in the selected host's owner-only global config.
 The app stores project locations and profile names locally, never API keys.
+
+ChatGPT setup follows OpenAI's [Sign in with ChatGPT guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt).
+Plan access depends on account eligibility and the permissions actually granted.
+The model list uses the account's current catalog: display names are labels,
+and only the exact model slug is sent to the public Responses API. This is a
+separate `kind = "chatgpt"` transport; existing `codex-oauth` profiles and API-key
+profiles keep their existing behavior. ChatGPT plan cost remains unknown.
+
+Credentials stay in protected, atomic, owner-only files under
+`$SUI_HOME/chatgpt/` (default `~/.config/sui/chatgpt/`). Each named account profile
+keeps its registration separate; use a different profile name to add an account
+or workspace. Returning sign-in reuses its issued client ID and verified account.
+Signing out clears its tokens and attempts remote revocation, while retaining the
+registration. Unconfirmed revocation is shown explicitly. **Manage usage** opens
+ChatGPT Settings → Usage and remains available beside the connected model.
+
+For SSH, sign-in completes locally, then the main process transfers the protected
+credential record over SSH stdio. Tokens never reach the renderer or argv. The
+remote host retains its own installation ID and owns subsequent refreshes;
+the local transfer store retains registration metadata without access or refresh
+tokens. Both machines need a SUI build supporting `desktop-provider`. This follows
+OpenAI's [self-hosted VM flow](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms).
+Cancelling sign-in or closing the connection dialog stops the pending login.
 Host discovery reads only aliases, without evaluating config commands or
 reading key files. OpenSSH interprets the connection settings when you connect.
 Wildcard and negated `Host` patterns are settings, not selectable host names.

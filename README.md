@@ -8,12 +8,19 @@ It has a light and a dark theme, a collapsible sidebar, and a customizable
 slime companion that works, hops, and asks beside your conversation without
 ever covering it. The Rust agent runs on the machine holding the workspace;
 remote previews use SSH port forwarding. The app can install SUI on an SSH
-host and save a model profile from its connection screen. Choose local folders
+host and configure providers from its connection screen. Choose **Add a provider →
+ChatGPT → Continue with ChatGPT** to connect an eligible ChatGPT plan without an
+API key, then select an account model. OpenAI API, Ollama, and compatible APIs
+have separate setup options. Choose local folders
 with the system picker, or select an alias from `~/.ssh/config` and browse
 folders on the SSH host. Recent workspaces are remembered per host. See
 [desktop/README.md](desktop/README.md) for build, setup, the Mac update button,
 and the current notarization limitation.
 The terminal UI remains available.
+
+Click the model badge above the desktop composer to search profiles configured
+on the workspace host. Selecting another profile starts a new chat; the previous
+chat remains in recent chats. Model switching is available between turns.
 
 Mac Desktop releases from 0.11.6 use ad-hoc signatures, without Apple Developer
 ID signing or notarization. To install one, run the explicit installer:

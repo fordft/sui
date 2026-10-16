@@ -11,8 +11,18 @@ use std::time::Instant;
 pub(crate) async fn read(
     resp: reqwest::Response,
     start: Instant,
+    on_delta: impl FnMut(&str),
+    on_reasoning: impl FnMut(&str),
+) -> Result<StreamOutcome> {
+    read_mode(resp, start, on_delta, on_reasoning, false).await
+}
+
+pub(crate) async fn read_mode(
+    resp: reqwest::Response,
+    start: Instant,
     mut on_delta: impl FnMut(&str),
     mut on_reasoning: impl FnMut(&str),
+    strict_completion: bool,
 ) -> Result<StreamOutcome> {
     let mut stream = resp.bytes_stream();
     // Byte buffer: '\n' can never appear inside a UTF-8 multibyte char,
@@ -108,7 +118,9 @@ pub(crate) async fn read(
                     _ => {}
                 }
             }
-            "response.completed" | "response.done" => {
+            "response.completed" | "response.done"
+                if !strict_completion || ev["type"] == "response.completed" =>
+            {
                 let r = &ev["response"];
                 if let Some(m) = r["model"].as_str() {
                     returned_model = Some(m.to_string());

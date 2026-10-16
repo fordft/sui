@@ -1254,7 +1254,11 @@ impl App {
             .or_else(|| p.key_env.as_deref().and_then(|e| std::env::var(e).ok()))
             .or_else(|| p.api_key.clone());
         Some((
-            transport.resolve_url(p.base_url.as_deref()),
+            if transport == config::Transport::Chatgpt {
+                format!("chatgpt://{name}")
+            } else {
+                transport.resolve_url(p.base_url.as_deref())
+            },
             if transport.is_account() { None } else { key },
             p.model.clone().unwrap_or_else(|| transport.default_model()),
         ))

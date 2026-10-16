@@ -36,6 +36,31 @@ fn desktop_setup_and_bridge_start_without_a_terminal() {
     assert!(std::fs::read_to_string(&config)
         .unwrap()
         .contains("desktop-test"));
+    // Provider discovery works before a workspace/agent bridge exists.
+    let mut discovery = Command::new(binary)
+        .arg("desktop-provider")
+        .env("HOME", &root)
+        .env("SUI_HOME", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    discovery
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"action\":\"profiles\"}\n")
+        .unwrap();
+    let output = discovery.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let discovered: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(discovered["type"], "profiles");
+    assert!(discovered["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "desktop-test" && p["kind"] == "ollama"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-fixture-key"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -63,12 +88,24 @@ fn desktop_setup_and_bridge_start_without_a_terminal() {
         hello["workspace"],
         workspace.canonicalize().unwrap().to_str().unwrap()
     );
-    bridge
-        .stdin
-        .take()
+    let mut input = bridge.stdin.take().unwrap();
+    input.write_all(b"{\"type\":\"list_profiles\"}\n").unwrap();
+    let profiles: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(profiles["type"], "profiles");
+    assert_eq!(profiles["truncated"], false);
+    let profile = profiles["items"]
+        .as_array()
         .unwrap()
-        .write_all(b"{\"type\":\"list_sessions\"}\n")
+        .iter()
+        .find(|p| p["name"] == "desktop-test")
         .unwrap();
+    assert_eq!(
+        profile,
+        &json!({"name":"desktop-test","model":"fixture-model"})
+    );
+    assert!(!profiles.to_string().contains("private-fixture-key"));
+    input.write_all(b"{\"type\":\"list_sessions\"}\n").unwrap();
+    drop(input);
     let sessions: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(sessions["type"], "sessions");
     assert!(bridge.wait().unwrap().success());

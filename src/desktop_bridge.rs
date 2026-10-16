@@ -78,6 +78,7 @@ enum Command {
     Approve { id: u64, choice: String },
     Stop,
     ListSessions,
+    ListProfiles,
 }
 
 fn project_event(event: UiEvent) -> (Value, Option<(u64, mpsc::UnboundedSender<GateChoice>)>) {
@@ -240,6 +241,13 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
     }
     let prof = crate::config::resolve_profile(profile, None)?;
     let model = prof.model.clone();
+    let chatgpt = prof.transport == crate::config::Transport::Chatgpt;
+    if model.trim().is_empty() {
+        bail!("choose a model in provider setup before connecting");
+    }
+    if chatgpt && !crate::chatgpt::connected(profile) {
+        bail!("connect this ChatGPT account and enable plan usage in provider setup");
+    }
     let saved = resume
         .map(|id| crate::session::SavedSession::load(&crate::session::runs_root(), id, &workspace))
         .transpose()?;
@@ -320,7 +328,7 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
     )?;
     let mut pending: std::collections::HashMap<u64, mpsc::UnboundedSender<GateChoice>> =
         std::collections::HashMap::new();
@@ -348,6 +356,13 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
                 Some(Ok(Command::ListSessions)) => {
                     let sessions = crate::session::recent(&crate::session::runs_root(), &workspace, Some(&dir))?;
                     send_line(&json!({"type":"sessions","items":sessions.into_iter().map(|s| json!({"id":s.id,"label":s.label})).collect::<Vec<_>>()}))?;
+                }
+                Some(Ok(Command::ListProfiles)) => {
+                    let value = match crate::config::profiles(None) {
+                        Ok(profiles) => json!({"type":"profiles","truncated":profiles.len() > 200,"items":profiles.into_iter().take(200).map(|(name, p)| json!({"name":name,"model":p.model})).collect::<Vec<_>>()}),
+                        Err(error) => json!({"type":"profiles","error":error.to_string()}),
+                    };
+                    send_line(&value)?;
                 }
                 Some(Err(message)) => send_line(&json!({"type":"error","message":message}))?,
                 None => break,

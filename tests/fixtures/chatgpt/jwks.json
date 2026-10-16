@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "kid": "sui-test-key",
+      "use": "sig",
+      "alg": "RS256",
+      "n": "xtCJd8EiWioJgh6_4B5dcmnlrOlsL8k_JV_lMrZYQc7Ekos7vNC16-8yF9LOMsvrx9L3Tx8WgtXw0b4SH15q8jIvMGbxnx6avdL46kE9XR5WufzrHjOy1UU4fiQdyAaqTS2fUNf6ZsITRDWAgZirxrUiR6B1iiV2gxg0Y1EGqQ4sbs85LA9QpvFWFiDDJEwgML-UqMWmNRU-2RkiwTXqxMXRqmcy0c7Vo3kbofsPy93fSt7up7qlhwe8fjq93DsLlAZPHm_qVdcKvvSBwFitp9MFfNmABSlch4umNlyNQk3lclLSwL9s-LwGSXePh-BrODcETciZqPZCmBw0zB5Wxw",
+      "e": "AQAB"
+    }
+  ]
+}

@@ -20,6 +20,8 @@ enum Sub {
     },
     /// Save a desktop model profile from one private JSON line on stdin
     DesktopSetup,
+    /// Private desktop provider setup protocol (local or SSH).
+    DesktopProvider,
     /// Sign in to an account or configure local/custom API access.
     #[command(alias = "login")]
     Auth {
@@ -191,6 +193,9 @@ async fn main() -> Result<()> {
     if let Some(Sub::DesktopSetup) = &cli.sub {
         return sui::desktop_bridge::setup();
     }
+    if let Some(Sub::DesktopProvider) = &cli.sub {
+        return sui::desktop_setup::run().await;
+    }
     if cli.prompt.as_deref() == Some("acp-bridge") {
         anyhow::bail!("ACP agents and acp-bridge have been removed; use Sui's native profiles");
     }
@@ -319,9 +324,12 @@ async fn main() -> Result<()> {
     if let Some(pname) = &profile_name {
         let p = config::resolve_profile(pname, cli.config.as_deref())
             .map_err(|e| anyhow::anyhow!("--profile {pname}: {e:#}"))?;
-        cfg.base_url = p
-            .transport
-            .resolve_url(flag_base.as_deref().or(Some(&p.base_url)));
+        cfg.base_url = if p.transport.is_account() {
+            p.base_url.clone()
+        } else {
+            p.transport
+                .resolve_url(flag_base.as_deref().or(Some(&p.base_url)))
+        };
         cfg.model = flag_model.clone().unwrap_or(p.model);
         cfg.image_input = p.image_input;
         cfg.transport = p.transport;

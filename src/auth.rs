@@ -78,12 +78,16 @@ static REFRESH_LOCKS: LazyLock<[tokio::sync::Mutex<()>; 1]> =
 
 /// The file lock coordinates separate Sui processes; the mutex coordinates
 /// workers inside one process. Closing the file releases the OS lock.
-struct StoreLock {
+pub(crate) struct StoreLock {
     _file: std::fs::File,
 }
 impl StoreLock {
     async fn acquire(provider: LoginProvider) -> Result<Self> {
         let path = store_path(provider)?.with_extension("lock");
+        Self::acquire_path(&path).await
+    }
+
+    pub(crate) async fn acquire_path(path: &std::path::Path) -> Result<Self> {
         std::fs::create_dir_all(path.parent().context("missing token directory")?)?;
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);

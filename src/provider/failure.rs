@@ -148,6 +148,17 @@ fn known_code(code: &str) -> Option<&'static str> {
         "unsupported_parameter" => "unsupported_parameter",
         "context_length_exceeded" => "context_length_exceeded",
         "insufficient_quota" => "insufficient_quota",
+        "subscription_sharing_usage_limit_exceeded" => "subscription_sharing_usage_limit_exceeded",
+        "subscription_sharing_usage_unavailable" => "subscription_sharing_usage_unavailable",
+        "subscription_sharing_user_not_eligible" => "subscription_sharing_user_not_eligible",
+        "subscription_sharing_unsupported_capability" => {
+            "subscription_sharing_unsupported_capability"
+        }
+        "subscription_sharing_route_not_supported" => "subscription_sharing_route_not_supported",
+        "subscription_sharing_invalid_user" => "subscription_sharing_invalid_user",
+        "subscription_sharing_user_unavailable" => "subscription_sharing_user_unavailable",
+        "chatpass_v2_scope_not_authorized" => "chatpass_v2_scope_not_authorized",
+        "chatpass_v2_invalid_authorization_context" => "chatpass_v2_invalid_authorization_context",
         "billing_hard_limit_reached" => "billing_hard_limit_reached",
         "content_policy_violation" => "content_policy_violation",
         _ => return None,

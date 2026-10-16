@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
-  browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: []
+  browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: [], profiles: null
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -52,6 +52,8 @@ function updateSend() {
 
 function setBusy(busy) {
   const ready = !!state.hello;
+  $('choose-model').disabled = !ready || busy;
+  if (busy) $('model-dialog').close();
   $('message').disabled = !ready;
   $('composer-context').classList.toggle('hidden', !ready);
   $('stop').classList.toggle('hidden', !busy);
@@ -59,6 +61,7 @@ function setBusy(busy) {
   $('connection-pill').classList.toggle('busy', busy && ready);
   updateSend();
   pet().setBusy(busy);
+  updateProviderForm();
 }
 
 // ── conversation ─────────────────────────────────────────────────────────
@@ -257,7 +260,7 @@ function setWorkspace(directory) {
 function updateConnectForm() {
   const item = formTarget();
   const browsing = !$('folder-browser').classList.contains('hidden');
-  $('connect-button').disabled = connectionBusy || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
+  $('connect-button').disabled = connectionBusy || providerBusy || savedProfiles.some(p => p.name === item.profile && p.kind === 'chatgpt' && (!p.model || !p.account?.sharing)) || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
   $('browse-workspace').disabled = connectionBusy || browsing || (item.kind === 'ssh' && !item.host);
 }
 
@@ -279,6 +282,11 @@ function hostChanged() {
   const location = `${item.kind}:${item.host}`;
   if (location !== dialogLocation) {
     dialogLocation = location;
+    resetProvider();
+    savedProfiles = [];
+    $('saved-profile').replaceChildren(new Option('Loading profiles…', ''));
+    clearTimeout(profileTimer);
+    profileTimer = setTimeout(refreshProfiles, 300);
     closeFolders();
     setWorkspace('');
     $('connect-error').classList.add('hidden');
@@ -399,7 +407,11 @@ function showConnectError(error) {
   $('connect-error').classList.remove('hidden', 'success');
 }
 
-function showDialog(item) {
+async function showDialog(item) {
+  if (item && providerLocation(item) !== dialogLocation) {
+    resetProvider();
+    savedProfiles = [];
+  }
   closeFolders();
   $('connect-error').classList.add('hidden');
   if (item) {
@@ -414,6 +426,8 @@ function showDialog(item) {
   setWorkspace(selectedWorkspace);
   window.SuiUI.openDialog($('connect-dialog'));
   refreshHosts();
+  await refreshProfiles();
+  updateProviderForm();
 }
 
 function updateMode() {
@@ -443,24 +457,201 @@ async function installRemote() {
   finally { $('install-remote').disabled = false; }
 }
 
-async function saveModel() {
+let providerBusy = false;
+let profileRequest = 0;
+let providerGeneration = 0;
+let profileTimer;
+let savedProfiles = [];
+let setupAccount = null;
+
+function providerLocation(item = formTarget()) { return `${item.kind}:${item.host || ''}`; }
+function providerTarget() { return { ...formTarget(), profile: $('setup-profile').value.trim() }; }
+function updateProviderForm() {
+  const chatgpt = $('model-kind').value === 'chatgpt';
+  $('chatgpt-setup').classList.toggle('hidden', !chatgpt);
+  $('api-setup').classList.toggle('hidden', chatgpt);
+  $('model-url-field').classList.toggle('hidden', $('model-kind').value === 'openai-responses');
+  $('model-key-field').classList.toggle('hidden', $('model-kind').value === 'ollama');
+  const name = $('setup-profile').value.trim();
+  const hostReady = formTarget().kind === 'local' || !!formTarget().host;
+  const available = hostReady && !providerBusy && state.activeRun === null;
+  const validName = /^[A-Za-z0-9_-]{1,64}$/.test(name);
+  $('chatgpt-login').disabled = !available || !validName;
+  $('reload-chatgpt-models').disabled = !available || !validName;
+  $('chatgpt-logout').classList.toggle('hidden', !setupAccount?.connected);
+  $('chatgpt-logout').disabled = !available;
+  $('cancel-sign-in').classList.toggle('hidden', !providerBusy);
+  $('model-kind').disabled = providerBusy;
+  $('setup-profile').disabled = providerBusy;
+  $('save-model').disabled = !available || !validName || (chatgpt
+    ? !setupAccount?.sharing || !$('chatgpt-model').value
+    : !$('model-id').value.trim() || !$('model-url').value.trim() || ($('model-kind').value === 'openai-responses' && !$('model-key').value.trim()));
+  updateConnectForm();
+}
+
+function resetProvider() {
+  providerGeneration++;
+  window.sui.cancelProvider().catch(() => {});
+  providerBusy = false;
+  setupAccount = null;
+  $('model-key').value = '';
+  $('chatgpt-status').textContent = '';
+  $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', ''));
+  updateProviderForm();
+}
+
+async function refreshProfiles() {
   const item = formTarget();
-  $('connect-error').classList.add('hidden');
-  $('save-model').disabled = true;
+  const request = ++profileRequest;
+  if (item.kind === 'ssh' && !item.host) {
+    savedProfiles = [];
+    $('saved-profile').replaceChildren(new Option('Choose a host first…', ''));
+    $('profiles-status').textContent = '';
+    return;
+  }
+  $('profiles-status').textContent = 'Loading profiles from this host…';
+  $('refresh-profiles').disabled = true;
   try {
-    await window.sui.configure(item, { name: item.profile, kind: $('model-kind').value, base_url: $('model-url').value.trim(), model: $('model-id').value.trim(), api_key: $('model-key').value });
-    $('model-key').value = '';
-    $('model-setup').classList.add('hidden');
-    $('show-model-setup').textContent = '✓ Model profile saved on host';
+    const result = await window.sui.provider(item, { action: 'profiles' });
+    if (request !== profileRequest || providerLocation(item) !== providerLocation()) return;
+    savedProfiles = result.items || [];
+    const select = $('saved-profile');
+    select.replaceChildren(new Option('Choose a saved profile…', ''));
+    for (const p of savedProfiles) select.append(new Option(`${p.model || 'Choose a model'} · ${p.name}${p.account?.email ? ' · ' + p.account.email : ''}`, p.name));
+    const current = savedProfiles.find(p => p.name === $('profile').value);
+    if (current) select.value = current.name;
+    else if (savedProfiles.length) { select.value = savedProfiles[0].name; $('profile').value = select.value; }
+    $('profiles-status').textContent = result.truncated ? 'Showing the first 200 profiles.' : savedProfiles.length ? '' : 'Add a provider below to get started.';
+    if (!savedProfiles.length) $('profiles-status').textContent = 'Choose Add a provider to get started.';
+    const chosen = savedProfiles.find(p => p.name === $('profile').value);
+    if (chosen?.kind === 'chatgpt' && !chosen.account?.sharing) $('profiles-status').textContent = 'Select this profile to reconnect and enable ChatGPT plan usage.';
+    updateConnectForm();
   } catch (error) {
-    $('connect-error').textContent = String(error.message || error);
-    $('connect-error').classList.remove('hidden');
-  } finally { $('save-model').disabled = false; }
+    if (request === profileRequest) $('profiles-status').textContent = String(error.message || error);
+  } finally { if (request === profileRequest) $('refresh-profiles').disabled = false; }
+}
+
+function showProviderSetup() {
+  if (state.activeRun !== null) return;
+  $('model-setup').classList.remove('hidden');
+  $('provider-error').classList.add('hidden');
+  window.SuiUI.openDialog($('provider-dialog'));
+  updateProviderForm();
+}
+
+function closeProviderSetup() {
+  resetProvider();
+  $('provider-dialog').close();
+}
+
+function changeProvider() {
+  resetProvider();
+  const kind = $('model-kind').value;
+  $('setup-profile').value = { chatgpt: 'chatgpt', 'openai-responses': 'openai', ollama: 'ollama', 'chat-completions': 'custom', 'responses-compatible': 'responses' }[kind];
+  $('model-url').value = kind === 'ollama' ? 'http://127.0.0.1:11434/v1' : ['chat-completions', 'responses-compatible'].includes(kind) ? '' : 'https://api.openai.com/v1';
+  $('model-id').value = '';
+  $('model-id').placeholder = kind === 'ollama' ? 'Installed Ollama model name' : 'Exact model ID from your provider';
+  updateProviderForm();
+}
+
+async function loadChatgptModels(item = providerTarget(), generation = providerGeneration) {
+  $('chatgpt-model').replaceChildren(new Option('Loading models…', ''));
+  const result = await window.sui.provider(item, { action: 'models', name: item.profile });
+  if (generation !== providerGeneration || providerLocation(item) !== providerLocation() || item.profile !== $('setup-profile').value.trim()) return;
+  const select = $('chatgpt-model');
+  select.replaceChildren(new Option('Choose a model…', ''));
+  for (const m of result.items || []) select.append(new Option(m.name || m.id, m.id));
+  const previous = savedProfiles.find(p => p.name === item.profile)?.model;
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  $('chatgpt-status').textContent = !result.items?.length ? 'No models available for this account. Check ChatGPT plan usage.' : `${setupAccount?.email || 'ChatGPT account'} · ChatGPT plan usage enabled.${result.truncated ? ' Showing the first 200 models.' : ''}`;
+  updateProviderForm();
+}
+
+async function signInChatgpt() {
+  if (providerBusy || state.activeRun !== null) return;
+  const item = providerTarget();
+  const generation = providerGeneration;
+  providerBusy = true;
+  $('chatgpt-status').textContent = 'Finish signing in and allow ChatGPT plan usage in your browser…';
+  updateProviderForm();
+  try {
+    const result = await window.sui.provider(item, { action: 'login', name: item.profile });
+    if (generation !== providerGeneration) return;
+    setupAccount = result.account;
+    if (setupAccount.sharing) await loadChatgptModels(item, generation);
+    else $('chatgpt-status').textContent = 'Signed in. Reconnect and allow ChatGPT plan usage to load models.';
+    await refreshProfiles();
+  } catch (error) { if (generation === providerGeneration) $('chatgpt-status').textContent = String(error.message || error); }
+  finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
+}
+
+async function saveModel() {
+  if ($('save-model').disabled || state.activeRun !== null) return;
+  const item = providerTarget();
+  const generation = providerGeneration;
+  providerBusy = true;
+  $('connect-error').classList.add('hidden');
+  $('provider-error').classList.add('hidden');
+  updateProviderForm();
+  try {
+    const kind = $('model-kind').value;
+    if (kind === 'chatgpt') await window.sui.provider(item, { action: 'select', name: item.profile, model: $('chatgpt-model').value });
+    else await window.sui.configure(item, { name: item.profile, kind: kind === 'responses-compatible' ? 'openai-responses' : kind, base_url: $('model-url').value.trim(), model: $('model-id').value.trim(), api_key: $('model-key').value });
+    if (generation !== providerGeneration) return;
+    $('profile').value = item.profile;
+    $('model-key').value = '';
+    $('show-model-setup').textContent = '+ Add a provider';
+    await refreshProfiles();
+    closeProviderSetup();
+    $('connect-button').focus();
+  } catch (error) {
+    if (generation === providerGeneration) {
+      $('provider-error').textContent = String(error.message || error);
+      $('provider-error').classList.remove('hidden');
+    }
+  }
+  finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
+}
+
+function renderModelOptions() {
+  const list = $('model-options');
+  list.replaceChildren();
+  if (!state.profiles) return;
+  const query = $('model-filter').value.trim().toLowerCase();
+  const matches = state.profiles.filter(item => `${item.name} ${item.model || ''}`.toLowerCase().includes(query));
+  for (const item of matches) {
+    const current = item.name === state.target?.profile;
+    const button = h('button', 'model-option');
+    button.type = 'button';
+    button.setAttribute('aria-current', String(current));
+    button.append(h('span', '', item.model || item.name), h('small', '', `${item.name}${current ? ' · Current' : ''}`));
+    button.addEventListener('click', () => {
+      if (!state.hello || connectionBusy || state.activeRun !== null) return;
+      $('model-dialog').close();
+      if (current) { $('message').focus(); return; }
+      connect({ ...state.target, profile: item.name });
+    });
+    list.append(button);
+  }
+  $('model-picker-status').textContent = !state.profiles.length ? 'No model profiles configured on this host.' : !matches.length ? 'No matching models.' : state.profilesTruncated ? 'Showing the first 200 profiles.' : '';
+}
+
+async function showModelPicker() {
+  if (!state.hello || connectionBusy || state.activeRun !== null) return;
+  state.profiles = null;
+  $('model-filter').value = '';
+  $('model-options').replaceChildren();
+  $('model-picker-status').textContent = 'Loading model profiles…';
+  window.SuiUI.openDialog($('model-dialog'));
+  $('model-filter').focus();
+  try { await window.sui.command({ type: 'list_profiles' }); }
+  catch (error) { $('model-picker-status').textContent = String(error.message || error); }
 }
 
 async function connect(item, resume = null) {
-  if (state.activeRun !== null) return;
+  if (connectionBusy || state.activeRun !== null) return;
   connectionBusy = true;
+  $('model-dialog').close();
   closeFolders();
   state.hello = null;
   setBusy(false);
@@ -477,6 +668,7 @@ async function connect(item, resume = null) {
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
     $('composer-model').textContent = hello.model;
     $('composer-model').title = hello.model;
+    $('composer-usage').classList.toggle('hidden', hello.kind !== 'chatgpt');
     $('composer-target').textContent = `${projectName(item)} · ${hostLabel(item)}`;
     $('composer-target').title = `${hostLabel(item)} · ${item.workspace}`;
     document.title = `${projectName(item)} · SUI`;
@@ -577,9 +769,23 @@ function onEvent(event) {
       window.sui.command({ type: 'list_sessions' }).catch(() => {});
       break;
     }
-    case 'error': appendNotice(event.message || 'SUI error', true); pet().fret(); break;
+    case 'error':
+      appendNotice(event.message || 'SUI error', true);
+      if (String(event.message).includes('subscription_sharing_usage_')) {
+        appendNotice('ChatGPT plan usage is unavailable or has reached its limit. Use Manage usage beside the model picker.');
+        $('composer-usage').classList.remove('hidden');
+      }
+      pet().fret(); break;
     case 'sessions': renderSessions(event.items || []); break;
+    case 'profiles':
+      if (!$('model-dialog').open || !state.hello) break;
+      if (event.error) { $('model-picker-status').textContent = event.error; break; }
+      state.profiles = event.items || [];
+      state.profilesTruncated = !!event.truncated;
+      renderModelOptions();
+      break;
     case 'disconnected':
+      $('model-dialog').close();
       state.hello = null; state.activeRun = null; setBusy(false); setStatus('Disconnected', false);
       closeLog(false, true);
       pet().setAsking(false);
@@ -690,13 +896,74 @@ window.addEventListener('DOMContentLoaded', async () => {
     updateConnectForm();
     $('connect-button').focus();
   });
-  $('connect-dialog').addEventListener('close', closeFolders);
-  $('show-model-setup').addEventListener('click', () => $('model-setup').classList.toggle('hidden'));
+  $('connect-dialog').addEventListener('close', () => { closeFolders(); resetProvider(); });
+  $('show-model-setup').addEventListener('click', showProviderSetup);
+  $('close-provider').addEventListener('click', closeProviderSetup);
+  $('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderSetup(); });
   $('save-model').addEventListener('click', saveModel);
+  $('choose-model').addEventListener('click', showModelPicker);
+  $('close-model-picker').addEventListener('click', () => $('model-dialog').close());
+  $('model-filter').addEventListener('input', renderModelOptions);
+  $('configure-model').addEventListener('click', async () => {
+    $('model-dialog').close();
+    await showDialog(state.target);
+    showProviderSetup();
+    const selected = savedProfiles.find(p => p.name === state.target?.profile);
+    if (selected?.kind === 'chatgpt') {
+      $('model-kind').value = 'chatgpt';
+      $('setup-profile').value = selected.name;
+      setupAccount = selected.account;
+      updateProviderForm();
+      loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); });
+    }
+    $('setup-profile').focus();
+  });
   $('install-remote').addEventListener('click', installRemote);
-  $('model-kind').addEventListener('change', () => {
-    if ($('model-kind').value === 'ollama') $('model-url').value = 'http://127.0.0.1:11434/v1';
-    else if ($('model-url').value === 'http://127.0.0.1:11434/v1') $('model-url').value = 'https://api.openai.com/v1';
+  $('model-kind').addEventListener('change', changeProvider);
+  for (const id of ['setup-profile', 'model-id', 'model-key', 'model-url']) $(id).addEventListener('input', () => {
+    if (id === 'setup-profile') { setupAccount = null; $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', '')); }
+    updateProviderForm();
+  });
+  $('chatgpt-model').addEventListener('change', updateProviderForm);
+  $('refresh-profiles').addEventListener('click', refreshProfiles);
+  $('saved-profile').addEventListener('change', () => {
+    $('profile').value = $('saved-profile').value;
+    const selected = savedProfiles.find(p => p.name === $('profile').value);
+    if (selected?.kind === 'chatgpt') {
+      resetProvider();
+      $('model-kind').value = 'chatgpt';
+      $('setup-profile').value = selected.name;
+      setupAccount = selected.account;
+      showProviderSetup();
+      if (setupAccount?.sharing) loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); });
+    }
+    updateProviderForm();
+  });
+  $('chatgpt-login').addEventListener('click', signInChatgpt);
+  $('cancel-sign-in').addEventListener('click', resetProvider);
+  $('reload-chatgpt-models').addEventListener('click', () => loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); }));
+  for (const id of ['chatgpt-usage', 'composer-usage']) $(id).addEventListener('click', () => window.sui.manageUsage().catch(() => {}));
+  $('chatgpt-logout').addEventListener('click', async () => {
+    const item = providerTarget();
+    const generation = providerGeneration;
+    providerBusy = true; updateProviderForm();
+    try {
+      const result = await window.sui.provider(item, { action: 'logout', name: item.profile });
+      if (generation !== providerGeneration) return;
+      if (sameTarget(item, state.target) && item.profile === state.target.profile) {
+        await window.sui.disconnect();
+        state.hello = null;
+        setBusy(false);
+        setStatus('Disconnected', false);
+        renderWelcome();
+        announce('Signed out of ChatGPT');
+      }
+      setupAccount = result.account;
+      $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', ''));
+      $('chatgpt-status').textContent = result.revocation_confirmed ? 'Signed out.' : 'Signed out locally. Remote revocation was not confirmed; disconnect SUI in ChatGPT Settings.';
+      await refreshProfiles();
+    } catch (error) { if (generation === providerGeneration) $('chatgpt-status').textContent = String(error.message || error); }
+    finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
   });
   $('close-dialog').addEventListener('click', () => $('connect-dialog').close());
   for (const id of ['add-project', 'welcome-connect']) $(id).addEventListener('click', () => showDialog());

@@ -1,6 +1,6 @@
 {
   "name": "sui-desktop",
-  "version": "0.11.8",
+  "version": "0.12.0",
   "private": true,
   "description": "SUI Desktop for macOS and Linux",
   "main": "main.js",
@@ -13,7 +13,7 @@
   "build": {
     "appId": "dev.sui.desktop",
     "productName": "SUI Desktop",
-    "files": ["main.js", "preload.js", "bridge.js", "workspaces.js", "update.js", "index.html", "boot.js", "markdown.js", "pet.js", "ui.js", "app.js", "styles.css", "pet.css", "fonts/*"],
+    "files": ["main.js", "preload.js", "bridge.js", "providers.js", "workspaces.js", "update.js", "index.html", "boot.js", "markdown.js", "pet.js", "ui.js", "app.js", "styles.css", "pet.css", "fonts/*"],
     "extraResources": [{"from": "../target/release/sui", "to": "sui"}, {"from": "../install.sh", "to": "install.sh"}],
     "mac": {
       "category": "public.app-category.developer-tools",

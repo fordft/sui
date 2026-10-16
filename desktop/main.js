@@ -7,6 +7,8 @@ const { spawn } = require('node:child_process');
 const { spawnBridge, spawnSetup, validateHost } = require('./bridge');
 const updates = require('./update');
 const { sshHosts, remoteFolders } = require('./workspaces');
+const { createProviders } = require('./providers');
+const providers = createProviders({ spawn: item => spawnSetup(app, item, 'desktop-provider'), openExternal: url => shell.openExternal(url) });
 
 let window;
 let bridge;
@@ -17,6 +19,7 @@ let localPort;
 let remotePort;
 let offeredUpdate;
 let folderBrowse;
+let activeRun = null;
 
 function cancelFolderBrowse() { folderBrowse?.abort(); folderBrowse = undefined; }
 
@@ -48,6 +51,7 @@ function stopTunnel() {
 }
 
 function stopBridge() {
+  activeRun = null;
   stopTunnel();
   if (bridge) {
     bridge.kill();
@@ -61,6 +65,7 @@ function writeBridge(value) {
   const line = JSON.stringify(value);
   if (line.length > 128 * 1024) throw new Error('Message exceeds the bridge limit.');
   bridge.stdin.write(line + '\n');
+  if (value.type === 'send') activeRun = value.run;
 }
 
 function startBridge(item, resume) {
@@ -96,12 +101,15 @@ function startBridge(item, resume) {
           clearTimeout(timeout);
           rememberProject(item);
           resolve(value);
-        } else if (settled) emit(value);
+        } else if (settled) {
+          if (value.type === 'run_done') activeRun = null;
+          emit(value);
+        }
       }
     });
     child.on('close', code => {
       if (!settled) fail(new Error(stderr.trim() || `SUI exited with code ${code}.`));
-      else if (bridge === child) { bridge = undefined; emit({ type: 'disconnected', message: stderr.trim() || `SUI exited with code ${code}.` }); }
+      else if (bridge === child) { activeRun = null; bridge = undefined; emit({ type: 'disconnected', message: stderr.trim() || `SUI exited with code ${code}.` }); }
     });
   });
 }
@@ -278,7 +286,16 @@ function registerIpc() {
   });
   ipcMain.handle('sui:cancel-folder-browse', () => { cancelFolderBrowse(); return true; });
   ipcMain.handle('sui:connect', (_event, item, resume) => startBridge(item, resume));
-  ipcMain.handle('sui:configure', (_event, item, profile) => configureProfile(item, profile));
+  ipcMain.handle('sui:configure', (_event, item, profile) => {
+    if (activeRun !== null) throw new Error('Wait for the current turn to finish before changing providers.');
+    return configureProfile(item, profile);
+  });
+  ipcMain.handle('sui:provider', (_event, item, request) => {
+    if (activeRun !== null && ['login', 'select', 'logout'].includes(request?.action)) throw new Error('Wait for the current turn to finish before changing providers.');
+    return providers.request(item, request);
+  });
+  ipcMain.handle('sui:cancel-provider', () => { providers.cancel(); return true; });
+  ipcMain.handle('sui:manage-usage', () => shell.openExternal('https://chatgpt.com/settings/usage'));
   ipcMain.handle('sui:install-remote', (_event, item) => installRemoteSui(item));
   ipcMain.handle('sui:disconnect', () => { stopBridge(); return true; });
   ipcMain.handle('sui:command', (_event, value) => { writeBridge(value); return true; });
@@ -335,9 +352,9 @@ app.whenReady().then(() => {
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.loadFile(path.join(__dirname, 'index.html'));
   createBrowser();
-  window.on('closed', () => { cancelFolderBrowse(); stopBridge(); if (browser) browser.webContents.close(); browser = undefined; window = undefined; });
+  window.on('closed', () => { providers.cancel(); cancelFolderBrowse(); stopBridge(); if (browser) browser.webContents.close(); browser = undefined; window = undefined; });
 });
 
-app.on('before-quit', () => { cancelFolderBrowse(); stopBridge(); });
+app.on('before-quit', () => { providers.cancel(); cancelFolderBrowse(); stopBridge(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!window) app.relaunch(); });

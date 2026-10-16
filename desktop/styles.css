@@ -401,9 +401,15 @@ h1, h2, h3, h4, p { margin: 0; }
 
 .composer { padding: 12px 12px 10px 16px; border-radius: 20px; background: var(--surface); border: 1px solid var(--line-strong); box-shadow: var(--shadow-1); transition: border-color var(--dur-2), box-shadow var(--dur-2); }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 70%, transparent); box-shadow: var(--shadow-1), 0 0 0 3px var(--accent-ring); }
-.composer-context { display: flex; align-items: center; gap: 10px; min-width: 0; padding-bottom: 9px; }
+.composer-context { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; padding-bottom: 9px; }
 .model-pill { display: inline-flex; align-items: center; gap: 6px; max-width: 60%; padding: 3px 7px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 550; }
 .model-pill .i { width: 12px; height: 12px; }
+.model-pill:hover:enabled { background: var(--accent-ring); }
+.model-pill:disabled { opacity: .6; cursor: default; }
+.model-options { display: grid; gap: 4px; }
+.model-option { display: grid; gap: 4px; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 10px; text-align: left; overflow-wrap: anywhere; }
+.model-option:hover:enabled, .model-option[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); }
+.model-option small { color: var(--text-2); }
 .model-pill span, .composer-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-target { flex: 1; min-width: 0; color: var(--text-3); font-size: 11px; }
 .composer textarea { display: block; width: 100%; min-height: 26px; max-height: 220px; padding: 3px 0; resize: none; border: 0; outline: none; background: none; font-size: 15px; line-height: 1.55; user-select: text; }
@@ -457,6 +463,9 @@ html[data-preview="closed"] .preview { border-left: 0; }
 .dlg-foot { padding: 14px 22px 22px; display: grid; }
 .dlg-foot.split { display: flex; align-items: center; justify-content: space-between; }
 .model-setup { display: grid; gap: 12px; padding: 14px; border-radius: 14px; background: var(--bg-sunk); border: 1px solid var(--line); }
+.provider-fields { display: grid; gap: 12px; }
+.provider-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+#composer-usage { font-size: 11px; }
 .host-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px; align-items: end; }
 .host-picker > p { grid-column: 1 / -1; }
 .host-picker > .icon-btn { margin-bottom: 3px; }

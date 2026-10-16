@@ -132,8 +132,8 @@
             </div>
             <div class="composer">
               <div id="composer-context" class="composer-context hidden">
-                <span class="model-pill"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span></span>
-                <span id="composer-target" class="composer-target"></span>
+                <button type="button" id="choose-model" class="model-pill" aria-label="Change model" aria-haspopup="dialog" title="Change model"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span><span aria-hidden="true">⌄</span></button>
+                <span id="composer-target" class="composer-target"></span><button type="button" id="composer-usage" class="link-btn hidden">Using ChatGPT plan · Manage usage</button>
               </div>
               <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>
               <div class="composer-foot">
@@ -181,6 +181,19 @@
     </div>
   </div>
 
+  <dialog id="model-dialog" class="dialog" aria-labelledby="model-title" aria-describedby="model-help">
+    <header class="dlg-head">
+      <div class="dlg-titles"><h2 id="model-title">Change model</h2><p id="model-help">Choose a profile on this project's host. Switching starts a new chat; this chat stays in recent chats.</p></div>
+      <button type="button" id="close-model-picker" class="icon-btn" aria-label="Close model picker"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="dlg-body">
+      <label class="field"><span>Find a model or profile</span><input id="model-filter" type="search" autocomplete="off" placeholder="Search models…"></label>
+      <p id="model-picker-status" class="field-help" role="status"></p>
+      <div id="model-options" class="model-options" aria-label="Model profiles"></div>
+    </div>
+    <footer class="dlg-foot"><button type="button" id="configure-model" class="btn btn-soft">Configure a model…</button></footer>
+  </dialog>
+
   <dialog id="connect-dialog" class="dialog" aria-labelledby="connect-title">
     <form method="dialog" id="connect-form">
       <header class="dlg-head">
@@ -219,21 +232,47 @@
           </div>
           <details id="manual-workspace"><summary>Enter a path manually</summary><label class="field"><span class="sr-only">Workspace path</span><input id="workspace" placeholder="/home/you/projects/my-app" autocomplete="off" spellcheck="false"></label></details>
         </div>
-        <label class="field"><span>SUI model profile</span><input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label>
-        <button type="button" id="show-model-setup" class="link-btn">+ Configure a model on this machine</button>
-        <div id="model-setup" class="model-setup hidden">
-          <label class="field"><span>Transport</span><select id="model-kind"><option value="chat-completions">OpenAI compatible</option><option value="openai-responses">OpenAI Responses</option><option value="ollama">Ollama</option></select></label>
-          <label class="field"><span>API base URL</span><input id="model-url" value="https://api.openai.com/v1" spellcheck="false"></label>
-          <label class="field"><span>Model ID</span><input id="model-id" placeholder="Enter the exact model ID"></label>
-          <label class="field"><span>API key <em>saved privately on the host</em></span><input id="model-key" type="password" autocomplete="new-password"></label>
-          <button type="button" id="save-model" class="btn btn-soft">Save model profile</button>
+        <div class="host-picker">
+          <label class="field"><span>Model profile</span><select id="saved-profile"><option value="">Choose a saved profile…</option></select></label>
+          <button type="button" id="refresh-profiles" class="icon-btn" aria-label="Reload model profiles"><svg class="i" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+          <p id="profiles-status" class="field-help" role="status"></p>
         </div>
+        <details><summary>Enter a profile name manually</summary><label class="field"><span>Profile name</span><input id="profile" value="codex" placeholder="codex" autocomplete="off" required></label></details>
+        <button type="button" id="show-model-setup" class="link-btn">+ Add a provider</button>
         <p class="field-help">SSH uses your keys and host verification. New host keys are saved on first connection; changed keys are rejected.</p>
         <button type="button" id="install-remote" class="link-btn"><svg class="i"><use href="#i-download"/></svg>Install or update SUI on SSH host</button>
         <div id="connect-error" class="form-error hidden" role="alert"></div>
       </div>
       <footer class="dlg-foot"><button type="submit" id="connect-button" class="btn btn-primary btn-lg" disabled><span>Open workspace</span><svg class="i"><use href="#i-arrow-right"/></svg></button></footer>
     </form>
+  </dialog>
+
+  <dialog id="provider-dialog" class="dialog" aria-labelledby="provider-title">
+    <header class="dlg-head">
+      <div class="dlg-titles"><h2 id="provider-title">Add a provider</h2><p>Connect an account or configure API access on your workspace host.</p></div>
+      <button type="button" id="close-provider" class="icon-btn" aria-label="Close provider setup"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="dlg-body">
+        <div id="model-setup" class="model-setup">
+          <label class="field"><span>Provider</span><select id="model-kind"><option value="chatgpt">ChatGPT · Sign in</option><option value="openai-responses">OpenAI API · API key</option><option value="ollama">Ollama · Local models</option><option value="chat-completions">Other OpenAI-compatible API</option><option value="responses-compatible">Other Responses API</option></select></label>
+          <label class="field"><span>Save as profile</span><input id="setup-profile" value="chatgpt" placeholder="chatgpt" autocomplete="off" maxlength="64"></label>
+          <div id="chatgpt-setup" class="provider-fields">
+            <p class="field-help">Connect an eligible ChatGPT plan in your browser. No API key needed. Credentials stay on the workspace host.</p>
+            <button type="button" id="chatgpt-login" class="btn btn-soft">Continue with ChatGPT</button>
+            <button type="button" id="cancel-sign-in" class="link-btn hidden">Cancel sign-in</button>
+            <p id="chatgpt-status" class="field-help" role="status"></p>
+            <label class="field"><span>Model available to your account</span><select id="chatgpt-model"><option value="">Sign in to load models…</option></select></label>
+            <div class="provider-actions"><button type="button" id="reload-chatgpt-models" class="link-btn">Refresh models</button><button type="button" id="chatgpt-usage" class="link-btn">Manage usage</button><button type="button" id="chatgpt-logout" class="link-btn hidden">Sign out</button></div>
+          </div>
+          <div id="api-setup" class="provider-fields hidden">
+            <label id="model-url-field" class="field"><span>API base URL</span><input id="model-url" value="https://api.openai.com/v1" spellcheck="false"></label>
+            <label class="field"><span>Model ID</span><input id="model-id" placeholder="Exact model ID from your provider"></label>
+            <label id="model-key-field" class="field"><span>API key <em>saved privately on the host</em></span><input id="model-key" type="password" autocomplete="new-password"></label>
+          </div>
+          <button type="button" id="save-model" class="btn btn-soft" disabled>Use this model</button>
+          <p id="provider-error" class="form-error hidden" role="alert"></p>
+        </div>
+    </div>
   </dialog>
 
   <dialog id="appearance-dialog" class="dialog dialog-wide" aria-labelledby="appearance-title">
