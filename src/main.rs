@@ -73,7 +73,7 @@ enum Sub {
 )]
 struct Cli {
     /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=2))]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=3))]
     desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -366,6 +366,9 @@ async fn main() -> Result<()> {
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
     if let Some(saved) = &saved {
+        if let Some(enabled) = saved.header.image_input {
+            cfg.image_input = enabled;
+        }
         if cfg.transport == config::Transport::Chatgpt {
             cfg.model = saved.header.model.clone();
         }

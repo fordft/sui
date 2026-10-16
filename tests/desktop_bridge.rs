@@ -196,11 +196,16 @@ fn reasoning_and_edit_mode_reach_runtime_without_granting_commands() {
         if event["type"] == "permission" {
             permissions += 1;
             if permissions == 1 {
-                writeln!(input, "{}", json!({"type":"set_approval","mode":"ask"})).unwrap();
+                writeln!(
+                    input,
+                    "{}",
+                    json!({"type":"set_approval","mode":"auto-edits"})
+                )
+                .unwrap();
                 assert_eq!(
-                    next()["type"],
-                    "settings_error",
-                    "mode changes cannot race an active turn"
+                    next()["approval"],
+                    "auto-edits",
+                    "mode switching works at a pending prompt"
                 );
             }
             assert_eq!(
@@ -319,7 +324,7 @@ fn account_catalog_selects_multiple_models_without_changing_profile_or_signing_i
         .as_secs();
     let credentials = json!({"client_id":"oaiapp_fixture","subject":"subject","access_token":"private-fixture-token","scopes":["chatgpt.tokens.use.direct"],"expires_at":now+3600});
     std::fs::write(root.join("chatgpt/account.json"), credentials.to_string()).unwrap();
-    let cache = json!({"account":sui::context::sha256_hex(b"oaiapp_fixture:subject"),"fetched_at":now,"items":[
+    let cache = json!({"schema":1,"account":sui::context::sha256_hex(b"oaiapp_fixture:subject"),"fetched_at":now,"items":[
         {"id":"first-id","name":"First display label","reasoning_levels":[{"effort":"low","description":"Fast"},{"effort":"high","description":"Deep"}],"default_reasoning":"low"},
         {"id":"second-id","name":"Second display label","reasoning_levels":[{"effort":"medium","description":"Balanced"},{"effort":"xhigh","description":"Deep"},{"effort":"ultra","description":"Delegation"}],"default_reasoning":"medium"}
     ]});
@@ -407,5 +412,164 @@ fn account_catalog_selects_multiple_models_without_changing_profile_or_signing_i
             .unwrap(),
         credentials
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn image_turn_live_yolo_switch_and_eof_restore_preserve_real_runtime_state() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let capture = requests.clone();
+    let port = common::serve(move |body, _| {
+        let mut requests = capture.lock().unwrap();
+        requests.push(serde_json::from_slice(body).unwrap());
+        let tool = match requests.len() {
+            1 => Some(("write_file", json!({"path":"keep.txt","content":"keep"}))),
+            2 => Some(("bash", json!({"command":"pwd"}))),
+            3 => Some(("bash", json!({"command":"rm keep.txt"}))),
+            5 => Some((
+                "write_file",
+                json!({"path":"cancelled.txt","content":"must not write"}),
+            )),
+            _ => None,
+        };
+        let event = match tool {
+            Some((name, args)) => {
+                json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":format!("call-{}",requests.len()),"name":name,"arguments":args.to_string()}})
+            }
+            None => json!({"type":"response.output_text.delta","delta":"done"}),
+        };
+        format!(
+            "data: {event}\n\ndata: {}\n\n",
+            json!({"type":"response.completed","response":{"model":"gpt-6.1-sol"}})
+        )
+    });
+    let root = std::env::temp_dir().join(format!("sui-images-yolo-{:016x}", rand::random::<u64>()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(root.join("config.toml"),format!("[profiles.test]\nkind=\"openai-responses\"\nmodel=\"gpt-6.1-sol\"\nimage_input=true\nbase_url=\"http://127.0.0.1:{port}/v1\"\n")).unwrap();
+    let start = |resume: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_sui"));
+        command
+            .args(["--desktop-protocol", "3", "desktop-bridge", "--workspace"])
+            .arg(&workspace)
+            .args(["--profile", "test"]);
+        if let Some(id) = resume {
+            command.args(["--resume", id]);
+        }
+        let mut child = command
+            .env("HOME", &root)
+            .env("SUI_HOME", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if tx
+                    .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (child, rx)
+    };
+    let (mut child, rx) = start(None);
+    let next = || {
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("native bridge timed out")
+    };
+    let hello = next();
+    assert_eq!(hello["image_input"], true);
+    let mut input = child.stdin.take().unwrap();
+    let pixels="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEn8AAAAASUVORK5CYII=";
+    writeln!(input,"{}",json!({"type":"send","run":1,"text":"Inspect this screenshot and make the file.","images":[{"name":"screen.png","mime":"image/png","data":pixels}]})).unwrap();
+    let mut prompts = 0;
+    loop {
+        let event = next();
+        if event["type"] == "permission" {
+            prompts += 1;
+            assert_eq!(event["allow_yolo"], true);
+            if prompts == 1 {
+                assert_eq!(event["allow_session"], true);
+            } else {
+                assert_eq!(event["allow_session"], false);
+                assert!(event["summary"].as_str().unwrap().contains("rm keep.txt"));
+            }
+            writeln!(input,"{}",json!({"type":"approve","id":event["id"],"choice":if prompts==1 {"yolo"}else{"deny"}})).unwrap();
+        }
+        if event["type"] == "run_done" {
+            break;
+        }
+    }
+    assert_eq!(
+        prompts, 2,
+        "inspection commands may run, destructive commands still prompt"
+    );
+    assert_eq!(next()["approval"], "yolo");
+    writeln!(input, "{}", json!({"type":"set_approval","mode":"ask"})).unwrap();
+    assert_eq!(next()["approval"], "ask");
+    writeln!(
+        input,
+        "{}",
+        json!({"type":"send","run":2,"text":"Start another edit."})
+    )
+    .unwrap();
+    loop {
+        if next()["type"] == "permission" {
+            break;
+        }
+    }
+    drop(input);
+    assert!(
+        child.wait().unwrap().success(),
+        "EOF should cancel and finish journaling before exit"
+    );
+    assert!(!workspace.join("cancelled.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 5);
+    let journal = root
+        .join(".local/share/sui/runs")
+        .join(hello["run_id"].as_str().unwrap())
+        .join("solo.jsonl");
+    let source = std::fs::read_to_string(journal).unwrap();
+    assert!(!source.contains(pixels));
+    assert!(source.contains("content_ref"));
+    let (mut restored, rx) = start(Some(hello["run_id"].as_str().unwrap()));
+    let next = || rx.recv_timeout(Duration::from_secs(20)).unwrap();
+    let hello = next();
+    assert_eq!(hello["recovered"], false);
+    assert_eq!(hello["approval"], "ask");
+    assert_eq!(hello["image_input"], true);
+    let mut input = restored.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"type":"send","run":1,"text":"Describe the original screenshot."})
+    )
+    .unwrap();
+    loop {
+        if next()["type"] == "run_done" {
+            break;
+        }
+    }
+    drop(input);
+    assert!(restored.wait().unwrap().success());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in [requests.first().unwrap(), requests.last().unwrap()] {
+        assert!(
+            request["input"].to_string().contains(pixels),
+            "image content survives native recovery"
+        );
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

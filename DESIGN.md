@@ -93,6 +93,13 @@ rewriting history or changing tool schemas. UI consent stays independent.
 Output envelope is deterministic: `status / exit_code / stdout / stderr /
 truncated`. Empty stdout → `<empty>`. No conversational prose in envelopes.
 
+Single-file `write_file` / `edit_file` saves stage bytes in a randomly named,
+exclusively created sibling before renaming over the target. Existing file
+permissions are preserved; new files use the OS defaults and umask. Pre-existing
+staging paths are never reused, and ordinary save failures attempt staging
+cleanup. This does not provide crash durability or eliminate the filesystem
+validation TOCTOU window described in `src/tools/fs.rs`.
+
 Native output compaction is a one-time view transformation after approved
 Bash execution and before journaling/history append. Literal Cargo
 test/build/check/clippy invocations qualify only on completed exit zero and
@@ -288,8 +295,10 @@ optional screenshot paths are workspace-confined. A trusted profile's
 `image_input` capability gates attachment; unsupported profiles receive
 an honest unverified-visual result. Image context reservations are
 conservative estimates, never fabricated provider usage or cost. Journals
-do not reconstruct image history: image-bearing runs cannot claim an
-identical replay prefix from text-only journal data.
+cannot reconstruct memory-only tool image observations. Desktop user uploads
+instead use bounded, content-addressed, owner-only attachment replay files;
+journal entries and checkpoints contain references and text previews, never
+pixels. Recovery verifies each file and copies it into the new private run.
 
 ## Conflict control (mission mode)
 
@@ -367,8 +376,11 @@ recovery of an active writer. Recovery validates closed turns and paired tool
 calls, verifies bounded opaque sidecars, and forks the evidence into a new
 private run. No historical tool is dispatched. Identity, request sequence and
 context epoch are restored; permissions are resolved from the current launch.
-Older journals without a wire signature, image-bearing histories and incomplete
-turns remain inspectable/exportable but cannot claim exact session recovery.
+Older journals without a wire signature and memory-only image histories remain
+inspectable/exportable but cannot claim exact session recovery. CLI/TUI refuse
+incomplete turns. Desktop may fork a complete JSON journal with an interrupted
+turn: pending calls receive synthetic unknown-outcome results and a runtime
+warning; the source stays unchanged and historical tools are never dispatched.
 
 TUI Usage counts every attempted native request, including absent usage and
 transport failure. Its cache ratio sums only valid, complete, provider-reported
@@ -501,6 +513,18 @@ views; annotation becomes a labeled user message with URL, target and bounds.
 Remote loopback previews use SSH forwarding. Browser guest content receives no
 filesystem, shell, Electron IPC or agent permission authority.
 
+Protocol 3 adds bounded image submissions and typed Local/Command/Independent
+permission scopes. Session approval covers edits only. Desktop YOLO also permits
+conservative inspection command forms; arbitrary scripts and potentially
+destructive commands still need a specific approval. Independent surface grants
+never inherit local mode. EOF stops the turn and drains runtime events before
+shutdown, preserving a closed journal boundary.
+
+The main process stores an owner-only connection bookmark and chat pointer,
+excluding credentials, images, and permission mode. Reconnection first drains
+the previous process so session locks are released before recovery. Startup
+restores the bookmark; projects fall back to their latest meaningful session.
+
 Renderer: plain HTML/CSS/JS with no build step, under a strict CSP
 (`style-src 'self'`: no inline styles; dynamic values are CSS custom properties
 set from script). `styles.css` holds the design tokens (one set of names for
@@ -512,7 +536,8 @@ motion, sidebar/preview state, companion choices) live in the renderer's
 `localStorage` and never reach the bridge, journals, or model requests. The
 companion is presentation only: it reacts to bridge events but cannot approve
 anything, and its permission "ask" state is a visual cue — approval remains the
-three explicit buttons. It rests in a lane the layout reserves above the
+explicit buttons. Long approval previews scroll independently of the actions;
+the dock stays within the viewport while permission is pending. It rests in a lane the layout reserves above the
 composer (and on the empty state), so on its own it never covers transcript
 text (only a user dragging it there can). The
 browser guest is a native view above the renderer, so `syncBrowser` shows it

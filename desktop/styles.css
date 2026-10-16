@@ -389,7 +389,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .permission-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .permission-text { min-width: 0; display: grid; gap: 2px; }
 .permission-text .eyebrow { color: var(--warn); }
-.permission-text strong { font: 500 12.5px/1.45 var(--font-mono); overflow-wrap: anywhere; user-select: text; }
+.permission-text strong { display: block; max-height: min(160px, 22vh); overflow: auto; white-space: pre-wrap; overscroll-behavior: contain; scrollbar-gutter: stable; font: 500 12.5px/1.45 var(--font-mono); overflow-wrap: anywhere; user-select: text; }
 .permission-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .annotation-card { padding: 12px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line-strong); display: grid; gap: 8px; animation: rise var(--dur-3) var(--ease); }
 .annotation-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -538,3 +538,17 @@ html[data-preview="closed"] .preview { border-left: 0; }
 @media (forced-colors: active) {
   .btn, .composer, .dialog, .project-row.active { border: 1px solid CanvasText; }
 }
+
+/* Keep approval actions reachable regardless of command length or window size. */
+.permission { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.permission-actions { grid-column: 1 / -1; justify-content: flex-start; }
+.composer.drop-active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.image-attachments { display: flex; gap: 8px; max-height: 96px; overflow: auto; padding: 4px 0 8px; }
+.image-attachment { display: grid; grid-template-columns: 48px minmax(0, 110px) auto; gap: 6px; align-items: center; flex: none; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; }
+.image-attachment img { width: 48px; height: 48px; object-fit: contain; border-radius: 4px; }
+.image-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.image-attachment button { padding: 4px; }
+.stage:has(.permission:not(.hidden)) .lane { height: 0; }
+.stage:has(.permission:not(.hidden)) .dock { max-height: calc(100dvh - 80px); overflow-y: auto; }
+.stage:has(.permission:not(.hidden)) .permission { position: sticky; top: 0; z-index: 2; }
+.stage:has(.permission:not(.hidden)) .composer textarea { max-height: 64px; }

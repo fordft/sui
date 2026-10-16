@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::events::{GateChoice, Sink, UiEvent};
+use crate::events::{GateChoice, PermissionScope, Sink, UiEvent};
 
 /// Permission gate for mutating tools. y = once, a = rest of session,
 /// n = deny (returned to the model as a tool result).
@@ -73,13 +73,21 @@ impl Gate {
 
     /// Same gate as check, preserving one-action versus session approval.
     pub async fn decide(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
-        self.decide_inner(summary, agent, run, false).await
+        self.decide_inner(summary, agent, run, PermissionScope::Local)
+            .await
     }
 
     /// Independent surface consent: local YOLO/session grants cannot authorize it.
     /// A session response is owned by the caller, never raises the local gate.
     pub async fn decide_surface(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
-        self.decide_inner(summary, agent, run, true).await
+        self.decide_inner(summary, agent, run, PermissionScope::Independent)
+            .await
+    }
+
+    /// Desktop command approval: file-edit session grants do not authorize it.
+    pub async fn decide_command(&mut self, summary: &str, agent: &str, run: u64) -> GateChoice {
+        self.decide_inner(summary, agent, run, PermissionScope::Command)
+            .await
     }
 
     async fn decide_inner(
@@ -87,8 +95,9 @@ impl Gate {
         summary: &str,
         agent: &str,
         run: u64,
-        surface: bool,
+        scope: PermissionScope,
     ) -> GateChoice {
+        let surface = scope != PermissionScope::Local;
         if self.stopped() {
             return GateChoice::Deny;
         }
@@ -107,6 +116,7 @@ impl Gate {
                 id: self.seq,
                 agent: agent.to_string(),
                 summary: summary.to_string(),
+                scope,
                 reply: reply_tx,
             });
             // Wait for the UI's answer or a Stop. This must stay fully
@@ -162,6 +172,34 @@ impl Gate {
             }
             _ => GateChoice::Deny,
         }
+    }
+}
+
+/// Conservative inspection forms only. No shell operators, expansions, scripts,
+/// external diff drivers, or destructive commands inherit Desktop YOLO.
+pub(crate) fn inspection_command(command: &str) -> bool {
+    if command
+        .bytes()
+        .any(|b| !(b.is_ascii_alphanumeric() || b" ./_-=\t".contains(&b)))
+    {
+        return false;
+    }
+    let words: Vec<_> = command.split_whitespace().collect();
+    if words.iter().any(|w| w.contains("..") || w.starts_with('/')) {
+        return false;
+    }
+    match words.as_slice() {
+        ["pwd"] => true,
+        ["git", "status", rest @ ..] => rest
+            .iter()
+            .all(|s| matches!(*s, "--short" | "--porcelain" | "--branch")),
+        ["git", "diff", "--no-ext-diff", "--no-textconv", rest @ ..] => rest
+            .iter()
+            .all(|s| matches!(*s, "--stat" | "--name-only" | "--")),
+        ["ls", rest @ ..] => rest
+            .iter()
+            .all(|s| !s.starts_with('-') || matches!(*s, "-a" | "-l" | "-la" | "-al" | "-1")),
+        _ => false,
     }
 }
 

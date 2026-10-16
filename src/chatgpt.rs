@@ -666,6 +666,8 @@ pub(crate) struct Model {
     pub name: String,
     pub reasoning_levels: Option<Vec<ReasoningLevel>>,
     pub default_reasoning: Option<String>,
+    #[serde(default)]
+    pub input_modalities: Option<Vec<String>>,
 }
 impl Model {
     pub fn reasoning_choices(
@@ -690,6 +692,8 @@ impl Model {
 }
 #[derive(Serialize, Deserialize)]
 struct ModelCache {
+    #[serde(default)]
+    schema: u32,
     account: String,
     fetched_at: u64,
     items: Vec<Model>,
@@ -732,7 +736,9 @@ async fn catalog_at(name: &str, refresh: bool, endpoint: &str) -> Result<Catalog
     let cache = read_catalog(name, &account);
     if !refresh {
         if let Some(cache) = &cache {
-            if crate::auth::now().saturating_sub(cache.fetched_at) < CATALOG_TTL {
+            if cache.schema == 1
+                && crate::auth::now().saturating_sub(cache.fetched_at) < CATALOG_TTL
+            {
                 return Ok(Catalog {
                     items: cache.items.clone(),
                     fetched_at: cache.fetched_at,
@@ -776,6 +782,7 @@ async fn catalog_at(name: &str, refresh: bool, endpoint: &str) -> Result<Catalog
     };
     let fetched_at = crate::auth::now();
     let bytes = serde_json::to_vec(&ModelCache {
+        schema: 1,
         account: identity,
         fetched_at,
         items: items.clone(),
@@ -849,6 +856,14 @@ fn parse_models(value: &Value) -> Result<Vec<Model>> {
             options
         });
         models.push(Model {
+            input_modalities: row["input_modalities"].as_array().map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| matches!(*s, "text" | "image"))
+                    .map(String::from)
+                    .collect()
+            }),
             id: id.into(),
             name: row["display_name"]
                 .as_str()
@@ -1048,13 +1063,15 @@ mod tests {
                     id: "second".into(),
                     name: "Second model".into(),
                     reasoning_levels: None,
-                    default_reasoning: None
+                    default_reasoning: None,
+                    input_modalities: None
                 },
                 Model {
                     id: "first".into(),
                     name: "First model".into(),
                     reasoning_levels: None,
-                    default_reasoning: None
+                    default_reasoning: None,
+                    input_modalities: None
                 }
             ]
         );

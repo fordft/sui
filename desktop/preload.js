@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('sui', {
   checkUpdate: () => ipcRenderer.invoke('sui:update-check'),
   downloadUpdate: () => ipcRenderer.invoke('sui:update-download'),
   projects: () => ipcRenderer.invoke('sui:projects'),
+  restore: () => ipcRenderer.invoke('sui:restore'),
   sshHosts: () => ipcRenderer.invoke('sui:ssh-hosts'),
   pickWorkspace: () => ipcRenderer.invoke('sui:pick-workspace'),
   remoteFolders: (host, directory, hidden) => ipcRenderer.invoke('sui:remote-folders', host, directory, hidden),

@@ -21,6 +21,14 @@ pub enum GateChoice {
     Deny,
 }
 
+/// Runtime-owned permission category; UI policy must not infer scope from text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionScope {
+    Local,
+    Command,
+    Independent,
+}
+
 /// Terminal status of one tool call — typed at the source so the UI never
 /// infers success from envelope strings ("failed"/"denied"/"timeout" are
 /// NOT `Ok`).
@@ -152,6 +160,7 @@ pub enum UiEvent {
         id: u64,
         agent: String,
         summary: String,
+        scope: PermissionScope,
         reply: tokio::sync::mpsc::UnboundedSender<GateChoice>,
     },
     /// Agent/task phase note with human detail — repair reasons carry

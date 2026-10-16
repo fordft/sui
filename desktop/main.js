@@ -44,6 +44,28 @@ function rememberProject(item) {
   fs.renameSync(tmp, file);
 }
 
+function saveConnection(item, sessionId) {
+  const saved = { version: 1, target: { kind: item.kind, host: item.kind === 'ssh' ? item.host : '', workspace: item.workspace, profile: item.profile, ...(item.model ? { model: item.model } : {}), ...(item.reasoning_effort ? { reasoning_effort: item.reasoning_effort } : {}) }, session: sessionId || null };
+  const directory = app.getPath('userData');
+  fs.mkdirSync(directory, { recursive: true });
+  const temporary = path.join(directory, `connection-${randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(saved), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, path.join(directory, 'connection.json'));
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
+
+function readConnection() {
+  try {
+    const file = path.join(app.getPath('userData'), 'connection.json');
+    if (fs.statSync(file).size > 32768) return null;
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return saved.version === 1 && saved.target?.workspace && saved.target?.profile ? saved : null;
+  } catch { return null; }
+}
+let sessionId, sessionHasHistory = false;
+const closingBridges = new Set();
+
 function stopTunnel() {
   if (tunnel) { tunnel.kill(); tunnel = undefined; }
   localPort = undefined;
@@ -53,23 +75,32 @@ function stopTunnel() {
 function stopBridge() {
   activeRun = null;
   stopTunnel();
-  if (bridge) {
-    bridge.kill();
-    bridge = undefined;
-  }
+  const child = bridge;
+  bridge = undefined;
   target = undefined;
+  if (!child) return Promise.allSettled([...closingBridges]);
+  const stopped = new Promise(resolve => {
+    const timer = setTimeout(() => { child.kill(); }, 5000);
+    child.once('close', () => { clearTimeout(timer); resolve(); });
+    // EOF asks Rust to cancel and journal the active turn before exiting.
+    child.stdin.on('error', () => {});
+    child.stdin.end();
+  });
+  closingBridges.add(stopped);
+  stopped.finally(() => closingBridges.delete(stopped));
+  return stopped;
 }
 
 function writeBridge(value) {
   if (!bridge || !bridge.stdin.writable) throw new Error('Connect to a project first.');
   const line = JSON.stringify(value);
-  if (line.length > 128 * 1024) throw new Error('Message exceeds the bridge limit.');
+  if (Buffer.byteLength(line) > 12 * 1024 * 1024) throw new Error('Message exceeds the 12 MiB bridge limit.');
   bridge.stdin.write(line + '\n');
-  if (value.type === 'send') activeRun = value.run;
+  if (value.type === 'send') { activeRun = value.run; saveConnection(target, sessionId); }
 }
 
-function startBridge(item, resume) {
-  stopBridge();
+async function startBridge(item, resume) {
+  await stopBridge();
   const child = spawnBridge(app, item, resume);
   target = item;
   bridge = child;
@@ -88,6 +119,7 @@ function startBridge(item, resume) {
     child.on('error', fail);
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
     child.stdout.on('data', chunk => {
+      if (bridge !== child) return;
       buffer += chunk.toString();
       if (buffer.length > 1024 * 1024) { fail(new Error('SUI sent an oversized response.')); return; }
       let end;
@@ -99,10 +131,15 @@ function startBridge(item, resume) {
         if (!settled && value.type === 'hello') {
           settled = true;
           clearTimeout(timeout);
-          rememberProject(item);
+          target = { ...item, workspace: value.workspace, model: value.model, reasoning_effort: value.reasoning_effort };
+          sessionId = value.run_id;
+          sessionHasHistory = !!value.history?.length;
+          rememberProject(target);
+          saveConnection(target, sessionHasHistory ? sessionId : null);
           resolve(value);
         } else if (settled) {
-          if (value.type === 'run_done') activeRun = null;
+          if (value.type === 'run_done') { activeRun = null; sessionHasHistory = true; }
+          if (value.type === 'send_error' && !sessionHasHistory) saveConnection(target, null);
           emit(value);
         }
       }
@@ -143,7 +180,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 2 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 2 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 3 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 3 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;
@@ -272,6 +309,7 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('sui:projects', () => readProjects());
+  ipcMain.handle('sui:restore', () => readConnection());
   ipcMain.handle('sui:ssh-hosts', () => sshHosts(app.getPath('home')));
   ipcMain.handle('sui:pick-workspace', async () => {
     const selected = await dialog.showOpenDialog(window, { title: 'Choose your workspace', buttonLabel: 'Use this folder', properties: ['openDirectory'] });
@@ -297,7 +335,7 @@ function registerIpc() {
   ipcMain.handle('sui:cancel-provider', () => { providers.cancel(); return true; });
   ipcMain.handle('sui:manage-usage', () => shell.openExternal('https://chatgpt.com/settings/usage'));
   ipcMain.handle('sui:install-remote', (_event, item) => installRemoteSui(item));
-  ipcMain.handle('sui:disconnect', () => { stopBridge(); return true; });
+  ipcMain.handle('sui:disconnect', async () => { await stopBridge(); return true; });
   ipcMain.handle('sui:command', (_event, value) => { writeBridge(value); return true; });
   ipcMain.handle('sui:open-browser', async (_event, url) => { showBrowser(); const address = validUrl(url); await browser.webContents.loadURL(address); return address; });
   ipcMain.handle('sui:preview-remote', (_event, port) => openRemotePreview(port));
@@ -343,18 +381,33 @@ function windowOptions() {
   return { ...base, autoHideMenuBar: true };
 }
 
-app.whenReady().then(() => {
-  app.setAppUserModelId('dev.sui.desktop');
-  registerIpc();
+function createWindow() {
   window = new BrowserWindow(windowOptions());
+  const current = window;
   window.once('ready-to-show', () => window.show());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.loadFile(path.join(__dirname, 'index.html'));
   createBrowser();
+  let closing = false;
+  window.on('close', event => {
+    if (bridge || closingBridges.size) {
+      event.preventDefault();
+      if (closing) return;
+      closing = true;
+      providers.cancel(); cancelFolderBrowse();
+      stopBridge().finally(() => { if (!current.isDestroyed()) current.destroy(); });
+    }
+  });
   window.on('closed', () => { providers.cancel(); cancelFolderBrowse(); stopBridge(); if (browser) browser.webContents.close(); browser = undefined; window = undefined; });
+}
+app.whenReady().then(() => { app.setAppUserModelId('dev.sui.desktop'); registerIpc(); createWindow(); });
+let quitting = false;
+app.on('before-quit', event => {
+  if (quitting) return;
+  event.preventDefault();
+  providers.cancel(); cancelFolderBrowse();
+  stopBridge().finally(() => { quitting = true; app.quit(); });
 });
-
-app.on('before-quit', () => { providers.cancel(); cancelFolderBrowse(); stopBridge(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (!window) app.relaunch(); });
+app.on('activate', () => { if (!window && !quitting) createWindow(); });

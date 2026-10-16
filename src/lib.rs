@@ -6,6 +6,7 @@ pub mod codex;
 pub mod config;
 pub mod context;
 pub mod desktop_bridge;
+mod desktop_images;
 pub mod desktop_setup;
 pub mod events;
 pub mod export;

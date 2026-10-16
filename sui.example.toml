@@ -28,7 +28,10 @@ model = "gpt-5"
 # Trusted GLOBAL/--config only; project sui.toml cannot enable image uploads.
 # Without it, UI text snapshots work and screenshots can be saved, but the
 # runtime reports visual review as unverified. Native Codex profiles default
-# true; Copilot/Ollama/custom profiles need explicit opt-in.
+# true; Desktop ChatGPT models use account input_modalities unless explicitly
+# overridden. Copilot/Ollama/custom profiles need explicit opt-in.
+# Desktop accepts up to 4 PNG/JPEG/WebP attachments (4 MiB each, 8 MiB total);
+# SSH carries uploads to private replay files on the workspace host.
 # image_input = true
 
 # Requested in the request body for providers that support cache accounting

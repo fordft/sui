@@ -1291,6 +1291,7 @@ fn permission_asks_queue_in_order() {
     let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 1,
         agent: "w-W1".into(),
@@ -1298,6 +1299,7 @@ fn permission_asks_queue_in_order() {
         reply: tx1,
     });
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 2,
         agent: "w-W2".into(),
@@ -1938,6 +1940,7 @@ fn transcript_permission_never_hidden() {
     let run = send_task(&mut app, "t");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run,
         id: 1,
         agent: "w-W1".into(),
@@ -2448,6 +2451,7 @@ fn mouse_perm_buttons_decide() {
     let mut app = app_with_mock(&repo, 1);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 9,
         agent: "w1".into(),
@@ -2470,6 +2474,7 @@ fn mouse_perm_buttons_decide() {
     // Session buttons forward the same choice as 'a'; Gate owns Auto.
     let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 10,
         agent: "w2".into(),
@@ -2619,6 +2624,7 @@ fn mouse_stale_perm_zone_cannot_close_other_modal() {
     // draw a real permission modal → Perm zones exist in the hitmap
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 9,
         agent: "w1".into(),
@@ -2770,6 +2776,7 @@ fn redesign_palette_disabled_actions_and_permission_queue() {
     assert!(!app.effects.iter().any(|e| matches!(e, Fx::Stop)));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 301,
         agent: "solo".into(),
@@ -2873,6 +2880,7 @@ fn redesign_permission_wrapping_keeps_visible_buttons_clickable() {
         let mut app = app_with_mock(&repo, 1);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         app.apply_event(UiEvent::Permission {
+            scope: sui::events::PermissionScope::Local,
             run: 1,
             id: 77,
             agent: "worker-1".into(),
@@ -3168,6 +3176,7 @@ fn polish_dialogs_fit_contents_and_selected_rows_fill_width() {
     app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     app.apply_event(UiEvent::Permission {
+        scope: sui::events::PermissionScope::Local,
         run: 1,
         id: 99,
         agent: "solo".into(),

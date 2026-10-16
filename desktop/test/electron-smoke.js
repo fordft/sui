@@ -22,12 +22,29 @@ dialog.showOpenDialog = async (_window, options) => {
 // UI-only ChatGPT fixture: native OAuth/JWT/transport and private IPC are
 // exercised separately; this never opens a real account or spends plan usage.
 let fixtureChatgpt = false, fixtureLogins = 0, fixtureRefreshes = 0;
+let fixtureApproval = false, fixtureImages = false;
+const approvalCommands = [], imageCommands = [];
 const accountModels = [
-  { id: 'account-model-slug', name: 'Account model display name', default_reasoning: 'low', reasoning_levels: [{ effort: 'low', description: 'Fast' }, { effort: 'high', description: 'Deep' }] },
-  { id: 'second-account-model', name: 'Another account model', default_reasoning: 'medium', reasoning_levels: [{ effort: 'medium', description: 'Balanced' }, { effort: 'xhigh', description: 'Deep' }, { effort: 'ultra', description: 'Codex delegation' }] }
+  { id: 'account-model-slug', name: 'Account model display name', input_modalities: ['text', 'image'], default_reasoning: 'low', reasoning_levels: [{ effort: 'low', description: 'Fast' }, { effort: 'high', description: 'Deep' }] },
+  { id: 'second-account-model', name: 'Another account model', input_modalities: ['text', 'image'], default_reasoning: 'medium', reasoning_levels: [{ effort: 'medium', description: 'Balanced' }, { effort: 'xhigh', description: 'Deep' }, { effort: 'ultra', description: 'Codex delegation' }] }
 ];
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
+  if (channel === 'sui:command' && fixtureApproval && args[0].type === 'approve') {
+    approvalCommands.push(args[0]);
+    const view = BrowserWindow.getAllWindows()[0].webContents;
+    setImmediate(() => {
+      view.send('sui:event', { type: 'settings', approval: 'yolo' });
+      view.send('sui:event', { type: 'permission_resolved', id: args[0].id });
+      view.send('sui:event', { type: 'run_done', run: 777, outcome: 'stopped' });
+    });
+    return true;
+  }
+  if (channel === 'sui:command' && fixtureImages && args[0].type === 'send') {
+    imageCommands.push(args[0]);
+    setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', { type: 'send_error', run: args[0].run, message: 'fixture upload rejected' }));
+    return true;
+  }
   if (channel === 'sui:provider' && fixtureChatgpt) {
     const [target, request] = args;
     assert.equal(target.kind, 'local');
@@ -36,7 +53,7 @@ ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...
       fs.appendFileSync(path.join(tempHome, 'config.toml'), '\n[profiles.chatgpt]\nkind = "chatgpt"\nmodel = ""\n');
       fs.mkdirSync(path.join(tempHome, 'chatgpt'), { recursive: true });
       fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com', access_token: 'private-smoke-access', refresh_token: 'private-smoke-refresh', scopes: ['chatgpt.tokens.use.direct'], expires_at: Math.floor(Date.now() / 1000) + 3600 }), { mode: 0o600 });
-      fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.models.json'), JSON.stringify({ account: createHash('sha256').update('oaiapp_fixture:fixture-subject').digest('hex'), fetched_at: Math.floor(Date.now() / 1000), items: accountModels }), { mode: 0o600 });
+      fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.models.json'), JSON.stringify({ schema: 1, account: createHash('sha256').update('oaiapp_fixture:fixture-subject').digest('hex'), fetched_at: Math.floor(Date.now() / 1000), items: accountModels }), { mode: 0o600 });
       return { type: 'account', account: { email: 'fixture@example.com', connected: true, sharing: true } };
     }
     if (request.action === 'models') { if (request.refresh) fixtureRefreshes++; return { type: 'models', items: accountModels }; }
@@ -66,6 +83,7 @@ async function run() {
     const ui = code => win.webContents.executeJavaScript(code).catch(error => {
       throw new Error(`Renderer check failed: ${code}`, { cause: error });
     });
+    for (let n = 0; n < 100; n++) { if (await ui('document.getElementById("connect-dialog").open')) break; await pause(30); }
     const ready = await win.webContents.executeJavaScript('document.getElementById("connect-dialog").open && !!window.sui');
     assert.equal(ready, true, 'connection form is visible and preload bridge works');
     await win.webContents.executeJavaScript(`{
@@ -267,6 +285,20 @@ async function run() {
     assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'the minimum window width has no page overflow');
     assert.equal(await ui('document.getElementById("composer-model").getBoundingClientRect().width > 0'), true, 'the model remains visible in a small window');
     assert.equal(await ui('document.getElementById("send").getBoundingClientRect().right <= innerWidth'), true, 'the send control stays inside the window');
+    fixtureApproval = true;
+    await ui('state.activeRun = 777; onEvent({ type: "permission", run: 777, id: 555, summary: "bash: " + "long command line\\n".repeat(2000), allow_session: false, allow_yolo: true })');
+    await pause(200);
+    assert.equal(await ui('document.getElementById("permission-summary").scrollHeight > document.getElementById("permission-summary").clientHeight'), true, 'long approval text scrolls inside its own area');
+    assert.equal(await ui('document.getElementById("composer-mode").disabled'), false, 'permission mode can be changed at a pending approval');
+    const button = await ui('(() => { const r = document.querySelector("[data-choice=yolo]").getBoundingClientRect(); return { x:r.x+r.width/2, y:r.y+r.height/2, bottom:r.bottom, top:r.top }; })()');
+    assert.ok(button.top >= 0 && button.bottom <= 560, 'approval button is visible in the minimum window');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-approval.png'), (await win.capturePage()).toPNG());
+    win.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: Math.round(button.x), y: Math.round(button.y) });
+    win.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: Math.round(button.x), y: Math.round(button.y) });
+    for (let n = 0; n < 100; n++) { if (approvalCommands.length && await ui('state.activeRun === null')) break; await pause(30); }
+    assert.deepEqual(approvalCommands, [{ type: 'approve', id: 555, choice: 'yolo' }], 'one physical click reaches the approval bridge');
+    assert.equal(await ui('document.getElementById("permission").classList.contains("hidden")'), true);
+    fixtureApproval = false;
     await ui('newChat()');
     for (let n = 0; n < 100; n++) {
       if (await ui('state.hello !== null && document.getElementById("stage").dataset.stage === "hero"')) break;
@@ -341,6 +373,19 @@ async function run() {
     assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft');
     assert.deepEqual(await ui('[...document.getElementById("composer-reasoning").options].filter(o => !o.disabled).map(o => o.value)'), ['default', 'medium', 'xhigh']);
     assert.equal(await ui('document.querySelector("#composer-reasoning option[value=ultra]").disabled'), true);
+    fixtureImages = true;
+    const pixels = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEn8AAAAASUVORK5CYII=';
+    await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'mac-screen.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
+    for (let n = 0; n < 100; n++) { if (await ui('state.images.length === 1 && !state.imagesLoading')) break; await pause(30); }
+    assert.equal(await ui('document.querySelector(".image-attachment span").textContent'), 'mac-screen.png');
+    await ui('document.getElementById("send").click()');
+    for (let n = 0; n < 100; n++) { if (imageCommands.length && await ui('state.images.length === 1 && state.activeRun === null')) break; await pause(30); }
+    assert.equal(imageCommands[0].images[0].data, pixels, 'dropped pixels are sent over the bridge');
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft', 'rejected uploads preserve the text draft');
+    assert.equal(await ui('state.images.length'), 1, 'rejected uploads preserve image drafts');
+    await ui('document.querySelector(".image-attachment button").click()');
+    assert.equal(await ui('state.images.length'), 0, 'attachments can be removed before sending');
+    fixtureImages = false;
     assert.equal(fixtureLogins, 1, 'switching models reuses the signed-in account');
     assert.match(fs.readFileSync(path.join(tempHome, 'config.toml'), 'utf8'), /\[profiles.chatgpt\]\nkind = "chatgpt"\nmodel = ""/);
     if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-account-models.png'), (await win.capturePage()).toPNG());

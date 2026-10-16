@@ -122,6 +122,7 @@
               <div class="permission-actions">
                 <button data-choice="deny" class="btn btn-sm btn-danger-soft" type="button">Deny</button>
                 <button data-choice="once" class="btn btn-sm btn-ghost" type="button">Allow once</button>
+                <button data-choice="yolo" class="btn btn-sm btn-primary hidden" type="button">Switch to YOLO &amp; allow once</button>
                 <button data-choice="session" class="btn btn-sm btn-primary" type="button">Allow session</button>
               </div>
             </div>
@@ -130,17 +131,21 @@
               <div id="annotation-target" class="annotation-target"></div>
               <textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2" aria-label="Annotation comment"></textarea>
             </div>
-            <div class="composer">
+            <div id="composer" class="composer">
               <div id="composer-context" class="composer-context hidden">
                 <button type="button" id="choose-model" class="model-pill" aria-label="Change model" aria-haspopup="dialog" title="Change model"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span><span aria-hidden="true">⌄</span></button>
                 <label class="composer-setting" title="Reasoning effort. Changing it starts a new chat and preserves your draft."><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="sr-only">Reasoning level</span><select id="composer-reasoning" aria-label="Reasoning level"><option value="default">Provider default</option></select></label>
-                <label class="composer-setting" title="Auto edits approves workspace file changes. Commands, web and browser retain independent permission."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option></select></label>
+                <label class="composer-setting" title="Auto edits approves file changes. YOLO also approves simple inspection commands. Scripts, potentially destructive commands, web and browser still ask."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option><option value="yolo">YOLO</option></select></label>
                 <span id="composer-target" class="composer-target"></span><button type="button" id="composer-usage" class="link-btn hidden">Using ChatGPT plan · Manage usage</button>
               </div>
+              <div id="image-attachments" class="image-attachments hidden" aria-label="Attached images"></div>
+              <p id="image-error" class="field-help form-error hidden" role="status"></p>
+              <input id="image-picker" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" multiple>
               <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>
               <div class="composer-foot">
                 <span id="composer-hint" class="hint">Connect a project to start</span>
                 <div class="composer-actions">
+                  <button id="attach-image" class="btn btn-sm btn-ghost" type="button" title="Attach PNG, JPEG or WebP. You can also drop or paste an image.">Attach image</button>
                   <button id="stop" class="btn btn-sm btn-stop hidden" type="button"><svg class="i"><use href="#i-stop"/></svg><span>Stop</span></button>
                   <button id="send" class="send" type="button" disabled aria-label="Send message"><svg class="i"><use href="#i-arrow-up"/></svg></button>
                 </div>

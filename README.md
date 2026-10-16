@@ -30,9 +30,24 @@ reasoning level starts a new chat, preserves your draft, and keeps the previous
 chat in recent chats. Saved chats retain their model and reasoning level.
 ChatGPT reasoning choices and defaults come from the selected model's catalog;
 unsupported catalog modes appear disabled. Other providers use known model
-capabilities. The mode selector switches between **Ask before changes** and
-**Auto edits** for the current chat. Commands, web access, and browser actions
-retain independent approval.
+capabilities. The mode selector offers **Ask before changes**, **Auto edits**,
+and **YOLO** for the current chat, including while an approval is waiting.
+YOLO allows file edits and simple inspection commands; arbitrary scripts,
+potentially destructive commands, web access, and browser actions still ask.
+A pending action can be approved once while switching to YOLO. Long command
+previews scroll inside the approval card so its buttons stay reachable.
+
+Drag PNG, JPEG, or WebP images onto the app, paste them, or use the attachment
+button, then press Send. Up to four images, 4 MiB each and 8 MiB total, travel
+over the existing SSH connection to the workspace host. ChatGPT image support
+comes from account catalog metadata; other providers need trusted
+`image_input = true` configuration. Image attachments are kept in private,
+integrity-checked replay files on that host, outside journal text and exports.
+
+Reopening Desktop reconnects to the last workspace and resumes its chat;
+connection settings contain no credentials or saved approvals. A session
+interrupted during a tool call can be recovered into a fresh run with its
+outcome marked unknown. Recovery never reruns historical commands.
 
 If an SSH host reports an older CLI, choose **Install or update SUI on SSH host**
 and retry. Desktop checks compatibility before invoking provider commands.
@@ -746,8 +761,11 @@ Cache reuse still depends on the provider, its retention and routing.
 The recorded profile/model, wire adapter, tool schemas, system contract and
 project guidance must still match. An active session, unfinished turn or tool
 call, damaged journal, missing/tampered sidecar, or memory-only image observation
-is refused explicitly. Recovery is bounded to 32 MiB of journal and 64 MiB of
-replay state. Missions use their own lifecycle and cannot be resumed this way.
+is refused explicitly by CLI/TUI recovery. Desktop may recover a complete
+journal ending in an interrupted turn, marking unresolved tool outcomes unknown
+in a new fork. It never reruns those commands. Desktop image attachments with
+verified private replay files can resume; older memory-only tool observations
+cannot. Recovery is bounded to 32 MiB of journal and 64 MiB of replay state. Missions use their own lifecycle and cannot be resumed this way.
 Sessions recorded before resume headers were introduced remain exportable;
 they cannot promise the same request header and are marked unavailable.
 

@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 
-use crate::events::{GateChoice, UiEvent};
+use crate::events::{GateChoice, PermissionScope, UiEvent};
 
-const MAX_COMMAND: usize = 128 * 1024;
+const MAX_COMMAND: usize = 12 * 1024 * 1024;
 const MAX_MESSAGE: usize = 64 * 1024;
 
 #[derive(Deserialize)]
@@ -74,22 +74,43 @@ pub fn setup() -> Result<()> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Command {
-    Send { run: u64, text: String },
-    Approve { id: u64, choice: String },
+    Send {
+        run: u64,
+        text: String,
+        #[serde(default)]
+        images: Vec<crate::desktop_images::Image>,
+    },
+    Approve {
+        id: u64,
+        choice: String,
+    },
     Stop,
     ListSessions,
     ListProfiles,
-    SetApproval { mode: ApprovalMode },
+    SetApproval {
+        mode: ApprovalMode,
+    },
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum ApprovalMode {
     Ask,
     AutoEdits,
+    Yolo,
 }
 
-fn project_event(event: UiEvent) -> (Value, Option<(u64, mpsc::UnboundedSender<GateChoice>)>) {
+impl ApprovalMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AutoEdits => "auto-edits",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+type PermissionReply = (u64, PermissionScope, mpsc::UnboundedSender<GateChoice>);
+fn project_event(event: UiEvent) -> (Value, Option<PermissionReply>) {
     match event {
         UiEvent::ReqStart { run, agent, req } => (
             json!({"type":"request_start","run":run,"agent":agent,"req":req}),
@@ -180,10 +201,11 @@ fn project_event(event: UiEvent) -> (Value, Option<(u64, mpsc::UnboundedSender<G
             id,
             agent,
             summary,
+            scope,
             reply,
         } => (
-            json!({"type":"permission","run":run,"id":id,"agent":agent,"allow_session": !["bash:", "terminal:", "code_intel:"].iter().any(|prefix| summary.starts_with(prefix)),"summary":summary}),
-            Some((id, reply)),
+            json!({"type":"permission","run":run,"id":id,"agent":agent,"allow_session":scope == PermissionScope::Local,"allow_yolo":scope != PermissionScope::Independent,"summary":crate::provider::truncate(&summary, 64 * 1024)}),
+            Some((id, scope, reply)),
         ),
         UiEvent::Phase { run, agent, text } => (
             json!({"type":"phase","run":run,"agent":agent,"text":text}),
@@ -258,8 +280,19 @@ pub async fn run(
     if chatgpt && !crate::chatgpt::connected(profile) {
         bail!("connect this ChatGPT account and enable plan usage in provider setup");
     }
-    let saved = resume
-        .map(|id| crate::session::SavedSession::load(&crate::session::runs_root(), id, &workspace))
+    let resume_id = if resume == Some("latest") {
+        crate::session::recent(&crate::session::runs_root(), &workspace, None)?
+            .into_iter()
+            .find(|s| s.profile.as_deref() == Some(profile))
+            .map(|s| s.id)
+    } else {
+        resume.map(String::from)
+    };
+    let saved = resume_id
+        .as_deref()
+        .map(|id| {
+            crate::session::SavedSession::load_desktop(&crate::session::runs_root(), id, &workspace)
+        })
         .transpose()?;
     let catalog = if chatgpt {
         Some(crate::chatgpt::catalog(profile, false).await?)
@@ -307,6 +340,19 @@ pub async fn run(
     let model = prof.model.clone();
     if model.trim().is_empty() {
         bail!("choose a model in provider setup before connecting");
+    }
+    if let Some(saved) = &saved {
+        if let Some(enabled) = saved.header.image_input {
+            prof.image_input = enabled;
+        }
+    } else if crate::config::profiles(None)?
+        .get(profile)
+        .and_then(|p| p.image_input)
+        .is_none()
+    {
+        if let Some(modalities) = catalog_model.and_then(|m| m.input_modalities.as_ref()) {
+            prof.image_input = modalities.iter().any(|m| m == "image");
+        }
     }
     let model_name = catalog_model.map(|m| m.name.as_str()).unwrap_or(&model);
     let reasoning_choices = catalog_model
@@ -383,6 +429,7 @@ pub async fn run(
     if let Some(saved) = &saved {
         saved.fork(&dir, "solo")?;
     }
+    let image_input = prof.image_input;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let cancel = Arc::new(Notify::new());
     let stopped = Arc::new(AtomicBool::new(false));
@@ -398,55 +445,93 @@ pub async fn run(
         Some(crate::web::WebService::new(crate::web::load_cfg(None))),
         saved.as_ref(),
     )?;
+    let recovered = saved.as_ref().is_some_and(|s| s.recovered);
     drop(saved);
-    let (command_tx, mut command_rx) = mpsc::unbounded_channel::<Result<Command, String>>();
+    let (command_tx, mut command_rx) = mpsc::channel::<Result<Command, String>>(4);
     std::thread::spawn(move || {
+        use std::io::Read;
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            let command = match line {
-                Ok(line) if line.len() <= MAX_COMMAND => {
-                    serde_json::from_str(&line).map_err(|e| e.to_string())
+        let mut reader = stdin.lock();
+        loop {
+            let mut line = Vec::new();
+            let command = match reader
+                .by_ref()
+                .take(MAX_COMMAND as u64 + 1)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) => break,
+                Ok(_) if line.len() <= MAX_COMMAND => {
+                    serde_json::from_slice(&line).map_err(|_| "invalid desktop command".to_string())
                 }
-                Ok(_) => Err("command exceeds 128 KiB".into()),
-                Err(e) => {
-                    let _ = command_tx.send(Err(e.to_string()));
+                Ok(_) => {
+                    let _ = command_tx.blocking_send(Err("command exceeds 12 MiB".into()));
+                    break;
+                }
+                Err(_) => {
+                    let _ = command_tx.blocking_send(Err("desktop input closed".into()));
                     break;
                 }
             };
-            if command_tx.send(command).is_err() {
+            if command_tx.blocking_send(command).is_err() {
                 break;
             }
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"approval":"ask","kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
     )?;
-    let mut pending: std::collections::HashMap<u64, mpsc::UnboundedSender<GateChoice>> =
-        std::collections::HashMap::new();
+    let mut pending: std::collections::HashMap<
+        u64,
+        (PermissionScope, mpsc::UnboundedSender<GateChoice>),
+    > = std::collections::HashMap::new();
     let mut active = None;
+    let mut input_open = true;
+    let yolo = Arc::new(AtomicBool::new(false));
+    let mut approval = ApprovalMode::Ask;
     loop {
         tokio::select! {
-            command = command_rx.recv() => match command {
-                Some(Ok(Command::Send { run, text })) => {
-                    if text.trim().is_empty() || text.len() > MAX_MESSAGE || run == 0 {
-                        send_line(&json!({"type":"error","message":"message must be 1..65536 bytes and run must be positive"}))?;
+            command = command_rx.recv(), if input_open => match command {
+                Some(Ok(Command::Send { run, text, images })) => {
+                    if (text.trim().is_empty() && images.is_empty()) || text.len() > MAX_MESSAGE || run == 0 {
+                        send_line(&json!({"type":"send_error","run":run,"message":"provide text or images, at most 65536 text bytes, and a positive run number"}))?;
                     } else if active.is_some() {
                         send_line(&json!({"type":"error","message":"a turn is already running"}))?;
                     } else {
+                        let images = match crate::desktop_images::parts(images, image_input) {
+                            Ok(images) => images,
+                            Err(error) => { send_line(&json!({"type":"send_error","run":run,"message":error.to_string()}))?; continue; },
+                        };
                         pending.clear();
                         stopped.store(false, Ordering::SeqCst);
                         active = Some(run);
-                        if !solo.send_desktop(run, text) { bail!("agent session closed"); }
+                        if !solo.send_desktop(run, text, images, yolo.clone()) { bail!("agent session closed"); }
                     }
                 }
                 Some(Ok(Command::Approve { id, choice })) => {
-                    let choice = match choice.as_str() { "once" => GateChoice::Once, "session" => GateChoice::Session, _ => GateChoice::Deny };
-                    if let Some(reply) = pending.remove(&id) { let _ = reply.send(choice); }
+                    if let Some((scope, reply)) = pending.remove(&id) {
+                        let choice = match choice.as_str() {
+                            "once" => GateChoice::Once,
+                            "session" if scope == PermissionScope::Local => GateChoice::Session,
+                            "session" => GateChoice::Once,
+                            "yolo" if scope != PermissionScope::Independent => {
+                                approval = ApprovalMode::Yolo;
+                                session_allow.store(true, Ordering::SeqCst);
+                                yolo.store(true, Ordering::SeqCst);
+                                send_line(&json!({"type":"settings","approval":approval.label()}))?;
+                                // The click approves this specific pending action once;
+                                // potentially destructive future commands still ask.
+                                GateChoice::Once
+                            },
+                            _ => GateChoice::Deny,
+                        };
+                        let _ = reply.send(choice);
+                        send_line(&json!({"type":"permission_resolved","id":id}))?;
+                    }
                 }
                 Some(Ok(Command::Stop)) => { stopped.store(true, Ordering::SeqCst); cancel.notify_waiters(); }
                 Some(Ok(Command::ListSessions)) => {
                     let sessions = crate::session::recent(&crate::session::runs_root(), &workspace, Some(&dir))?;
-                    send_line(&json!({"type":"sessions","items":sessions.into_iter().map(|s| json!({"id":s.id,"label":s.label})).collect::<Vec<_>>()}))?;
+                    send_line(&json!({"type":"sessions","items":sessions.into_iter().map(|s| json!({"id":s.id,"label":s.label,"profile":s.profile})).collect::<Vec<_>>()}))?;
                 }
                 Some(Ok(Command::ListProfiles)) => {
                     let value = match crate::config::profiles(None) {
@@ -456,23 +541,39 @@ pub async fn run(
                     send_line(&value)?;
                 }
                 Some(Ok(Command::SetApproval { mode })) => {
-                    if active.is_some() { send_line(&json!({"type":"settings_error","message":"finish or stop the current turn before changing mode"}))?; }
-                    else {
-                        session_allow.store(matches!(mode, ApprovalMode::AutoEdits), Ordering::SeqCst);
-                        send_line(&json!({"type":"settings","approval":if session_allow.load(Ordering::SeqCst) { "auto-edits" } else { "ask" }}))?;
+                    if active.is_some() && pending.is_empty() {
+                        send_line(&json!({"type":"settings_error","message":"change mode while idle or at an approval prompt"}))?;
+                    } else {
+                        approval = mode;
+                        session_allow.store(mode != ApprovalMode::Ask, Ordering::SeqCst);
+                        yolo.store(mode == ApprovalMode::Yolo, Ordering::SeqCst);
+                        if mode != ApprovalMode::Ask {
+                            let local: Vec<_> = pending.iter().filter(|(_, (scope, _))| *scope == PermissionScope::Local).map(|(id, _)| *id).collect();
+                            for id in local { if let Some((_, reply)) = pending.remove(&id) { let _ = reply.send(GateChoice::Once); send_line(&json!({"type":"permission_resolved","id":id}))?; } }
+                        }
+                        send_line(&json!({"type":"settings","approval":approval.label()}))?;
                     }
                 }
                 Some(Err(message)) => send_line(&json!({"type":"error","message":message}))?,
-                None => break,
+                None => {
+                    input_open = false;
+                    stopped.store(true, Ordering::SeqCst);
+                    cancel.notify_waiters();
+                    if active.is_none() { break; }
+                },
             },
             event = event_rx.recv() => match event {
                 Some(event) => {
                     let (value, reply) = project_event(event);
-                    if let Some((id, reply)) = reply { pending.insert(id, reply); }
+                    if let Some((id, scope, reply)) = reply { pending.insert(id, (scope, reply)); }
                     let done = value["type"] == "run_done";
                     if done { active = None; pending.clear(); }
                     send_projected(&value)?;
-                    if done { send_line(&json!({"type":"settings","approval":if session_allow.load(Ordering::SeqCst) { "auto-edits" } else { "ask" }}))?; }
+                    if done {
+                        if approval == ApprovalMode::Ask && session_allow.load(Ordering::SeqCst) { approval = ApprovalMode::AutoEdits; }
+                        send_line(&json!({"type":"settings","approval":approval.label()}))?;
+                        if !input_open { break; }
+                    }
                 }
                 None => break,
             },

@@ -98,6 +98,69 @@ impl Journal {
         Ok(Some(json!({"file": filename, "sha256": hash})))
     }
 
+    fn store_attachment_state(&self, value: &Value) -> Result<Value> {
+        let bytes = serde_json::to_vec(value)?;
+        if bytes.len() > ATTACHMENT_LIMIT {
+            bail!("attachment replay state exceeds 32 MiB");
+        }
+        let hash = crate::context::sha256_hex(&bytes);
+        let filename = format!("attachment-{hash}.json");
+        let path = self.replay_dir.join(&filename);
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let (_, stored) =
+                    read_attachment(&self.replay_dir, &json!({"file":filename,"sha256":hash}))?;
+                if stored != bytes {
+                    bail!("damaged attachment replay state");
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(json!({"file":filename,"sha256":hash}))
+    }
+
+    fn externalize_images(&self, kind: &str, mut data: Value) -> Result<Value> {
+        if kind == "user"
+            && data["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+        {
+            let reference = self.store_attachment_state(&data["content"])?;
+            let preview = data["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            data["content"] = json!(preview);
+            data["content_ref"] = reference;
+        } else if kind == "context_checkpoint"
+            && data["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|m| {
+                    m["content"]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"))
+                })
+            })
+        {
+            data["messages_ref"] = self.store_attachment_state(&data["messages"])?;
+            data["messages"] = Value::Null;
+        }
+        Ok(data)
+    }
+
     /// Route the failure diagnostic somewhere other than stderr —
     /// called by agents with a UI event channel. Fires on the first
     /// failure only (the latch suppresses repeats).
@@ -135,6 +198,18 @@ impl Journal {
         if self.failed {
             return;
         }
+        let data = match self.externalize_images(kind, data) {
+            Ok(data) => data,
+            Err(error) => {
+                self.notice(&format!("attachment persistence failed: {error}"));
+                self.log(
+                    "journal_error",
+                    json!({"attachment_persistence_failed":true}),
+                );
+                self.failed = true;
+                return;
+            }
+        };
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -199,6 +274,40 @@ pub(crate) fn read_replay_file(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+const ATTACHMENT_LIMIT: usize = 32 * 1024 * 1024;
+pub(crate) fn read_attachment(dir: &Path, reference: &Value) -> Result<(String, Vec<u8>)> {
+    let hash = reference["sha256"]
+        .as_str()
+        .context("missing attachment hash")?;
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid attachment hash");
+    }
+    let name = format!("attachment-{hash}.json");
+    if reference["file"].as_str() != Some(&name) {
+        bail!("invalid attachment sidecar path");
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(dir.join(&name))
+        .context("attachment replay state is missing")?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() > ATTACHMENT_LIMIT as u64 {
+        bail!("attachment replay state exceeds 32 MiB");
+    }
+    let mut bytes = Vec::new();
+    file.take(ATTACHMENT_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > ATTACHMENT_LIMIT || crate::context::sha256_hex(&bytes) != hash {
+        bail!("attachment replay state failed integrity check");
+    }
+    Ok((name, bytes))
+}
+
 /// Restore the active context epoch. Legacy text journals remain readable;
 /// image observations and missing/tampered opaque state cannot claim replay.
 pub fn replay_history(path: &Path, max_users: usize) -> Result<Vec<crate::types::Message>> {
@@ -250,15 +359,33 @@ pub(crate) fn replay_events<'a>(
                 "cannot reconstruct identical request history: image observation was memory-only"
             ),
             Some("context_checkpoint") => {
-                history = serde_json::from_value(data["messages"].clone())
-                    .context("invalid context checkpoint")?;
+                let messages = if let Some(reference) = data.get("messages_ref") {
+                    let (_, bytes) = read_attachment(
+                        path.parent().context("journal parent missing")?,
+                        reference,
+                    )?;
+                    replay_bytes += bytes.len();
+                    serde_json::from_slice(&bytes)?
+                } else {
+                    data["messages"].clone()
+                };
+                history = serde_json::from_value(messages).context("invalid context checkpoint")?;
             }
-            Some("user" | "runtime_observation") => history.push(Message::User {
-                content: data["content"]
-                    .as_str()
-                    .context("invalid user event")?
-                    .into(),
-            }),
+            Some("user" | "runtime_observation") => {
+                let content = if let Some(reference) = data.get("content_ref") {
+                    let (_, bytes) = read_attachment(
+                        path.parent().context("journal parent missing")?,
+                        reference,
+                    )?;
+                    replay_bytes += bytes.len();
+                    serde_json::from_slice(&bytes)?
+                } else {
+                    data["content"].clone()
+                };
+                history.push(Message::User {
+                    content: serde_json::from_value(content).context("invalid user event")?,
+                });
+            }
             Some("assistant") => {
                 let mut items = Vec::new();
                 if let Some(reference) = data.get("response_items_ref").filter(|r| !r.is_null()) {

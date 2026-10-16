@@ -34,6 +34,8 @@ impl Signature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Header {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::reasoning::Effort>,
     pub format: u32,
     pub workspace: PathBuf,
@@ -100,6 +102,7 @@ pub fn new_run_dir() -> Result<PathBuf> {
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub id: String,
+    pub profile: Option<String>,
     pub label: String,
 }
 
@@ -144,6 +147,12 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
         if !matches {
             continue;
         }
+        if !events
+            .iter()
+            .any(|v| matches!(v["type"].as_str(), Some("task" | "user")))
+        {
+            continue;
+        }
         let header = events.iter().find(|v| v["type"] == "resume_header");
         let model = header
             .and_then(|v| v["data"]["model"].as_str())
@@ -175,7 +184,10 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
             ""
         };
         rows.push(Summary {
-            label: format!("{id} · {model} · {title}{suffix}"),
+            profile: header
+                .and_then(|v| v["data"]["profile"].as_str())
+                .map(String::from),
+            label: format!("{model} · {title}{suffix}"),
             id,
         });
         if rows.len() == 30 {
@@ -224,6 +236,7 @@ fn preview(path: &Path) -> Result<Vec<Value>> {
 
 pub struct SavedSession {
     pub id: String,
+    pub recovered: bool,
     pub header: Header,
     pub history: Vec<crate::types::Message>,
     pub events: Vec<Value>,
@@ -236,6 +249,14 @@ pub struct SavedSession {
 
 impl SavedSession {
     pub fn load(root: &Path, id: &str, workspace: &Path) -> Result<Self> {
+        Self::load_inner(root, id, workspace, false)
+    }
+    /// Desktop recovery never executes recorded calls. Unknown outcomes become
+    /// explicit interruption results in the fork; original evidence is untouched.
+    pub fn load_desktop(root: &Path, id: &str, workspace: &Path) -> Result<Self> {
+        Self::load_inner(root, id, workspace, true)
+    }
+    fn load_inner(root: &Path, id: &str, workspace: &Path, recover: bool) -> Result<Self> {
         let id = if id == "latest" {
             recent(root, workspace, None)?
                 .into_iter()
@@ -270,7 +291,7 @@ impl SavedSession {
         if raw.len() as u64 > JOURNAL_LIMIT || !raw.ends_with(b"\n") {
             bail!("session journal is oversized or ends in an incomplete event");
         }
-        let events: Vec<Value> = raw[..raw.len() - 1]
+        let mut events: Vec<Value> = raw[..raw.len() - 1]
             .split(|b| *b == b'\n')
             .map(serde_json::from_slice)
             .collect::<std::result::Result<_, _>>()
@@ -302,6 +323,21 @@ impl SavedSession {
         let mut sidecar_bytes: usize = 0;
         for event in &events {
             let d = &event["data"];
+            for key in ["content_ref", "messages_ref"] {
+                if let Some(reference) = d.get(key) {
+                    let (name, bytes) = crate::journal::read_attachment(&dir, reference)?;
+                    if let std::collections::btree_map::Entry::Vacant(entry) = sidecars.entry(name)
+                    {
+                        sidecar_bytes = sidecar_bytes
+                            .checked_add(bytes.len())
+                            .context("replay state exceeds bounds")?;
+                        if sidecar_bytes > SIDECAR_LIMIT {
+                            bail!("replay state exceeds 64 MiB");
+                        }
+                        entry.insert(bytes);
+                    }
+                }
+            }
             match event["type"].as_str() {
                 Some("turn_start") => {
                     if turn_open {
@@ -381,7 +417,26 @@ impl SavedSession {
                 _ => {}
             }
         }
-        if turn_open || !ended || !pending.is_empty() {
+        let recovered = turn_open || !pending.is_empty();
+        if recovered && recover && turn_open {
+            let mut appended = Vec::new();
+            for id in &pending {
+                appended.push(json_event("tool", serde_json::json!({"tool_call_id":id,"status":"interrupted","result":"status: interrupted\nerror: the previous process ended before recording this tool's result. Its effects are unknown. No recorded command was rerun; inspect the workspace before retrying."})));
+            }
+            appended.push(json_event("runtime_observation", serde_json::json!({"content":"The previous turn was interrupted. Pending tools were not rerun and their effects may be unknown. Inspect existing changes before continuing; this is not completion evidence."})));
+            appended.push(json_event(
+                "turn_end",
+                serde_json::json!({"outcome":"interrupted","recovered":true}),
+            ));
+            for event in appended {
+                raw.extend(serde_json::to_vec(&event)?);
+                raw.push(b'\n');
+                events.push(event);
+            }
+            if raw.len() as u64 > JOURNAL_LIMIT {
+                bail!("recovered journal exceeds 32 MiB");
+            }
+        } else if turn_open || !ended || !pending.is_empty() {
             bail!("session has an unfinished turn or tool call; inspect/export it instead of rerunning old commands");
         }
         let history = crate::journal::replay_events(&path, events.iter())?;
@@ -390,6 +445,7 @@ impl SavedSession {
         }
         Ok(Self {
             id,
+            recovered,
             header,
             history,
             events,
@@ -410,6 +466,10 @@ impl SavedSession {
         }
         Ok(())
     }
+}
+
+fn json_event(kind: &str, data: Value) -> Value {
+    serde_json::json!({"type":kind,"data":data,"ts_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()})
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {

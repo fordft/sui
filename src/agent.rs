@@ -129,25 +129,35 @@ pub struct Agent {
     stop: Arc<AtomicBool>,
     /// Web session consent belongs to this agent, separate from local AUTO.
     web_approved: bool,
-    edit_only_approval: bool,
+    desktop_yolo: Option<Arc<AtomicBool>>,
 }
 
 impl Agent {
-    pub(crate) fn set_edit_only_approval(&mut self, enabled: bool) {
-        self.edit_only_approval = enabled;
+    pub(crate) fn set_desktop_approval(&mut self, yolo: Option<Arc<AtomicBool>>) {
+        self.desktop_yolo = yolo;
     }
 
-    async fn approve_local(&mut self, name: &str, summary: &str) -> bool {
-        if self.edit_only_approval && !matches!(name, "write_file" | "edit_file" | "patch_files") {
-            self.gate
-                .decide_surface(summary, &self.ident.agent_id, self.run_id)
-                .await
-                != crate::events::GateChoice::Deny
-        } else {
-            self.gate
-                .check(summary, &self.ident.agent_id, self.run_id)
-                .await
+    async fn approve_local(&mut self, name: &str, summary: &str, args: &Value) -> bool {
+        if let Some(yolo) = &self.desktop_yolo {
+            if !matches!(name, "write_file" | "edit_file" | "patch_files") {
+                // Arbitrary shell/scripts cannot be proved non-destructive.
+                // YOLO only skips command prompts for bounded inspection forms.
+                if yolo.load(Ordering::SeqCst)
+                    && name == "bash"
+                    && crate::permission::inspection_command(args["command"].as_str().unwrap_or(""))
+                {
+                    return !self.stop.load(Ordering::Relaxed);
+                }
+                return self
+                    .gate
+                    .decide_command(summary, &self.ident.agent_id, self.run_id)
+                    .await
+                    != crate::events::GateChoice::Deny;
+            }
         }
+        self.gate
+            .check(summary, &self.ident.agent_id, self.run_id)
+            .await
     }
 
     pub fn new(
@@ -189,7 +199,7 @@ impl Agent {
             cancel: None,
             stop: Arc::new(AtomicBool::new(false)),
             web_approved: false,
-            edit_only_approval: false,
+            desktop_yolo: None,
         }
     }
 
@@ -314,6 +324,7 @@ impl Agent {
 
     pub fn record_session(&mut self, profile: Option<String>) -> Result<()> {
         let header = crate::session::Header {
+            image_input: Some(self.provider.image_input()),
             reasoning_effort: self.provider.reasoning_effort(),
             format: 1,
             workspace: self.tools.workspace.canonicalize()?,
@@ -361,8 +372,16 @@ impl Agent {
 
     /// Queue a user message, then drive until completion.
     pub async fn run_turn(&mut self, user_input: &str) -> Result<()> {
+        self.run_turn_with_images(user_input, Vec::new()).await
+    }
+
+    pub(crate) async fn run_turn_with_images(
+        &mut self,
+        user_input: &str,
+        images: Vec<crate::types::ContentPart>,
+    ) -> Result<()> {
         self.journal.log("turn_start", json!({"run": self.run_id}));
-        self.push_user(user_input);
+        self.push_user_with_images(user_input, images);
         let result = self.drive().await;
         self.journal.log("turn_end", json!({"run": self.run_id,
             "outcome": if result.is_err() { "error" } else if self.stop.load(Ordering::Relaxed) { "stopped" } else { "returned" }}));
@@ -370,6 +389,14 @@ impl Agent {
     }
 
     pub fn push_user(&mut self, user_input: &str) {
+        self.push_user_with_images(user_input, Vec::new());
+    }
+
+    fn push_user_with_images(
+        &mut self,
+        user_input: &str,
+        mut images: Vec<crate::types::ContentPart>,
+    ) {
         // First task of a run: select lenses from task cues + project
         // facts and append the labeled guidance block — the original
         // request stays verbatim above it.
@@ -393,12 +420,18 @@ impl Agent {
         } else {
             user_input.to_string()
         };
+        let content = if images.is_empty() {
+            crate::types::UserContent::Text(msg)
+        } else {
+            images.insert(0, crate::types::ContentPart::Text { text: msg });
+            crate::types::UserContent::Parts(images)
+        };
         let message = Message::User {
-            content: msg.clone().into(),
+            content: content.clone(),
         };
         self.latest_task = Some(message.clone());
         self.history.push(message);
-        self.journal.log("user", json!({ "content": msg }));
+        self.journal.log("user", json!({ "content": content }));
     }
 
     /// Direct journal write for run-boundary evidence the agent loop does
@@ -833,7 +866,9 @@ impl Agent {
                 } else if let Some(d) = self.web_gate(name, &summary).await {
                     d
                 } else if needs_approval(name, plan.as_ref().expect("batch_ok implies parsed"))
-                    && !self.approve_local(name, &summary).await
+                    && !self
+                        .approve_local(name, &summary, plan.as_ref().expect("validated arguments"))
+                        .await
                 {
                     if self.stop.load(Ordering::Relaxed) {
                         Disp::new(

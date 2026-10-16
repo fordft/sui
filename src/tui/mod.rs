@@ -30,6 +30,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{stdout, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -113,7 +114,8 @@ struct SoloTask {
     run: u64,
     msg: String,
     web: WebUpdate,
-    edit_only_approval: bool,
+    desktop_yolo: Option<Arc<AtomicBool>>,
+    images: Vec<crate::types::ContentPart>,
 }
 enum WebUpdate {
     Keep,
@@ -126,19 +128,27 @@ impl Solo {
                 run,
                 msg,
                 web: WebUpdate::Keep,
-                edit_only_approval: false,
+                desktop_yolo: None,
+                images: Vec::new(),
             })
             .is_ok()
     }
 
-    /// Auto edits never grants arbitrary command execution.
-    pub fn send_desktop(&self, run: u64, msg: String) -> bool {
+    /// Desktop approval policy stays live while a turn is running.
+    pub fn send_desktop(
+        &self,
+        run: u64,
+        msg: String,
+        images: Vec<crate::types::ContentPart>,
+        yolo: Arc<AtomicBool>,
+    ) -> bool {
         self.tx
             .send(SoloTask {
                 run,
                 msg,
                 web: WebUpdate::Keep,
-                edit_only_approval: true,
+                desktop_yolo: Some(yolo),
+                images,
             })
             .is_ok()
     }
@@ -155,7 +165,8 @@ impl Solo {
                 run,
                 msg,
                 web: WebUpdate::Replace(web),
-                edit_only_approval: false,
+                desktop_yolo: None,
+                images: Vec::new(),
             })
             .is_ok()
     }
@@ -282,10 +293,11 @@ pub fn start_solo(
             run,
             msg,
             web,
-            edit_only_approval,
+            desktop_yolo,
+            images,
         }) = rx.recv().await
         {
-            agent.set_edit_only_approval(edit_only_approval);
+            agent.set_desktop_approval(desktop_yolo);
             if let WebUpdate::Replace(web) = web {
                 agent.set_web_service(web);
             }
@@ -295,7 +307,7 @@ pub fn start_solo(
                 "run": run,
                 "approval": if session.load(std::sync::atomic::Ordering::Relaxed) { "auto" } else { "ask" },
             }));
-            let r = agent.run_turn(&msg).await;
+            let r = agent.run_turn_with_images(&msg, images).await;
             // a user stop ends the turn cleanly but is NOT a success —
             // the group must stay open with the interruption visible
             let stopped = flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -518,6 +530,7 @@ pub async fn run_with_resume(
                                 Ok(data) => {
                                     let (saved, profile, dir) = *data;
                                     if app.workspace != saved.header.workspace || resolve_to_profile(&app, &profile.name).map(|mut current| {
+                                        if let Some(enabled) = saved.header.image_input { current.image_input = enabled; }
                                         if current.transport == config::Transport::Chatgpt { current.model = saved.header.model.clone(); }
                                         if saved.header.reasoning_effort.is_some() { current.reasoning_effort = saved.header.reasoning_effort; }
                                         solo_signature(&current)
@@ -530,6 +543,7 @@ pub async fn run_with_resume(
                                         Ok(new_solo) => {
                                             if let Some(p) = app.profiles.get_mut(&profile.name) {
                                                 p.reasoning_effort = profile.reasoning_effort;
+                                                p.image_input = Some(profile.image_input);
                                                 if profile.transport == config::Transport::Chatgpt { p.model = Some(profile.model.clone()); }
                                             }
                                             app.restore_saved(&saved, &profile.name, dir.clone());
@@ -668,6 +682,7 @@ pub async fn run_with_resume(
                         let result = tokio::task::spawn_blocking(move || -> Result<_> {
                             let saved = crate::session::SavedSession::load(&crate::session::runs_root(), &id, &workspace)?;
                             let mut matches = profiles.into_iter().map(|mut p| {
+                                if let Some(enabled) = saved.header.image_input { p.image_input = enabled; }
                                 if p.transport == config::Transport::Chatgpt { p.model = saved.header.model.clone(); }
                                 if saved.header.reasoning_effort.is_some() { p.reasoning_effort = saved.header.reasoning_effort; }
                                 p

@@ -37,6 +37,7 @@ fn fixture(root: &Path, workspace: &Path, name: &str, opaque: bool) -> PathBuf {
     j.log(
         "resume_header",
         serde_json::to_value(Header {
+            image_input: None,
             reasoning_effort: None,
             format: 1,
             workspace: workspace.into(),
@@ -99,11 +100,8 @@ fn private_replay_forks_without_modifying_the_original() {
         })
         .unwrap();
     std::fs::write(sidecar, b"tampered").unwrap();
-    assert!(SavedSession::load(&root, "source", &ws)
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("integrity"));
+    let error = SavedSession::load(&root, "source", &ws).err().unwrap();
+    assert!(error.to_string().contains("integrity"), "{error:#}");
 }
 
 #[test]
@@ -251,6 +249,7 @@ fn recent_sessions_picker_preserves_drafts_and_ignores_stale_results() {
     app.sessions_loaded(
         request + 1,
         Ok(vec![sui::session::Summary {
+            profile: None,
             id: "wrong".into(),
             label: "wrong".into(),
         }]),
@@ -261,6 +260,7 @@ fn recent_sessions_picker_preserves_drafts_and_ignores_stale_results() {
     app.sessions_loaded(
         request,
         Ok(vec![sui::session::Summary {
+            profile: None,
             id: "source".into(),
             label: "A recorded session".into(),
         }]),
@@ -576,4 +576,86 @@ fn real_tui_resume_palette_and_usage_work_over_a_headless_pty() {
     drop(writer);
     drop(pair.master);
     assert!(recovered&&displayed&&no_call&&palette&&cache&&rate,"recovered={recovered} displayed={displayed} no_call={no_call} palette={palette} cache={cache} rate={rate}\n{}",&output[output.len().saturating_sub(2500)..]);
+}
+
+#[test]
+fn desktop_recovers_interrupted_calls_only_as_unknown_outcomes_in_a_fork() {
+    let root = dir();
+    let ws = dir();
+    let source = fixture(&root, &ws, "interrupted", false);
+    std::fs::write(ws.join("keep.txt"), "keep").unwrap();
+    let mut journal = Journal::open_named(&source, "solo").unwrap();
+    journal.log("turn_start", json!({"run":2}));
+    journal.log("user", json!({"content":"continue work"}));
+    journal.log("assistant", json!({"content":"","tool_calls":[{"id":"pending","type":"function","function":{"name":"bash","arguments":"{\"command\":\"rm keep.txt\"}"}}]}));
+    drop(journal);
+    let original = std::fs::read(source.join("solo.jsonl")).unwrap();
+    assert!(SavedSession::load(&root, "interrupted", &ws).is_err());
+    let saved = SavedSession::load_desktop(&root, "interrupted", &ws).unwrap();
+    assert!(saved.recovered);
+    assert!(saved.events.iter().any(|e| e["type"] == "tool"
+        && e["data"]["result"]
+            .as_str()
+            .is_some_and(|v| v.contains("effects are unknown"))));
+    let fork = root.join("recovered");
+    saved.fork(&fork, "solo").unwrap();
+    assert_eq!(std::fs::read(source.join("solo.jsonl")).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert!(SavedSession::load(&root, "recovered", &ws).is_ok());
+}
+
+#[test]
+fn image_inputs_and_checkpoints_use_private_integrity_checked_replay_state() {
+    let root = dir();
+    let ws = dir();
+    let source = fixture(&root, &ws, "images", false);
+    let content = sui::types::UserContent::image(
+        "screen.png".into(),
+        "data:image/png;base64,cHJpdmF0ZS1waXhlbHM=".into(),
+    );
+    let mut journal = Journal::open_named(&source, "solo").unwrap();
+    journal.log("turn_start", json!({"run":2}));
+    journal.log("user", json!({"content":content}));
+    journal.log("assistant", json!({"content":"seen","tool_calls":[]}));
+    journal.log("turn_end", json!({"run":2}));
+    let messages = sui::journal::replay_history(&source.join("solo.jsonl"), usize::MAX).unwrap();
+    journal.log("context_checkpoint", json!({"epoch":1,"messages":messages}));
+    drop(journal);
+    let original = std::fs::read_to_string(source.join("solo.jsonl")).unwrap();
+    assert!(!original.contains("data:image") && !original.contains("cHJpdmF0ZS1waXhlbHM="));
+    let saved = SavedSession::load(&root, "images", &ws).unwrap();
+    let expected = serde_json::to_value(&saved.history).unwrap();
+    assert!(expected.to_string().contains("cHJpdmF0ZS1waXhlbHM="));
+    let fork = root.join("image-fork");
+    saved.fork(&fork, "solo").unwrap();
+    let restored = SavedSession::load(&root, "image-fork", &ws).unwrap();
+    assert_eq!(serde_json::to_value(&restored.history).unwrap(), expected);
+    let sidecar = std::fs::read_dir(&fork)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("attachment-")
+        })
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    drop(restored);
+    std::fs::write(sidecar, b"damaged").unwrap();
+    assert!(SavedSession::load(&root, "image-fork", &ws).is_err());
+    assert_eq!(
+        std::fs::read_to_string(source.join("solo.jsonl")).unwrap(),
+        original
+    );
 }

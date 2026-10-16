@@ -30,9 +30,24 @@ agent loop.
   draws its caption buttons over it, and Linux keeps the native window frame.
 - **Conversation:** assistant text renders markdown (code blocks have Copy);
   tool activity collapses into one work log per burst; approvals appear above
-  the composer with Deny / Allow once / Allow session. Enter sends (not while an
-  input method is composing), Shift+Enter inserts a newline, and you can keep
-  drafting while SUI works.
+  the composer with a scrollable command preview and visible approval buttons.
+  Enter sends (not while an input method is composing), Shift+Enter inserts a
+  newline, and you can keep drafting while SUI works.
+- **Approvals:** Ask, Auto edits, and YOLO can be changed while idle or while
+  approval is waiting. YOLO allows file edits and simple inspection commands;
+  scripts, potentially destructive commands, web, and browser permissions still
+  ask. **Switch to YOLO & allow once** approves the displayed action explicitly.
+  Approval choices are never restored from a previous connection.
+- **Images:** drag and drop, paste, or attach PNG/JPEG/WebP files, then Send.
+  Up to four images (4 MiB each, 8 MiB total) travel over SSH to the native agent.
+  The account catalog supplies ChatGPT image capability; other profiles require
+  trusted `image_input = true`. Draft images remain visible until sent and are
+  restored if sending fails. Replay images live in private, integrity-checked
+  files on the workspace host, outside journal text and exports.
+- **Reopening:** the app saves its last connection and chat pointer privately
+  and reconnects on startup. A project opens its latest meaningful chat; empty
+  connection-only sessions stay out of recent chats. Interrupted tool calls
+  are marked as unknown outcomes in a new fork, never rerun automatically.
 - **Companion:** a slime that lives in a strip above the composer, so it never
   covers messages on its own. It runs back and forth while SUI works, bounces
   and asks `?` when it needs an approval (the buttons remain the only way to
@@ -134,9 +149,11 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
    account models beside the message box; no repeat sign-in or API key is needed. **OpenAI API** uses an API key and
    its preset Responses endpoint; **Ollama** uses a local endpoint without a key.
    Other compatible Chat Completions and Responses endpoints can be entered too.
-3. Send a task. The app streams agent output and shows each tool approval with
-   Once, Session and Deny choices. Recent chats can be resumed when the native
-   replay checks allow it.
+3. Send a task, optionally with image attachments. The app streams output and
+   keeps each tool approval's buttons visible even for long commands. Switch
+   approval mode beside the composer or directly from a pending prompt. Recent
+   chats resume when native replay checks allow it; reopening the app restores
+   the last connection and chat without running old commands.
 4. Open an HTTP(S) URL in the browser panel. For a web app listening on a
    remote machine's loopback address, enter its port under **Remote preview**;
    the app creates an SSH port forward.
@@ -154,7 +171,8 @@ for this app.
 The app first uses `~/.sui/bin/sui`, then `sui` from the remote PATH. API keys
 entered in the setup dialog travel through local stdio or
 SSH stdin and are stored by SUI in the selected host's owner-only global config.
-The app stores project locations and profile names locally, never API keys.
+The app stores project locations, profile/model/reasoning choices, and the last
+chat pointer locally, never API keys or saved permission grants.
 
 ChatGPT setup follows OpenAI's [Sign in with ChatGPT guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt).
 Plan access depends on account eligibility and the permissions actually granted.

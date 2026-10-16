@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
+const http = require('node:http');
 const { spawn, execFileSync } = require('node:child_process');
 const { shellQuote } = require('../bridge');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-ssh-smoke-'));
@@ -22,7 +23,8 @@ process.env.SUI_HOME = path.join(temporary, 'model-config');
 fs.mkdirSync(process.env.SUI_HOME);
 fs.writeFileSync(path.join(process.env.SUI_HOME, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "workspace-test-model"\n', { mode: 0o600 });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-let sshd, failed = false;
+let sshd, modelServer, failed = false;
+const modelRequests = [];
 
 async function freePort() {
   const server = net.createServer();
@@ -33,6 +35,19 @@ async function freePort() {
 }
 
 async function run() {
+  modelServer = http.createServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      modelRequests.push(JSON.parse(body));
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Screenshot received.' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n');
+    });
+  });
+  await new Promise(resolve => modelServer.listen(0, '127.0.0.1', resolve));
+  fs.writeFileSync(path.join(process.env.SUI_HOME, 'config.toml'), `[profiles.test]\nkind = "ollama"\nmodel = "workspace-test-model"\nimage_input = true\nbase_url = "http://127.0.0.1:${modelServer.address().port}/v1"\n`, { mode: 0o600 });
+  const remoteHome = path.join(temporary, 'remote-home');
+  fs.mkdirSync(remoteHome);
   const port = await freePort();
   for (const key of ['host-key', 'client-key']) execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', path.join(temporary, key)]);
   const wrapper = path.join(temporary, 'remote-command');
@@ -43,7 +58,7 @@ async function run() {
   // Route the standard SUI install location to the built fixture binary too,
   // so an older ~/.sui/bin/sui on the test runner cannot take precedence.
   const rewriteBinary = 's|"$HOME/.sui/bin/sui"|"' + binary.replace(/[\\&|]/g, '\\$&') + '"|g';
-  fs.writeFileSync(wrapper, `#!/bin/sh\nPATH=${shellQuote(bin)}:"$PATH"\nSUI_HOME=${shellQuote(process.env.SUI_HOME)}\nexport PATH SUI_HOME\ncase "$SSH_ORIGINAL_COMMAND" in *sui-browse-slow*) sleep 1 ;; esac\nsui_fixture_command=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | sed ${shellQuote(rewriteBinary)})\nexec sh -c "$sui_fixture_command"\n`, { mode: 0o700 });
+  fs.writeFileSync(wrapper, `#!/bin/sh\nPATH=${shellQuote(bin)}:"$PATH"\nSUI_HOME=${shellQuote(process.env.SUI_HOME)}\nHOME=${shellQuote(remoteHome)}\nexport PATH SUI_HOME HOME\ncase "$SSH_ORIGINAL_COMMAND" in *sui-browse-slow*) sleep 1 ;; esac\nsui_fixture_command=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | sed ${shellQuote(rewriteBinary)})\nexec sh -c "$sui_fixture_command"\n`, { mode: 0o700 });
   const serverConfig = path.join(temporary, 'sshd-config');
   fs.writeFileSync(serverConfig, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${temporary}/host-key\nPidFile ${temporary}/sshd.pid\nAuthorizedKeysFile ${temporary}/client-key.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nForceCommand ${wrapper}\n`);
   sshd = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', serverConfig], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -70,6 +85,8 @@ async function run() {
     for (let n = 0; n < 200; n++) { if (await ui(expression)) return; await pause(30); }
     throw new Error(message + ': ' + await ui('document.getElementById("connect-error").textContent'));
   };
+  await waitFor('state.hello !== null && !connectionBusy', 'saved SSH project reconnects automatically');
+  const startupRun = await ui('state.hello.run_id');
   await ui('showDialog()');
   await waitFor('!!document.querySelector(\'#host-choice option[value="sui-smoke"]\')', 'SSH alias imported from Include');
   await ui('document.getElementById("host-choice").value="sui-smoke"; document.getElementById("host-choice").dispatchEvent(new Event("change"))');
@@ -77,7 +94,7 @@ async function run() {
   assert.equal(await ui('document.getElementById("connect-button").disabled'), true, 'choose a workspace before opening');
   await ui('document.getElementById("browse-workspace").click()');
   await waitFor('!document.getElementById("choose-folder").disabled', 'real SSH home listing');
-  assert.equal(await ui('state.hello'), null, 'folder browsing does not start the agent');
+  assert.equal(await ui('state.hello.run_id'), startupRun, 'folder browsing does not replace the connected agent');
   assert.ok(fs.existsSync(path.join(temporary, 'known-hosts')), 'SSH verified and stored the loopback host key');
   await ui('document.getElementById("close-folder-browser").click(); document.getElementById("recent-workspaces").selectedIndex=1; document.getElementById("recent-workspaces").dispatchEvent(new Event("change")); document.getElementById("browse-workspace").click()');
   await waitFor('!document.getElementById("choose-folder").disabled', 'recent folder listing');
@@ -124,8 +141,33 @@ async function run() {
   const layout = await ui(`({ width: innerWidth, scroll: document.documentElement.scrollWidth, outside: [...document.querySelectorAll('body *')].filter(el => { const r=el.getBoundingClientRect(); return r.width && r.right > innerWidth+1; }).slice(0, 12).map(el => ({ id: el.id, class: el.className, right: el.getBoundingClientRect().right })) })`);
   assert.ok(layout.scroll <= layout.width, JSON.stringify(layout));
   assert.equal(await ui('document.getElementById("connect-button").getBoundingClientRect().bottom <= innerHeight'), true, 'open workspace remains visible in a small window');
+  // Send an actual image over SSH, then reload the renderer and resume the
+  // persisted native conversation without entering any connection details.
+  await ui('document.getElementById("close-dialog").click()');
+  const pixels = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEn8AAAAASUVORK5CYII=';
+  await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'mac-screen.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
+  await waitFor('state.images.length === 1 && !state.imagesLoading', 'dropped image draft');
+  const originalRun = await ui('state.hello.run_id');
+  await ui('document.getElementById("message").value = "SSH screenshot"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("send").click()');
+  await waitFor('state.activeRun === null && state.messages > 0', 'image turn over SSH');
+  assert.equal(modelRequests.length, 1);
+  assert.ok(JSON.stringify(modelRequests[0].messages).includes(pixels), 'remote runtime sends the exact dropped pixels to the model');
+  const bookmark = JSON.parse(fs.readFileSync(path.join(fixtureHome, 'connection.json'), 'utf8'));
+  assert.equal(bookmark.session, originalRun);
+  assert.equal(bookmark.target.host, 'sui-smoke');
+  assert.ok(!JSON.stringify(bookmark).includes(pixels), 'connection preferences never store images');
+  const loaded = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+  win.webContents.reload(); await loaded;
+  await waitFor('state.hello !== null && !connectionBusy && state.hello.history.some(m => m.content.includes("SSH screenshot"))', 'restart restores the same native conversation');
+  assert.equal(await ui('document.getElementById("connect-dialog").open'), false, 'restart requires no connection setup');
+  assert.notEqual(await ui('state.hello.run_id'), originalRun, 'native recovery forks the original journal');
+  assert.equal(modelRequests.length, 1, 'opening a saved chat does not run the model or replay tools');
+  await ui('document.getElementById("message").value = "Use the earlier image"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("send").click()');
+  await waitFor('state.activeRun === null && state.messages > 2', 'continued SSH conversation');
+  assert.equal(modelRequests.length, 2);
+  assert.ok(JSON.stringify(modelRequests[1].messages).includes(pixels), 'image history survives a restart over SSH');
   console.log('WORKSPACE_SSH_SMOKE_OK');
 }
 
 app.whenReady().then(run).then(() => app.quit()).catch(error => { console.error(error); failed = true; app.quit(); });
-app.on('will-quit', () => { sshd?.kill(); fs.rmSync(temporary, { recursive: true, force: true }); if (failed) app.exit(1); });
+app.on('will-quit', () => { modelServer?.close(); sshd?.kill(); fs.rmSync(temporary, { recursive: true, force: true }); if (failed) app.exit(1); });

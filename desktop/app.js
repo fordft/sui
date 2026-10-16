@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
-  browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: [], profiles: null, settingsPending: false
+  browserOpen: false, browserShown: false, permissionId: null, permissionSending: false, log: null, messages: 0, projects: [], profiles: null, settingsPending: false, images: [], imagesLoading: 0, pendingSubmission: null
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -46,15 +46,17 @@ function setStatus(label, connected, busy = false) {
 }
 
 function updateSend() {
-  const draft = $('message').value.trim() || state.annotation;
-  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || !draft;
+  const draft = $('message').value.trim() || state.annotation || state.images.length;
+  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (state.images.length > 0 && !state.hello?.image_input) || !draft;
 }
 
 function setBusy(busy) {
   const ready = !!state.hello;
   $('choose-model').disabled = !ready || busy || state.settingsPending;
   $('composer-reasoning').disabled = !ready || busy || state.settingsPending || (state.hello?.reasoning_choices || []).length < 2;
-  $('composer-mode').disabled = !ready || busy || state.settingsPending;
+  $('composer-mode').disabled = !ready || (busy && state.permissionId === null) || state.settingsPending || state.permissionSending;
+  document.querySelectorAll('[data-choice]').forEach(button => { button.disabled = state.settingsPending || state.permissionSending; });
+  $('attach-image').disabled = !ready || busy || state.imagesLoading > 0 || !state.hello?.image_input;
   if (busy) $('model-dialog').close();
   $('message').disabled = !ready;
   $('composer-context').classList.toggle('hidden', !ready);
@@ -179,7 +181,7 @@ function displayProject(item, className = 'project-row') {
   text.append(h('strong', '', projectName(item)), h('small', '', hostLabel(item)));
   row.append(ico, text);
   row.title = `${hostLabel(item)} · ${item.workspace}`;
-  row.addEventListener('click', () => connect(item));
+  row.addEventListener('click', () => connect(item, 'latest'));
   return row;
 }
 
@@ -232,7 +234,7 @@ function renderSessions(items) {
     const row = h('button', 'session-row', item.label);
     row.type = 'button';
     row.title = item.label;
-    row.addEventListener('click', () => { if (state.target) connect(state.target, item.id); });
+    row.addEventListener('click', () => { if (state.target) connect({ ...state.target, profile: item.profile || state.target.profile }, item.id); });
     $('session-list').append(row);
   }
   if (!items.length) $('session-list').append(h('div', 'sidebar-empty', 'No earlier chats here'));
@@ -704,6 +706,7 @@ async function connect(item, resume = null) {
     $('annotation-card').classList.add('hidden');
     $('permission').classList.add('hidden');
     state.permissionId = null;
+    state.permissionSending = false;
     pet().setAsking(false);
     $('workspace-title').textContent = projectName(item);
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
@@ -733,6 +736,8 @@ async function connect(item, resume = null) {
     setStatus(item.kind === 'ssh' ? 'SSH connected' : 'Local', true);
     transcript().replaceChildren();
     for (const message of hello.history || []) appendMessage(message.role, message.content);
+    if (hello.recovered) appendNotice('This chat was interrupted. Pending tools were not rerun; inspect existing changes before retrying.', true);
+    renderImages();
     if (hello.catalog_warning) appendNotice(hello.catalog_warning, true);
     if (hello.history_truncated) appendNotice('Earlier conversation text is omitted from this preview; SUI restored the full native session.');
     setStage();
@@ -755,6 +760,73 @@ async function connect(item, resume = null) {
   } finally { connectionBusy = false; updateConnectForm(); }
 }
 
+// Images remain draft data until Send, then travel inside the SSH stream.
+function imageError(message = '') {
+  $('image-error').textContent = message;
+  $('image-error').classList.toggle('hidden', !message);
+}
+function renderImages() {
+  const list = $('image-attachments');
+  list.replaceChildren();
+  for (const [index, image] of state.images.entries()) {
+    const item = h('div', 'image-attachment');
+    const preview = document.createElement('img');
+    preview.src = `data:${image.mime};base64,${image.data}`;
+    preview.alt = image.name;
+    const remove = h('button', '', '×');
+    remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${image.name}`);
+    remove.addEventListener('click', () => { state.images.splice(index, 1); imageError(); renderImages(); });
+    item.append(preview, h('span', '', image.name), remove); list.append(item);
+  }
+  list.classList.toggle('hidden', !state.images.length);
+  if (state.images.length && state.hello && !state.hello.image_input) imageError('This chat has no image input. Choose an image-capable model or start a new chat.');
+  updateSend();
+}
+async function addImages(files) {
+  if (!state.hello || !state.hello.image_input) { imageError('Choose an image-capable model or start a new chat before attaching images.'); return; }
+  if (state.activeRun !== null || connectionBusy || state.imagesLoading) { imageError('Wait for the current operation before attaching images.'); return; }
+  state.imagesLoading++; setBusy(false); imageError();
+  try {
+    const added = [];
+    let total = state.images.reduce((n, image) => n + image.size, 0);
+    if (state.images.length + files.length > 4) throw new Error('Attach at most 4 images.');
+    for (const file of files) {
+      if (!file.size || file.size > 4 * 1024 * 1024) throw new Error('Each image must be between 1 byte and 4 MiB.');
+      if (!file.name || new TextEncoder().encode(file.name).length > 255 || /[\x00-\x1f\x7f]/.test(file.name)) throw new Error('Invalid image filename.');
+      total += file.size;
+      if (total > 8 * 1024 * 1024) throw new Error('Images must be at most 8 MiB in total.');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const starts = prefix => prefix.every((b, n) => bytes[n] === b);
+      const mime = starts([137,80,78,71,13,10,26,10]) ? 'image/png' : starts([255,216,255]) ? 'image/jpeg' : starts([82,73,70,70]) && [87,69,66,80].every((b,n) => bytes[8+n] === b) ? 'image/webp' : null;
+      if (!mime) throw new Error('Use PNG, JPEG or WebP images.');
+      const url = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Could not read image.')); reader.readAsDataURL(new Blob([bytes], { type: mime }));
+      });
+      added.push({ name: file.name, mime, data: String(url).split(',')[1], size: file.size });
+    }
+    state.images.push(...added); renderImages();
+  } catch (error) { imageError(String(error.message || error)); }
+  finally { state.imagesLoading--; setBusy(state.activeRun !== null); }
+}
+function clearPermission() {
+  state.permissionId = null;
+  state.permissionSending = false;
+  $('permission').classList.add('hidden');
+  pet().setAsking(false);
+  setBusy(state.activeRun !== null);
+}
+function restoreSubmission() {
+  const submission = state.pendingSubmission;
+  if (submission) {
+    $('message').value = [submission.draft, $('message').value].filter(Boolean).join('\n');
+    state.images = submission.images;
+    state.pendingSubmission = null;
+    renderImages();
+  }
+  state.activeRun = null;
+  setBusy(false);
+}
+
 // ── sending and bridge events ────────────────────────────────────────────
 
 function formatAnnotation(annotation, comment) {
@@ -772,14 +844,18 @@ function clearAnnotation() {
 }
 
 async function send() {
-  if (!state.hello || state.activeRun !== null || state.settingsPending) return;
+  if (!state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading) return;
+  if (state.images.length && !state.hello.image_input) { imageError('Choose an image-capable model before sending images.'); return; }
   const message = $('message').value.trim();
   const comment = $('annotation-comment').value.trim();
-  if (!message && !state.annotation) return;
+  if (!message && !state.annotation && !state.images.length) return;
   if (state.annotation && !comment) { $('annotation-comment').focus(); return; }
   const text = [message, state.annotation ? formatAnnotation(state.annotation, comment) : ''].filter(Boolean).join('\n\n');
-  const display = [message, state.annotation ? `◎ ${comment}` : ''].filter(Boolean).join('\n');
+  const display = [message, state.annotation ? `◎ ${comment}` : '', ...state.images.map(image => `Attached image: ${image.name}`)].filter(Boolean).join('\n');
   const run = state.nextRun++;
+  const images = state.images;
+  state.pendingSubmission = { run, draft: $('message').value, images };
+  state.images = []; renderImages(); imageError();
   state.activeRun = run;
   state.assistant = null;
   closeLog(true);
@@ -788,8 +864,8 @@ async function send() {
   window.SuiUI.autosize($('message'));
   clearAnnotation();
   setBusy(true);
-  try { await window.sui.command({ type: 'send', run, text }); }
-  catch (error) { appendNotice(`Send failed: ${error.message}`, true); state.activeRun = null; setBusy(false); }
+  try { await window.sui.command({ type: 'send', run, text, images: images.map(({ name, mime, data }) => ({ name, mime, data })) }); }
+  catch (error) { appendNotice(`Send failed: ${error.message}`, true); restoreSubmission(); }
 }
 
 function finishRun(outcome) {
@@ -804,6 +880,13 @@ function finishRun(outcome) {
 
 function onEvent(event) {
   switch (event.type) {
+    case 'request_start': state.pendingSubmission = null; break;
+    case 'send_error':
+      if (event.run === state.activeRun) { appendNotice(event.message || 'Message was not accepted', true); restoreSubmission(); }
+      break;
+    case 'permission_resolved':
+      if (event.id === state.permissionId) clearPermission();
+      break;
     case 'delta':
       if (event.run !== state.activeRun) return;
       streamDelta(event.text);
@@ -813,18 +896,22 @@ function onEvent(event) {
     case 'phase': logLine(event.text, 'phase'); break;
     case 'permission':
       state.permissionId = event.id;
+      state.permissionSending = false;
       $('permission-summary').textContent = event.summary;
       document.querySelector('[data-choice="session"]').classList.toggle('hidden', event.allow_session === false);
+      document.querySelector('[data-choice="yolo"]').classList.toggle('hidden', event.allow_yolo !== true);
+      document.querySelectorAll('[data-choice]').forEach(button => { button.disabled = false; });
       $('permission').classList.remove('hidden');
+      document.querySelector('.dock').scrollTop = 0;
+      setBusy(true);
       pet().setAsking(true);
       announce(`SUI needs your approval: ${event.summary}`);
       break;
     case 'run_done': {
       const outcome = String(event.outcome || '');
       if (event.run === state.activeRun) { state.activeRun = null; state.assistant = null; setBusy(false); }
-      $('permission').classList.add('hidden');
-      state.permissionId = null;
-      pet().setAsking(false);
+      state.pendingSubmission = null;
+      clearPermission();
       finishRun(outcome);
       window.sui.command({ type: 'list_sessions' }).catch(() => {});
       break;
@@ -850,7 +937,7 @@ function onEvent(event) {
     case 'sessions': renderSessions(event.items || []); break;
     case 'disconnected':
       $('model-dialog').close();
-      state.hello = null; state.activeRun = null; state.settingsPending = false; setBusy(false); setStatus('Disconnected', false);
+      state.hello = null; state.activeRun = null; state.settingsPending = false; state.permissionId = null; state.permissionSending = false; setBusy(false); setStatus('Disconnected', false);
       closeLog(false, true);
       pet().setAsking(false);
       $('permission').classList.add('hidden');
@@ -972,15 +1059,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     connect({ ...state.target, reasoning_effort: $('composer-reasoning').value });
   });
   $('composer-mode').addEventListener('change', async () => {
-    if (!state.hello || state.activeRun !== null || state.settingsPending) return;
+    if (!state.hello || (state.activeRun !== null && state.permissionId === null) || state.settingsPending) return;
     state.settingsPending = true;
-    setBusy(false);
+    setBusy(state.activeRun !== null);
     try { await window.sui.command({ type: 'set_approval', mode: $('composer-mode').value }); }
     catch (error) {
       state.settingsPending = false;
       $('composer-mode').value = state.hello?.approval || 'ask';
       appendNotice(String(error.message || error), true);
-      setBusy(false);
+      setBusy(state.activeRun !== null);
     }
   });
   $('close-model-picker').addEventListener('click', () => $('model-dialog').close());
@@ -1054,6 +1141,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   new ResizeObserver(updateScrollButton).observe(transcript());
   $('refresh-sessions').addEventListener('click', () => window.sui.command({ type: 'list_sessions' }).catch(() => {}));
   $('send').addEventListener('click', send);
+  $('attach-image').addEventListener('click', () => $('image-picker').click());
+  $('image-picker').addEventListener('change', async () => { await addImages([...$('image-picker').files]); $('image-picker').value = ''; });
+  document.addEventListener('dragover', event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); $('composer').classList.add('drop-active'); } });
+  document.addEventListener('dragleave', event => { if (!event.relatedTarget) $('composer').classList.remove('drop-active'); });
+  document.addEventListener('drop', event => { if (event.dataTransfer.files.length) { event.preventDefault(); $('composer').classList.remove('drop-active'); addImages([...event.dataTransfer.files]); } });
+  $('message').addEventListener('paste', event => { const files = [...(event.clipboardData?.files || [])]; if (files.length) { event.preventDefault(); addImages(files); } });
   $('message').addEventListener('input', () => { ui.autosize($('message')); updateSend(); pet().typing(); });
   $('message').addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
@@ -1062,12 +1155,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); }
   });
   $('stop').addEventListener('click', () => window.sui.command({ type: 'stop' }));
-  document.querySelectorAll('[data-choice]').forEach(button => button.addEventListener('click', () => {
-    if (state.permissionId === null) return;
-    window.sui.command({ type: 'approve', id: state.permissionId, choice: button.dataset.choice });
-    state.permissionId = null;
-    $('permission').classList.add('hidden');
-    pet().setAsking(false);
+  document.querySelectorAll('[data-choice]').forEach(button => button.addEventListener('click', async () => {
+    if (state.permissionId === null || state.settingsPending || state.permissionSending) return;
+    const id = state.permissionId;
+    state.permissionSending = true;
+    setBusy(state.activeRun !== null);
+    try { await window.sui.command({ type: 'approve', id, choice: button.dataset.choice }); }
+    catch (error) {
+      if (state.permissionId === id) state.permissionSending = false;
+      appendNotice(`Approval was not sent: ${error.message}`, true);
+      setBusy(state.activeRun !== null);
+    }
   }));
   $('remove-annotation').addEventListener('click', clearAnnotation);
   $('go').addEventListener('click', () => openBrowser($('browser-url').value));
@@ -1081,5 +1179,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('resize', syncBrowser);
 
   await refreshProjects();
-  if (!state.projects.length) showDialog();
+  const saved = await window.sui.restore();
+  if (saved) await connect(saved.target, saved.session);
+  else if (state.projects.length) await connect(state.projects[0], 'latest');
+  else showDialog();
 });

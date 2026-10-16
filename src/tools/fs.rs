@@ -186,13 +186,51 @@ pub fn edit_file(ctx: &ToolContext, args: &Value) -> Result<String> {
 }
 
 fn atomic_write(p: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = p.with_extension(format!(
-        "{}.sui-tmp",
-        p.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, p)?;
-    Ok(())
+    use std::fs::OpenOptions;
+    use std::io::{ErrorKind, Write};
+
+    let permissions = match std::fs::metadata(p) {
+        Ok(meta) => Some(meta.permissions()),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("cannot stat {}", p.display())),
+    };
+    let parent = p.parent().context("target has no parent")?;
+    for _ in 0..10 {
+        // Exclusive creation is essential: a pre-existing file or symlink must
+        // never be opened for writing. Siblings keep the rename on one filesystem.
+        let tmp = parent.join(format!(
+            ".sui-write-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(permissions) = &permissions {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            // Do not expose private content with broader staging permissions.
+            options.mode(permissions.mode() & 0o777);
+        }
+        let mut file = match options.open(&tmp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("cannot stage {}", p.display())),
+        };
+        let result = (|| {
+            file.write_all(bytes)?;
+            if let Some(permissions) = &permissions {
+                file.set_permissions(permissions.clone())?;
+            }
+            // Close before rename (also required on Windows).
+            drop(file);
+            std::fs::rename(&tmp, p)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return result.with_context(|| format!("cannot save {}", p.display()));
+    }
+    bail!("cannot allocate staging file for {}", p.display())
 }
 
 #[cfg(test)]
