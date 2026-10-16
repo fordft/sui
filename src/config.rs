@@ -76,6 +76,7 @@ impl Transport {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub reasoning_effort: Option<crate::reasoning::Effort>,
     pub transport: Transport,
     pub base_url: String,
     /// None = no key configured. Never sourced from project-level sui.toml.
@@ -103,6 +104,7 @@ pub struct Config {
 /// never in project sui.toml.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct ProfileCfg {
+    pub reasoning_effort: Option<crate::reasoning::Effort>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     /// Explicit model capability; absent defaults true for native Codex
@@ -157,6 +159,7 @@ impl PricingCfg {
 
 #[derive(Debug, Clone)]
 pub struct Profile {
+    pub reasoning_effort: Option<crate::reasoning::Effort>,
     pub transport: Transport,
     pub name: String,
     pub base_url: String,
@@ -199,6 +202,7 @@ struct FileConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct ProviderCfg {
+    reasoning_effort: Option<crate::reasoning::Effort>,
     kind: Option<String>,
     image_input: Option<bool>,
     base_url: Option<String>,
@@ -455,6 +459,7 @@ pub fn resolve_profile(name: &str, config_path: Option<&Path>) -> Result<Profile
         .filter(|v| !v.is_empty())
         .or_else(|| p.api_key.clone());
     Ok(Profile {
+        reasoning_effort: p.reasoning_effort,
         transport,
         name: name.to_string(),
         base_url: if transport == Transport::Chatgpt {
@@ -657,6 +662,7 @@ pub fn load(ov: Overrides) -> Result<Config> {
     };
     let base_url = transport.resolve_url(Some(&base_url));
     Ok(Config {
+        reasoning_effort: fp.reasoning_effort.or(gp.reasoning_effort),
         transport,
         image_input: fp
             .image_input

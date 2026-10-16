@@ -47,7 +47,7 @@ function createProviders({ spawn, openExternal }) {
         }
       });
       child.on('close', code => {
-        if (code !== 0) finish(new Error(stderr.trim() || 'SUI provider setup failed. Install or update SUI on this host.'));
+        if (code !== 0) finish(new Error(stderr.includes('--desktop-protocol') || code === 78 ? 'This host has an older SUI CLI. Choose Install or update SUI on SSH host, then retry.' : stderr.trim() || 'SUI provider setup failed. Install or update SUI on this host.'));
         else if (!result || buffer.trim()) finish(new Error('Incomplete provider response.'));
         else finish();
       });

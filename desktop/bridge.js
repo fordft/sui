@@ -17,19 +17,30 @@ function sshArgs(host, command) {
   return ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', validateHost(host), command];
 }
 
-function remoteCommand(workspace, profile, resume) {
-  const args = ` desktop-bridge --workspace ${shellQuote(workspace)} --profile ${shellQuote(profile)}` +
+function remoteCommand(workspace, profile, resume, effort) {
+  const args = `desktop-bridge --workspace ${shellQuote(workspace)} --profile ${shellQuote(profile)}` +
     (resume ? ` --resume ${shellQuote(resume)}` : '');
-  return `if test -x "$HOME/.sui/bin/sui"; then exec "$HOME/.sui/bin/sui"${args}; ` +
-    `elif command -v sui >/dev/null 2>&1; then exec sui${args}; ` +
-    `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi`;
+  return guardedRemote(args + reasoningArg(resume ? null : effort, true));
+}
+
+function reasoningArg(effort, remote = false) {
+  if (effort == null) return remote ? '' : [];
+  if (!['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new Error('Invalid reasoning level.');
+  return remote ? ` --reasoning-effort ${shellQuote(effort)}` : ['--reasoning-effort', effort];
+}
+
+function guardedRemote(args) {
+  return `if test -x "$HOME/.sui/bin/sui"; then sui_bin="$HOME/.sui/bin/sui"; ` +
+    `elif command -v sui >/dev/null 2>&1; then sui_bin=$(command -v sui); ` +
+    `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi; ` +
+    `if ! "$sui_bin" --help 2>/dev/null | grep -q -- '--desktop-protocol'; then ` +
+    `echo 'This SSH host has an older SUI CLI. Choose Install or update SUI on SSH host, then retry.' >&2; exit 78; fi; ` +
+    `exec "$sui_bin" --desktop-protocol 1 ${args}`;
 }
 
 function remoteSetupCommand(subcommand = 'desktop-setup') {
   if (!['desktop-setup', 'desktop-provider'].includes(subcommand)) throw new Error('Invalid setup command');
-  return `if test -x "$HOME/.sui/bin/sui"; then exec "$HOME/.sui/bin/sui" ${subcommand}; ` +
-    `elif command -v sui >/dev/null 2>&1; then exec sui ${subcommand}; ` +
-    `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi`;
+  return guardedRemote(subcommand);
 }
 
 function localBinary(app) {
@@ -43,10 +54,10 @@ function bridgeSpec(app, target, resume) {
   if (!workspace.trim() || !profile) throw new Error('Workspace and model profile are required.');
   if (target.kind === 'ssh') {
     const host = validateHost(target.host);
-    return { command: 'ssh', args: sshArgs(host, remoteCommand(workspace, profile, resume)) };
+    return { command: 'ssh', args: sshArgs(host, remoteCommand(workspace, profile, resume, target.reasoning_effort)) };
   }
   if (target.kind !== 'local') throw new Error('Choose Local or SSH.');
-  return { command: localBinary(app), args: ['desktop-bridge', '--workspace', workspace, '--profile', profile, ...(resume ? ['--resume', resume] : [])] };
+  return { command: localBinary(app), args: ['--desktop-protocol', '1', 'desktop-bridge', '--workspace', workspace, '--profile', profile, ...(resume ? ['--resume', resume] : reasoningArg(target.reasoning_effort))] };
 }
 
 function spawnBridge(app, target, resume) {
@@ -56,8 +67,8 @@ function spawnBridge(app, target, resume) {
 
 function spawnSetup(app, target, subcommand = 'desktop-setup') {
   if (target.kind === 'ssh') return spawn('ssh', sshArgs(target.host, remoteSetupCommand(subcommand)), { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
-  if (target.kind === 'local') return spawn(localBinary(app), [subcommand], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  if (target.kind === 'local') return spawn(localBinary(app), ['--desktop-protocol', '1', subcommand], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   throw new Error('Choose Local or SSH.');
 }
 
-module.exports = { validateHost, shellQuote, sshArgs, remoteCommand, bridgeSpec, spawnBridge, spawnSetup };
+module.exports = { validateHost, shellQuote, sshArgs, remoteCommand, remoteSetupCommand, bridgeSpec, spawnBridge, spawnSetup };

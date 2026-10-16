@@ -22,6 +22,7 @@ pub struct Provider {
     image_input: bool,
     prompt_cache_key: Option<String>,
     session_id: String,
+    reasoning_effort: Option<crate::reasoning::Effort>,
 }
 
 enum Inner {
@@ -94,6 +95,7 @@ impl Provider {
             }
         };
         Self {
+            reasoning_effort: None,
             image_input: base_url.starts_with("codex://"),
             client: b.build().unwrap_or_else(|_| reqwest::Client::new()),
             inner,
@@ -124,6 +126,15 @@ impl Provider {
         )
         .with_transport(profile.transport)
         .with_image_input(profile.image_input)
+        .with_reasoning_effort(profile.reasoning_effort)
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: Option<crate::reasoning::Effort>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+    pub fn reasoning_effort(&self) -> Option<crate::reasoning::Effort> {
+        self.reasoning_effort
     }
 
     pub fn with_transport(mut self, transport: crate::config::Transport) -> Self {
@@ -176,6 +187,14 @@ impl Provider {
     /// Bind persisted history to the same wire adapter and request options.
     /// Credentials may rotate; neither their value nor the endpoint is persisted.
     pub fn resume_fingerprint(&self) -> String {
+        if let Some(effort) = self.reasoning_effort.and_then(|e| e.wire()) {
+            return crate::context::sha256_hex(
+                format!("{}:reasoning:{effort}", self.base_fingerprint()).as_bytes(),
+            );
+        }
+        self.base_fingerprint()
+    }
+    fn base_fingerprint(&self) -> String {
         let (transport, endpoint) = match &self.inner {
             Inner::Chat { url, .. } => ("chat-completions", url.as_str()),
             Inner::Responses {
@@ -211,6 +230,9 @@ impl Provider {
     ) -> Result<StreamOutcome> {
         let (url, api_key) = match &self.inner {
             Inner::Native { catalog } => {
+                if self.reasoning_effort.and_then(|e| e.wire()).is_some() {
+                    bail!("reasoning controls are unavailable for this transport");
+                }
                 return native::stream(
                     native::Request {
                         client: &self.client,
@@ -238,6 +260,7 @@ impl Provider {
                         model: &self.model,
                         prompt_cache_key: self.prompt_cache_key.as_deref(),
                         session_id: &self.session_id,
+                        reasoning_effort: self.reasoning_effort.and_then(|e| e.wire()),
                     },
                     messages,
                     tools,
@@ -258,6 +281,9 @@ impl Provider {
                     "tools": crate::codex::build_tools(tools), "tool_choice": "auto",
                     "store": false, "stream": true, "include": ["reasoning.encrypted_content"],
                 });
+                if let Some(effort) = self.reasoning_effort.and_then(|e| e.wire()) {
+                    body["reasoning"] = json!({"effort":effort});
+                }
                 if let Some(key) = &self.prompt_cache_key {
                     body["prompt_cache_key"] = json!(key);
                 }
@@ -299,6 +325,9 @@ impl Provider {
             "stream": true,
             "stream_options": { "include_usage": true },
         });
+        if let Some(effort) = self.reasoning_effort.and_then(|e| e.wire()) {
+            body["reasoning_effort"] = json!(effort);
+        }
         if let Some(k) = &self.prompt_cache_key {
             body["prompt_cache_key"] = json!(k);
         }
@@ -683,6 +712,7 @@ mod chatgpt_tests {
         std::fs::create_dir_all(&directory).unwrap();
         crate::auth::write_secret(&directory.join("work.json"), &serde_json::to_vec(&json!({"client_id":"oaiapp_fixture","subject":"fixture-sub","access_token":"private-account-access","refresh_token":"private-account-refresh","scopes":["chatgpt.tokens.use.direct"],"expires_at":crate::auth::now()+3600})).unwrap()).unwrap();
         let profile = crate::config::Profile {
+            reasoning_effort: None,
             name: "work".into(),
             transport: crate::config::Transport::Chatgpt,
             base_url: "chatgpt://work".into(),

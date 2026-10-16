@@ -33,6 +33,8 @@ impl Signature {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Header {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::reasoning::Effort>,
     pub format: u32,
     pub workspace: PathBuf,
     pub profile: Option<String>,

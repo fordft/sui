@@ -20,7 +20,14 @@ The terminal UI remains available.
 
 Click the model badge above the desktop composer to search profiles configured
 on the workspace host. Selecting another profile starts a new chat; the previous
-chat remains in recent chats. Model switching is available between turns.
+chat remains in recent chats. Model switching is available between turns. The adjacent reasoning selector uses
+the supported levels for recognized models; changing it starts a new chat and
+preserves your draft. Saved chats retain their reasoning level. The mode selector
+switches between **Ask before changes** and **Auto edits** for the current chat.
+Commands, web access, and browser actions retain independent approval.
+
+If an SSH host reports an older CLI, choose **Install or update SUI on SSH host**
+and retry. Desktop checks compatibility before invoking provider commands.
 
 Mac Desktop releases from 0.11.6 use ad-hoc signatures, without Apple Developer
 ID signing or notarization. To install one, run the explicit installer:

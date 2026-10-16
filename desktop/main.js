@@ -143,7 +143,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" desktop-setup --help >/dev/null 2>&1 || { echo "Installed SUI lacks Desktop support; install v0.11.2 or newer." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 1 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 1 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;

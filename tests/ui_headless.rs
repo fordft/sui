@@ -522,6 +522,7 @@ async fn persistent_solo_web_policy_revocation_preserves_history_and_requires_fr
         consent_response((!answered).then(|| rejected_web_call(id)))
     });
     let profile = sui::config::Profile {
+        reasoning_effort: None,
         transport: Default::default(),
         name: "solo-consent-mock".into(),
         base_url: format!("http://127.0.0.1:{port}"),

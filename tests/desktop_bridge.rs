@@ -111,3 +111,193 @@ fn desktop_setup_and_bridge_start_without_a_terminal() {
     assert!(bridge.wait().unwrap().success());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+mod common;
+
+#[test]
+fn reasoning_and_edit_mode_reach_runtime_without_granting_commands() {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    let port = common::serve(move |body, _| {
+        let mut requests = captured.lock().unwrap();
+        requests.push(serde_json::from_slice(body).unwrap());
+        let call = match requests.len() {
+            1 => Some(("write_file", json!({"path":"kept.txt","content":"keep"}))),
+            2 => Some(("bash", json!({"command":"printf ok > command-output.txt"}))),
+            3 => Some(("bash", json!({"command":"rm kept.txt"}))),
+            5 => Some(("write_file", json!({"path":"denied.txt","content":"deny"}))),
+            _ => None,
+        };
+        let event = if let Some((name, args)) = call {
+            json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":format!("call-{}",requests.len()),"name":name,"arguments":args.to_string()}})
+        } else {
+            json!({"type":"response.output_text.delta","delta":"done"})
+        };
+        format!(
+            "data: {event}\n\ndata: {}\n\n",
+            json!({"type":"response.completed","response":{"model":"gpt-6.1-sol","usage":{"input_tokens":10,"output_tokens":1}}})
+        )
+    });
+    let root = std::env::temp_dir().join(format!("sui-settings-{:016x}", rand::random::<u64>()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[profiles.test]\nkind = \"openai-responses\"\nmodel = \"gpt-6.1-sol\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\n")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sui"))
+        .args(["--desktop-protocol", "1", "desktop-bridge", "--workspace"])
+        .arg(&workspace)
+        .args(["--profile", "test", "--reasoning-effort", "medium"])
+        .env("HOME", &root)
+        .env("SUI_HOME", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let next = || {
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("bridge event timed out")
+    };
+    let hello = next();
+    assert_eq!(hello["reasoning_effort"], "medium");
+    assert!(!hello["reasoning_choices"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("none")));
+    let mut input = child.stdin.take().unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({"type":"set_approval","mode":"auto-edits"})
+    )
+    .unwrap();
+    assert_eq!(next()["approval"], "auto-edits");
+    writeln!(
+        input,
+        "{}",
+        json!({"type":"send","run":1,"text":"Write the file, run the command, then finish."})
+    )
+    .unwrap();
+    let mut permissions = 0;
+    loop {
+        let event = next();
+        if event["type"] == "permission" {
+            permissions += 1;
+            if permissions == 1 {
+                writeln!(input, "{}", json!({"type":"set_approval","mode":"ask"})).unwrap();
+                assert_eq!(
+                    next()["type"],
+                    "settings_error",
+                    "mode changes cannot race an active turn"
+                );
+            }
+            assert_eq!(
+                event["allow_session"], false,
+                "file edits should not prompt in auto edits: {event}"
+            );
+            writeln!(input, "{}", json!({"type":"approve","id":event["id"],"choice":if permissions == 1 { "session" } else { "deny" }})).unwrap();
+        }
+        if event["type"] == "run_done" {
+            break;
+        }
+    }
+    assert_eq!(
+        permissions, 2,
+        "session approval must not grant later commands"
+    );
+    assert_eq!(next()["approval"], "auto-edits");
+    writeln!(input, "{}", json!({"type":"set_approval","mode":"ask"})).unwrap();
+    assert_eq!(next()["approval"], "ask");
+    writeln!(
+        input,
+        "{}",
+        json!({"type":"send","run":2,"text":"Write another file."})
+    )
+    .unwrap();
+    let mut revoked_prompt = false;
+    loop {
+        let event = next();
+        if event["type"] == "permission" {
+            assert_eq!(event["allow_session"], true);
+            revoked_prompt = true;
+            writeln!(
+                input,
+                "{}",
+                json!({"type":"approve","id":event["id"],"choice":"deny"})
+            )
+            .unwrap();
+        }
+        if event["type"] == "run_done" {
+            break;
+        }
+    }
+    assert!(
+        revoked_prompt,
+        "Ask mode must revoke automatic file approval"
+    );
+    assert!(!workspace.join("denied.txt").exists());
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("kept.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("command-output.txt")).unwrap(),
+        "ok"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 6);
+    for request in requests.lock().unwrap().iter() {
+        assert_eq!(request["reasoning"]["effort"], "medium");
+        assert_eq!(request["model"], "gpt-6.1-sol");
+    }
+    let mut resume = Command::new(env!("CARGO_BIN_EXE_sui"))
+        .args(["--desktop-protocol", "1", "desktop-bridge", "--workspace"])
+        .arg(&workspace)
+        .args([
+            "--profile",
+            "test",
+            "--resume",
+            hello["run_id"].as_str().unwrap(),
+        ])
+        .env("HOME", &root)
+        .env("SUI_HOME", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(resume.stdout.take().unwrap()).lines();
+    let restored: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(restored["reasoning_effort"], "medium");
+    assert_eq!(
+        restored["approval"], "ask",
+        "approval is reset for each connection"
+    );
+    drop(resume.stdin.take());
+    assert!(resume.wait().unwrap().success());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn desktop_protocol_never_falls_back_to_a_model_prompt() {
+    let result = Command::new(env!("CARGO_BIN_EXE_sui"))
+        .args(["--desktop-protocol", "1", "not-a-desktop-command"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("Desktop protocol requires a desktop command"));
+    assert!(!error.contains("no API key"));
+}

@@ -90,3 +90,11 @@ test('malformed frames and oversized responses fail without echoing the payload'
     await assert.rejects(service.request({ kind: 'local' }, { action: 'profiles' }), error => !error.message.includes('private-secret') && /response/i.test(error.message));
   }
 });
+
+test('old host CLI errors explain how to update instead of exposing a model authentication error', async () => {
+  const { service } = fixture((_target, _request, child) => {
+    child.stderr.write('older SUI CLI');
+    child.emit('close', 78);
+  });
+  await assert.rejects(service.request({ kind: 'ssh', host: 'test' }, { action: 'profiles' }), /Install or update SUI on SSH host/);
+});

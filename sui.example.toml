@@ -3,6 +3,9 @@
 # Precedence: CLI flags > env vars > project sui.toml > global config > defaults.
 
 [provider]
+# Optional request effort; omit for the provider default. Supported values depend
+# on the model: none, minimal, low, medium, high, xhigh, max.
+# reasoning_effort = "medium"
 # Trusted GLOBAL/--config only: "chat-completions" (default),
 # "openai-responses" (standard Responses API), "chatgpt", "codex-oauth",
 # "copilot", or "ollama".

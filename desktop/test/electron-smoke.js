@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-smoke-'));
 app.setPath('userData', tempHome);
 process.env.SUI_HOME = tempHome;
-fs.writeFileSync(path.join(tempHome, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "test-model"\n[profiles.alternative]\nkind = "ollama"\nmodel = "other-model"\n', { mode: 0o600 });
+fs.writeFileSync(path.join(tempHome, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "test-model"\n[profiles.reasoning]\nkind = "openai-responses"\nmodel = "gpt-6.1-sol"\n[profiles.alternative]\nkind = "ollama"\nmodel = "other-model"\n', { mode: 0o600 });
 const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-workspace-'));
 let pickerCalls = 0;
 dialog.showOpenDialog = async (_window, options) => {
@@ -92,7 +92,37 @@ async function run() {
     }
     assert.equal(await win.webContents.executeJavaScript('document.getElementById("connection-pill").textContent'), 'Local', 'local SUI bridge connected');
     assert.equal(await ui('document.getElementById("composer-model").textContent'), 'test-model', 'the connected model is visible beside the draft');
+    assert.equal(await ui('document.getElementById("composer-reasoning").disabled'), true, 'unknown models keep provider default');
+    const modeRun = await ui('state.hello.run_id');
+    await ui('document.getElementById("composer-mode").value = "auto-edits"; document.getElementById("composer-mode").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello.approval === "auto-edits" && !state.settingsPending')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('state.hello.approval'), 'auto-edits');
+    assert.equal(await ui('state.hello.run_id'), modeRun, 'mode applies to the current chat');
     const originalRun = await ui('state.hello.run_id');
+    await ui('document.getElementById("message").value = "Reasoning draft"; connect({ ...state.target, profile: "reasoning" })');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.model === "gpt-6.1-sol" && !connectionBusy')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('document.getElementById("composer-reasoning").disabled'), false);
+    const reasoningRun = await ui('state.hello.run_id');
+    await ui('document.getElementById("composer-reasoning").value = "medium"; document.getElementById("composer-reasoning").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.reasoning_effort === "medium" && !connectionBusy')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('state.hello.reasoning_effort'), 'medium');
+    assert.notEqual(await ui('state.hello.run_id'), reasoningRun);
+    assert.equal(await ui('document.getElementById("message").value'), 'Reasoning draft');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-controls.png'), (await win.capturePage()).toPNG());
+    await ui('connect({ ...state.target, profile: "test", reasoning_effort: undefined })');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.model === "test-model" && !connectionBusy')) break;
+      await pause(30);
+    }
     await ui('document.getElementById("choose-model").click()');
     for (let n = 0; n < 100; n++) {
       if (await ui('document.querySelectorAll(".model-option").length >= 2')) break;

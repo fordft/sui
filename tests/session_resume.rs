@@ -19,6 +19,7 @@ fn dir() -> PathBuf {
 }
 fn profile(port: u16) -> Profile {
     Profile {
+        reasoning_effort: None,
         name: "mock".into(),
         transport: Default::default(),
         image_input: false,
@@ -36,6 +37,7 @@ fn fixture(root: &Path, workspace: &Path, name: &str, opaque: bool) -> PathBuf {
     j.log(
         "resume_header",
         serde_json::to_value(Header {
+            reasoning_effort: None,
             format: 1,
             workspace: workspace.into(),
             profile: Some("mock".into()),

@@ -180,6 +180,7 @@ fn jdir() -> PathBuf {
 fn app_with_mock(repo: &Path, port: u16) -> App {
     let mut profiles = BTreeMap::new();
     let pc = |model: &str| ProfileCfg {
+        reasoning_effort: None,
         base_url: Some(format!("http://127.0.0.1:{port}/v1")),
         model: Some(model.into()),
         kind: None,
@@ -460,6 +461,7 @@ async fn tui_mission_events_flow() {
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let prof = |name: &str, model: &str| Profile {
+        reasoning_effort: None,
         transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),

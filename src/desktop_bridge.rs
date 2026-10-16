@@ -79,6 +79,14 @@ enum Command {
     Stop,
     ListSessions,
     ListProfiles,
+    SetApproval { mode: ApprovalMode },
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ApprovalMode {
+    Ask,
+    AutoEdits,
 }
 
 fn project_event(event: UiEvent) -> (Value, Option<(u64, mpsc::UnboundedSender<GateChoice>)>) {
@@ -174,7 +182,7 @@ fn project_event(event: UiEvent) -> (Value, Option<(u64, mpsc::UnboundedSender<G
             summary,
             reply,
         } => (
-            json!({"type":"permission","run":run,"id":id,"agent":agent,"summary":summary}),
+            json!({"type":"permission","run":run,"id":id,"agent":agent,"allow_session": !["bash:", "terminal:", "code_intel:"].iter().any(|prefix| summary.starts_with(prefix)),"summary":summary}),
             Some((id, reply)),
         ),
         UiEvent::Phase { run, agent, text } => (
@@ -232,14 +240,26 @@ fn send_projected(value: &Value) -> Result<()> {
 }
 
 /// One bridge process owns one native Solo session. It may handle many turns.
-pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Result<()> {
+pub async fn run(
+    workspace: &Path,
+    profile: &str,
+    resume: Option<&str>,
+    reasoning_effort: Option<crate::reasoning::Effort>,
+) -> Result<()> {
     let workspace = workspace
         .canonicalize()
         .context("workspace does not exist")?;
     if !workspace.is_dir() {
         bail!("workspace is not a directory");
     }
-    let prof = crate::config::resolve_profile(profile, None)?;
+    let mut prof = crate::config::resolve_profile(profile, None)?;
+    let reasoning_choices = crate::reasoning::choices(&prof);
+    if let Some(effort) = reasoning_effort {
+        if !reasoning_choices.contains(&effort) {
+            bail!("choose a reasoning level supported by this model and transport");
+        }
+        prof.reasoning_effort = Some(effort);
+    }
     let model = prof.model.clone();
     let chatgpt = prof.transport == crate::config::Transport::Chatgpt;
     if model.trim().is_empty() {
@@ -251,6 +271,18 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
     let saved = resume
         .map(|id| crate::session::SavedSession::load(&crate::session::runs_root(), id, &workspace))
         .transpose()?;
+    if reasoning_effort.is_none() {
+        if let Some(effort) = saved.as_ref().and_then(|s| s.header.reasoning_effort) {
+            prof.reasoning_effort = Some(effort);
+        }
+    }
+    let reasoning_effort = prof.reasoning_effort.unwrap_or(
+        if prof.transport == crate::config::Transport::CodexOauth {
+            crate::reasoning::Effort::High
+        } else {
+            crate::reasoning::Effort::Default
+        },
+    );
     let (history, history_truncated): (Vec<Value>, bool) = saved
         .as_ref()
         .map(|session| {
@@ -303,7 +335,7 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
         event_tx,
         cancel.clone(),
         stopped.clone(),
-        session_allow,
+        session_allow.clone(),
         Some(crate::web::WebService::new(crate::web::load_cfg(None))),
         saved.as_ref(),
     )?;
@@ -328,7 +360,7 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"approval":"ask","kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
     )?;
     let mut pending: std::collections::HashMap<u64, mpsc::UnboundedSender<GateChoice>> =
         std::collections::HashMap::new();
@@ -345,7 +377,7 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
                         pending.clear();
                         stopped.store(false, Ordering::SeqCst);
                         active = Some(run);
-                        if !solo.send(run, text) { bail!("agent session closed"); }
+                        if !solo.send_desktop(run, text) { bail!("agent session closed"); }
                     }
                 }
                 Some(Ok(Command::Approve { id, choice })) => {
@@ -364,6 +396,13 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
                     };
                     send_line(&value)?;
                 }
+                Some(Ok(Command::SetApproval { mode })) => {
+                    if active.is_some() { send_line(&json!({"type":"settings_error","message":"finish or stop the current turn before changing mode"}))?; }
+                    else {
+                        session_allow.store(matches!(mode, ApprovalMode::AutoEdits), Ordering::SeqCst);
+                        send_line(&json!({"type":"settings","approval":if session_allow.load(Ordering::SeqCst) { "auto-edits" } else { "ask" }}))?;
+                    }
+                }
                 Some(Err(message)) => send_line(&json!({"type":"error","message":message}))?,
                 None => break,
             },
@@ -371,8 +410,10 @@ pub async fn run(workspace: &Path, profile: &str, resume: Option<&str>) -> Resul
                 Some(event) => {
                     let (value, reply) = project_event(event);
                     if let Some((id, reply)) = reply { pending.insert(id, reply); }
-                    if value["type"] == "run_done" { active = None; pending.clear(); }
+                    let done = value["type"] == "run_done";
+                    if done { active = None; pending.clear(); }
                     send_projected(&value)?;
+                    if done { send_line(&json!({"type":"settings","approval":if session_allow.load(Ordering::SeqCst) { "auto-edits" } else { "ask" }}))?; }
                 }
                 None => break,
             },

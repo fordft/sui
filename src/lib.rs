@@ -13,6 +13,7 @@ pub mod journal;
 pub mod mission;
 pub mod permission;
 pub mod provider;
+pub mod reasoning;
 pub mod session;
 pub mod skills;
 pub mod tools;

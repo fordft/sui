@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
-  browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: [], profiles: null
+  browserOpen: false, browserShown: false, permissionId: null, log: null, messages: 0, projects: [], profiles: null, settingsPending: false
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -47,12 +47,14 @@ function setStatus(label, connected, busy = false) {
 
 function updateSend() {
   const draft = $('message').value.trim() || state.annotation;
-  $('send').disabled = !state.hello || state.activeRun !== null || !draft;
+  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || !draft;
 }
 
 function setBusy(busy) {
   const ready = !!state.hello;
-  $('choose-model').disabled = !ready || busy;
+  $('choose-model').disabled = !ready || busy || state.settingsPending;
+  $('composer-reasoning').disabled = !ready || busy || state.settingsPending || (state.hello?.reasoning_choices || []).length < 2;
+  $('composer-mode').disabled = !ready || busy || state.settingsPending;
   if (busy) $('model-dialog').close();
   $('message').disabled = !ready;
   $('composer-context').classList.toggle('hidden', !ready);
@@ -629,7 +631,9 @@ function renderModelOptions() {
       if (!state.hello || connectionBusy || state.activeRun !== null) return;
       $('model-dialog').close();
       if (current) { $('message').focus(); return; }
-      connect({ ...state.target, profile: item.name });
+      const target = { ...state.target, profile: item.name };
+      delete target.reasoning_effort;
+      connect(target);
     });
     list.append(button);
   }
@@ -668,6 +672,12 @@ async function connect(item, resume = null) {
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
     $('composer-model').textContent = hello.model;
     $('composer-model').title = hello.model;
+    state.settingsPending = false;
+    state.target.reasoning_effort = hello.reasoning_effort || 'default';
+    const effortLabels = { default: 'Provider default', none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
+    $('composer-reasoning').replaceChildren(...(hello.reasoning_choices || ['default']).map(value => new Option(effortLabels[value] || value, value)));
+    $('composer-reasoning').value = hello.reasoning_effort || 'default';
+    $('composer-mode').value = hello.approval || 'ask';
     $('composer-usage').classList.toggle('hidden', hello.kind !== 'chatgpt');
     $('composer-target').textContent = `${projectName(item)} · ${hostLabel(item)}`;
     $('composer-target').title = `${hostLabel(item)} · ${item.workspace}`;
@@ -713,7 +723,7 @@ function clearAnnotation() {
 }
 
 async function send() {
-  if (!state.hello || state.activeRun !== null) return;
+  if (!state.hello || state.activeRun !== null || state.settingsPending) return;
   const message = $('message').value.trim();
   const comment = $('annotation-comment').value.trim();
   if (!message && !state.annotation) return;
@@ -755,6 +765,7 @@ function onEvent(event) {
     case 'permission':
       state.permissionId = event.id;
       $('permission-summary').textContent = event.summary;
+      document.querySelector('[data-choice="session"]').classList.toggle('hidden', event.allow_session === false);
       $('permission').classList.remove('hidden');
       pet().setAsking(true);
       announce(`SUI needs your approval: ${event.summary}`);
@@ -776,6 +787,17 @@ function onEvent(event) {
         $('composer-usage').classList.remove('hidden');
       }
       pet().fret(); break;
+    case 'settings':
+      state.settingsPending = false;
+      if (state.hello) { state.hello.approval = event.approval; $('composer-mode').value = event.approval; }
+      setBusy(state.activeRun !== null);
+      break;
+    case 'settings_error':
+      state.settingsPending = false;
+      $('composer-mode').value = state.hello?.approval || 'ask';
+      appendNotice(event.message || 'Could not change permission mode', true);
+      setBusy(state.activeRun !== null);
+      break;
     case 'sessions': renderSessions(event.items || []); break;
     case 'profiles':
       if (!$('model-dialog').open || !state.hello) break;
@@ -786,7 +808,7 @@ function onEvent(event) {
       break;
     case 'disconnected':
       $('model-dialog').close();
-      state.hello = null; state.activeRun = null; setBusy(false); setStatus('Disconnected', false);
+      state.hello = null; state.activeRun = null; state.settingsPending = false; setBusy(false); setStatus('Disconnected', false);
       closeLog(false, true);
       pet().setAsking(false);
       $('permission').classList.add('hidden');
@@ -902,6 +924,22 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderSetup(); });
   $('save-model').addEventListener('click', saveModel);
   $('choose-model').addEventListener('click', showModelPicker);
+  $('composer-reasoning').addEventListener('change', () => {
+    if (!state.hello || state.activeRun !== null || state.settingsPending) return;
+    connect({ ...state.target, reasoning_effort: $('composer-reasoning').value });
+  });
+  $('composer-mode').addEventListener('change', async () => {
+    if (!state.hello || state.activeRun !== null || state.settingsPending) return;
+    state.settingsPending = true;
+    setBusy(false);
+    try { await window.sui.command({ type: 'set_approval', mode: $('composer-mode').value }); }
+    catch (error) {
+      state.settingsPending = false;
+      $('composer-mode').value = state.hello?.approval || 'ask';
+      appendNotice(String(error.message || error), true);
+      setBusy(false);
+    }
+  });
   $('close-model-picker').addEventListener('click', () => $('model-dialog').close());
   $('model-filter').addEventListener('input', renderModelOptions);
   $('configure-model').addEventListener('click', async () => {

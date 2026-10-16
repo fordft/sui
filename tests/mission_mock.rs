@@ -166,6 +166,7 @@ fn head(repo: &PathBuf) -> String {
 
 fn cfg(port: u16, repo: &Path) -> MissionCfg {
     let prof = |name: &str| Profile {
+        reasoning_effort: None,
         transport: Default::default(),
         name: name.into(),
         base_url: format!("http://127.0.0.1:{port}/v1"),

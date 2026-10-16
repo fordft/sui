@@ -129,9 +129,27 @@ pub struct Agent {
     stop: Arc<AtomicBool>,
     /// Web session consent belongs to this agent, separate from local AUTO.
     web_approved: bool,
+    edit_only_approval: bool,
 }
 
 impl Agent {
+    pub(crate) fn set_edit_only_approval(&mut self, enabled: bool) {
+        self.edit_only_approval = enabled;
+    }
+
+    async fn approve_local(&mut self, name: &str, summary: &str) -> bool {
+        if self.edit_only_approval && !matches!(name, "write_file" | "edit_file" | "patch_files") {
+            self.gate
+                .decide_surface(summary, &self.ident.agent_id, self.run_id)
+                .await
+                != crate::events::GateChoice::Deny
+        } else {
+            self.gate
+                .check(summary, &self.ident.agent_id, self.run_id)
+                .await
+        }
+    }
+
     pub fn new(
         provider: Provider,
         tools: ToolContext,
@@ -171,6 +189,7 @@ impl Agent {
             cancel: None,
             stop: Arc::new(AtomicBool::new(false)),
             web_approved: false,
+            edit_only_approval: false,
         }
     }
 
@@ -295,6 +314,7 @@ impl Agent {
 
     pub fn record_session(&mut self, profile: Option<String>) -> Result<()> {
         let header = crate::session::Header {
+            reasoning_effort: self.provider.reasoning_effort(),
             format: 1,
             workspace: self.tools.workspace.canonicalize()?,
             profile,
@@ -813,10 +833,7 @@ impl Agent {
                 } else if let Some(d) = self.web_gate(name, &summary).await {
                     d
                 } else if needs_approval(name, plan.as_ref().expect("batch_ok implies parsed"))
-                    && !self
-                        .gate
-                        .check(&summary, &self.ident.agent_id, self.run_id)
-                        .await
+                    && !self.approve_local(name, &summary).await
                 {
                     if self.stop.load(Ordering::Relaxed) {
                         Disp::new(

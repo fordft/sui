@@ -133,6 +133,8 @@
             <div class="composer">
               <div id="composer-context" class="composer-context hidden">
                 <button type="button" id="choose-model" class="model-pill" aria-label="Change model" aria-haspopup="dialog" title="Change model"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span><span aria-hidden="true">⌄</span></button>
+                <label class="composer-setting" title="Reasoning effort. Changing it starts a new chat and preserves your draft."><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="sr-only">Reasoning level</span><select id="composer-reasoning" aria-label="Reasoning level"><option value="default">Provider default</option></select></label>
+                <label class="composer-setting" title="Auto edits approves workspace file changes. Commands, web and browser retain independent permission."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option></select></label>
                 <span id="composer-target" class="composer-target"></span><button type="button" id="composer-usage" class="link-btn hidden">Using ChatGPT plan · Manage usage</button>
               </div>
               <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>

@@ -457,6 +457,7 @@ pub(crate) fn build_tools(tools: &[Value]) -> Vec<Value> {
 
 /// Request context for `stream_responses`.
 pub struct CodexReq<'a> {
+    pub reasoning_effort: Option<&'a str>,
     pub auth: &'a CodexAuth,
     pub client: &'a reqwest::Client,
     pub model: &'a str,
@@ -481,7 +482,7 @@ pub async fn stream_responses(
         "tools": build_tools(tools),
         "tool_choice": "auto",
         "parallel_tool_calls": false,
-        "reasoning": {"effort": "high", "summary": "auto"},
+        "reasoning": {"effort": req.reasoning_effort.unwrap_or("high"), "summary": "auto"},
         "store": false,
         "stream": true,
         "include": ["reasoning.encrypted_content"],

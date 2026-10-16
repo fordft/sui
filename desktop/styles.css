@@ -403,6 +403,11 @@ h1, h2, h3, h4, p { margin: 0; }
 .composer:focus-within { border-color: color-mix(in srgb, var(--accent) 70%, transparent); box-shadow: var(--shadow-1), 0 0 0 3px var(--accent-ring); }
 .composer-context { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; padding-bottom: 9px; }
 .model-pill { display: inline-flex; align-items: center; gap: 6px; max-width: 60%; padding: 3px 7px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 550; }
+.composer-setting { display: inline-flex; align-items: center; gap: 6px; border-left: 1px solid var(--line-strong); padding-left: 10px; color: var(--text-2); min-width: 0; }
+.composer-setting .i { width: 14px; height: 14px; flex: none; }
+.composer-setting select { max-width: 160px; min-width: 0; background: transparent; color: inherit; border: 0; font: inherit; font-size: 12px; cursor: pointer; padding: 4px 0; }
+.composer-setting select:disabled { opacity: .55; cursor: default; }
+.composer-setting option { color: var(--text); background: var(--surface); }
 .model-pill .i { width: 12px; height: 12px; }
 .model-pill:hover:enabled { background: var(--accent-ring); }
 .model-pill:disabled { opacity: .6; cursor: default; }

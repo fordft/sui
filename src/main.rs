@@ -17,6 +17,8 @@ enum Sub {
         profile: String,
         #[arg(long)]
         resume: Option<String>,
+        #[arg(long, value_enum)]
+        reasoning_effort: Option<sui::reasoning::Effort>,
     },
     /// Save a desktop model profile from one private JSON line on stdin
     DesktopSetup,
@@ -68,6 +70,9 @@ enum Sub {
     about = "cache-first multi-agent coding harness (v0: fast path)"
 )]
 struct Cli {
+    /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=1))]
+    desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,
     /// OpenAI-compatible base URL (e.g. http://localhost:8000/v1)
@@ -182,13 +187,23 @@ async fn setup_endpoint(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.desktop_protocol.is_some()
+        && !matches!(
+            cli.sub,
+            Some(Sub::DesktopBridge { .. } | Sub::DesktopSetup | Sub::DesktopProvider)
+        )
+    {
+        anyhow::bail!("Desktop protocol requires a desktop command; update SUI on this host");
+    }
     if let Some(Sub::DesktopBridge {
         workspace,
         profile,
         resume,
+        reasoning_effort,
     }) = &cli.sub
     {
-        return sui::desktop_bridge::run(workspace, profile, resume.as_deref()).await;
+        return sui::desktop_bridge::run(workspace, profile, resume.as_deref(), *reasoning_effort)
+            .await;
     }
     if let Some(Sub::DesktopSetup) = &cli.sub {
         return sui::desktop_bridge::setup();
@@ -331,6 +346,7 @@ async fn main() -> Result<()> {
                 .resolve_url(flag_base.as_deref().or(Some(&p.base_url)))
         };
         cfg.model = flag_model.clone().unwrap_or(p.model);
+        cfg.reasoning_effort = p.reasoning_effort;
         cfg.image_input = p.image_input;
         cfg.transport = p.transport;
         cfg.api_key = if p.transport.is_account() {
@@ -341,6 +357,9 @@ async fn main() -> Result<()> {
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
     if let Some(saved) = &saved {
+        if saved.header.reasoning_effort.is_some() {
+            cfg.reasoning_effort = saved.header.reasoning_effort;
+        }
         let provider = provider::Provider::new(
             &cfg.base_url,
             cfg.api_key.clone(),
@@ -348,7 +367,8 @@ async fn main() -> Result<()> {
             cfg.prompt_cache_key.clone(),
         )
         .with_transport(cfg.transport)
-        .with_image_input(cfg.image_input);
+        .with_image_input(cfg.image_input)
+        .with_reasoning_effort(cfg.reasoning_effort);
         if saved.header.signature != sui::session::Signature::current(&provider, &cfg.workspace) {
             anyhow::bail!("session provider, model, tools or project guidance changed; restore the configuration or start a new session");
         }
@@ -358,7 +378,8 @@ async fn main() -> Result<()> {
     let _session_lock = sui::session::SessionLock::acquire(&cfg.run_dir)?;
 
     eprintln!(
-        "sui v0 · model={} · base={} · ws={} · log={}",
+        "sui v{} · model={} · base={} · ws={} · log={}",
+        env!("CARGO_PKG_VERSION"),
         cfg.model,
         cfg.base_url,
         cfg.workspace.display(),
@@ -391,7 +412,8 @@ async fn main() -> Result<()> {
         cfg.prompt_cache_key.clone(),
     )
     .with_transport(cfg.transport)
-    .with_image_input(cfg.image_input);
+    .with_image_input(cfg.image_input)
+    .with_reasoning_effort(cfg.reasoning_effort);
     let tools = tools::ToolContext {
         workspace: cfg.workspace.clone(),
         bash_timeout: Duration::from_millis(cfg.bash_timeout_ms),

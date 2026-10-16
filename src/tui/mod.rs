@@ -113,6 +113,7 @@ struct SoloTask {
     run: u64,
     msg: String,
     web: WebUpdate,
+    edit_only_approval: bool,
 }
 enum WebUpdate {
     Keep,
@@ -125,6 +126,19 @@ impl Solo {
                 run,
                 msg,
                 web: WebUpdate::Keep,
+                edit_only_approval: false,
+            })
+            .is_ok()
+    }
+
+    /// Auto edits never grants arbitrary command execution.
+    pub fn send_desktop(&self, run: u64, msg: String) -> bool {
+        self.tx
+            .send(SoloTask {
+                run,
+                msg,
+                web: WebUpdate::Keep,
+                edit_only_approval: true,
             })
             .is_ok()
     }
@@ -141,6 +155,7 @@ impl Solo {
                 run,
                 msg,
                 web: WebUpdate::Replace(web),
+                edit_only_approval: false,
             })
             .is_ok()
     }
@@ -263,7 +278,14 @@ pub fn start_solo(
                 "sui_version": env!("CARGO_PKG_VERSION"),
             }),
         );
-        while let Some(SoloTask { run, msg, web }) = rx.recv().await {
+        while let Some(SoloTask {
+            run,
+            msg,
+            web,
+            edit_only_approval,
+        }) = rx.recv().await
+        {
+            agent.set_edit_only_approval(edit_only_approval);
             if let WebUpdate::Replace(web) = web {
                 agent.set_web_service(web);
             }
@@ -318,6 +340,7 @@ pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
         config::Transport::from_kind(app.profiles.get(name).and_then(|p| p.kind.as_deref()))
             .ok()?;
     Some(Profile {
+        reasoning_effort: app.profiles.get(name).and_then(|p| p.reasoning_effort),
         transport: config::Transport::from_kind(
             app.profiles.get(name).and_then(|p| p.kind.as_deref()),
         )
@@ -494,13 +517,17 @@ pub async fn run_with_resume(
                             match result {
                                 Ok(data) => {
                                     let (saved, profile, dir) = *data;
-                                    if app.workspace != saved.header.workspace || resolve_to_profile(&app, &profile.name).as_ref().map(solo_signature) != Some(solo_signature(&profile)) {
+                                    if app.workspace != saved.header.workspace || resolve_to_profile(&app, &profile.name).map(|mut current| {
+                                        if saved.header.reasoning_effort.is_some() { current.reasoning_effort = saved.header.reasoning_effort; }
+                                        solo_signature(&current)
+                                    }) != Some(solo_signature(&profile)) {
                                         app.status = "workspace or profile changed while loading; select the session again".into();
                                         dirty = true;
                                         continue;
                                     }
                                     match start_solo(profile.clone(), app.workspace.clone(), dir.clone(), ev_tx.clone(), app.cancel.clone(), app.stop_flag.clone(), app.auto.clone(), app.web.clone(), Some(&saved)) {
                                         Ok(new_solo) => {
+                                            if let Some(p) = app.profiles.get_mut(&profile.name) { p.reasoning_effort = profile.reasoning_effort; }
                                             app.restore_saved(&saved, &profile.name, dir.clone());
                                             solo = Some(new_solo);
                                             jdir = dir;
@@ -636,7 +663,10 @@ pub async fn run_with_resume(
                     tokio::spawn(async move {
                         let result = tokio::task::spawn_blocking(move || -> Result<_> {
                             let saved = crate::session::SavedSession::load(&crate::session::runs_root(), &id, &workspace)?;
-                            let mut matches = profiles.into_iter().filter(|p| saved.header.profile.as_ref().is_none_or(|name| name == &p.name)
+                            let mut matches = profiles.into_iter().map(|mut p| {
+                                if saved.header.reasoning_effort.is_some() { p.reasoning_effort = saved.header.reasoning_effort; }
+                                p
+                            }).filter(|p| saved.header.profile.as_ref().is_none_or(|name| name == &p.name)
                                 && saved.header.signature == crate::session::Signature::current(&Provider::from_profile(p), &workspace));
                             let profile = matches.next().context("recorded profile, model, tools or project guidance changed; restore the configuration or start a new session")?;
                             if matches.next().is_some() { anyhow::bail!("several profiles match; the recorded session needs a unique profile"); }

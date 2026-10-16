@@ -29,6 +29,7 @@ fn app() -> App {
     profiles.insert(
         "p".to_string(),
         ProfileCfg {
+            reasoning_effort: None,
             image_input: None,
             base_url: Some("http://127.0.0.1:1/v1".into()),
             model: Some("m".into()),
