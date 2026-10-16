@@ -301,3 +301,111 @@ fn desktop_protocol_never_falls_back_to_a_model_prompt() {
     assert!(error.contains("Desktop protocol requires a desktop command"));
     assert!(!error.contains("no API key"));
 }
+
+#[test]
+fn account_catalog_selects_multiple_models_without_changing_profile_or_signing_in() {
+    let root = std::env::temp_dir().join(format!(
+        "sui-account-catalog-{:016x}",
+        rand::random::<u64>()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let config = "[profiles.account]\nkind = \"chatgpt\"\nmodel = \"\"\n";
+    std::fs::write(root.join("config.toml"), config).unwrap();
+    std::fs::create_dir_all(root.join("chatgpt")).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let credentials = json!({"client_id":"oaiapp_fixture","subject":"subject","access_token":"private-fixture-token","scopes":["chatgpt.tokens.use.direct"],"expires_at":now+3600});
+    std::fs::write(root.join("chatgpt/account.json"), credentials.to_string()).unwrap();
+    let cache = json!({"account":sui::context::sha256_hex(b"oaiapp_fixture:subject"),"fetched_at":now,"items":[
+        {"id":"first-id","name":"First display label","reasoning_levels":[{"effort":"low","description":"Fast"},{"effort":"high","description":"Deep"}],"default_reasoning":"low"},
+        {"id":"second-id","name":"Second display label","reasoning_levels":[{"effort":"medium","description":"Balanced"},{"effort":"xhigh","description":"Deep"},{"effort":"ultra","description":"Delegation"}],"default_reasoning":"medium"}
+    ]});
+    std::fs::write(root.join("chatgpt/account.models.json"), cache.to_string()).unwrap();
+    let start = |extra: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sui"))
+            .args(["--desktop-protocol", "2", "desktop-bridge", "--workspace"])
+            .arg(&workspace)
+            .args(["--profile", "account"])
+            .args(extra)
+            .env("HOME", &root)
+            .env("SUI_HOME", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let first = lines
+            .next()
+            .expect("bridge did not start from saved catalog")
+            .unwrap();
+        let hello: Value = serde_json::from_str(&first).unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        hello
+    };
+    let first = start(&[]);
+    assert_eq!(
+        first["model"], "first-id",
+        "blank account profiles choose the first catalog model"
+    );
+    assert_eq!(first["reasoning_effort"], "low");
+    let second = start(&["--model", "second-id", "--reasoning-effort", "xhigh"]);
+    assert_eq!(second["model"], "second-id");
+    assert_eq!(second["model_name"], "Second display label");
+    assert_eq!(
+        second["reasoning_choices"],
+        json!(["default", "medium", "xhigh"])
+    );
+    assert_eq!(second["reasoning_effort"], "xhigh");
+    assert_eq!(
+        second["reasoning_levels"][2]["effort"], "ultra",
+        "catalog modes are retained without pretending to implement them"
+    );
+    // Supply a completed native history fixture; empty chats are deliberately
+    // not resumable. No account inference is performed by this test.
+    {
+        let dir = root
+            .join(".local/share/sui/runs")
+            .join(second["run_id"].as_str().unwrap());
+        let mut journal = sui::journal::Journal::open_named(&dir, "solo").unwrap();
+        journal.log("turn_start", json!({"run":1}));
+        journal.log("user", json!({"content":"fixture question"}));
+        journal.log(
+            "assistant",
+            json!({"content":"fixture answer","tool_calls":[]}),
+        );
+        journal.log("turn_end", json!({"run":1,"outcome":"returned"}));
+    }
+    let restored = start(&["--resume", second["run_id"].as_str().unwrap()]);
+    assert_eq!(restored["model"], "second-id");
+    assert_eq!(restored["reasoning_effort"], "xhigh");
+    for args in [
+        ["--model", "second-id", "--reasoning-effort", "low"],
+        ["--model", "not-in-account", "--reasoning-effort", "high"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_sui"))
+            .args(["--desktop-protocol", "2", "desktop-bridge", "--workspace"])
+            .arg(&workspace)
+            .args(["--profile", "account"])
+            .args(args)
+            .env("HOME", &root)
+            .env("SUI_HOME", &root)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(root.join("chatgpt/account.json")).unwrap())
+            .unwrap(),
+        credentials
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

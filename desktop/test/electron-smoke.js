@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-desktop-smoke-'));
 app.setPath('userData', tempHome);
 process.env.SUI_HOME = tempHome;
@@ -20,29 +21,30 @@ dialog.showOpenDialog = async (_window, options) => {
 };
 // UI-only ChatGPT fixture: native OAuth/JWT/transport and private IPC are
 // exercised separately; this never opens a real account or spends plan usage.
-let fixtureChatgpt = false;
+let fixtureChatgpt = false, fixtureLogins = 0, fixtureRefreshes = 0;
+const accountModels = [
+  { id: 'account-model-slug', name: 'Account model display name', default_reasoning: 'low', reasoning_levels: [{ effort: 'low', description: 'Fast' }, { effort: 'high', description: 'Deep' }] },
+  { id: 'second-account-model', name: 'Another account model', default_reasoning: 'medium', reasoning_levels: [{ effort: 'medium', description: 'Balanced' }, { effort: 'xhigh', description: 'Deep' }, { effort: 'ultra', description: 'Codex delegation' }] }
+];
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
   if (channel === 'sui:provider' && fixtureChatgpt) {
     const [target, request] = args;
     assert.equal(target.kind, 'local');
     if (request.action === 'login') {
+      fixtureLogins++;
       fs.appendFileSync(path.join(tempHome, 'config.toml'), '\n[profiles.chatgpt]\nkind = "chatgpt"\nmodel = ""\n');
       fs.mkdirSync(path.join(tempHome, 'chatgpt'), { recursive: true });
       fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com', access_token: 'private-smoke-access', refresh_token: 'private-smoke-refresh', scopes: ['chatgpt.tokens.use.direct'], expires_at: Math.floor(Date.now() / 1000) + 3600 }), { mode: 0o600 });
+      fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.models.json'), JSON.stringify({ account: createHash('sha256').update('oaiapp_fixture:fixture-subject').digest('hex'), fetched_at: Math.floor(Date.now() / 1000), items: accountModels }), { mode: 0o600 });
       return { type: 'account', account: { email: 'fixture@example.com', connected: true, sharing: true } };
     }
-    if (request.action === 'models') return { type: 'models', items: [{ id: 'account-model-slug', name: 'Account model display name' }] };
+    if (request.action === 'models') { if (request.refresh) fixtureRefreshes++; return { type: 'models', items: accountModels }; }
     if (request.action === 'logout') {
       fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com' }), { mode: 0o600 });
       return { type: 'account', account: { email: 'fixture@example.com', connected: false, sharing: false }, revocation_confirmed: true };
     }
-    if (request.action === 'select') {
-      assert.equal(request.model, 'account-model-slug');
-      const config = path.join(tempHome, 'config.toml');
-      fs.writeFileSync(config, fs.readFileSync(config, 'utf8').replace('model = ""', 'model = "account-model-slug"'));
-      return { type: 'profile_saved', name: request.name };
-    }
+    if (request.action === 'select') throw new Error('Account model switching must not configure a pinned profile');
   }
   return handler(event, ...args);
 });
@@ -305,30 +307,51 @@ async function run() {
     fixtureChatgpt = true;
     await ui('showProviderSetup(); document.getElementById("model-kind").value = "chatgpt"; document.getElementById("model-kind").dispatchEvent(new Event("change")); document.getElementById("chatgpt-login").click()');
     for (let n = 0; n < 100; n++) {
-      if (await ui('!providerBusy && document.querySelectorAll("#chatgpt-model option").length === 2')) break;
+      if (await ui('!providerBusy && document.getElementById("profile").value === "chatgpt" && !document.getElementById("provider-dialog").open')) break;
       await pause(30);
     }
-    assert.equal(await ui('document.querySelector("#chatgpt-model option:last-child").textContent'), 'Account model display name');
-    assert.equal(await ui('document.querySelector("#chatgpt-model option:last-child").value'), 'account-model-slug', 'display labels never become model IDs');
-    assert.match(await ui('document.getElementById("chatgpt-status").textContent'), /fixture@example.com.*plan usage enabled/);
-    await ui('document.getElementById("chatgpt-model").value = "account-model-slug"; document.getElementById("chatgpt-model").dispatchEvent(new Event("change")); document.getElementById("save-model").click()');
-    for (let n = 0; n < 100; n++) {
-      if (await ui('!providerBusy && document.getElementById("profile").value === "chatgpt"')) break;
-      await pause(30);
-    }
-    assert.equal(await ui('document.getElementById("profile").value'), 'chatgpt');
+    assert.equal(await ui('document.getElementById("profile").value'), 'chatgpt', 'sign-in finishes without a model selection step');
+    assert.equal(await ui('document.getElementById("chatgpt-model")'), null, 'setup does not pin an account to one model');
     await ui('document.getElementById("connect-button").click()');
     for (let n = 0; n < 100; n++) {
       if (await ui('state.hello?.model === "account-model-slug" && !connectionBusy')) break;
       await pause(50);
     }
-    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'account-model-slug');
+    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'Account model display name');
+    assert.equal(await ui('document.getElementById("composer-reasoning").value'), 'low', 'use the account model default');
+    await ui('document.getElementById("choose-model").click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.profiles?.some(p => p.model === "second-account-model")')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('state.profiles.filter(p => p.profile === "chatgpt").length'), 2, 'all models share one account profile');
+    await ui('document.getElementById("refresh-model-catalog").click()');
+    for (let n = 0; n < 100; n++) {
+      if (fixtureRefreshes && await ui('!document.getElementById("refresh-model-catalog").disabled')) break;
+      await pause(30);
+    }
+    assert.equal(fixtureRefreshes, 1, 'refresh requests a fresh account catalog');
+    await ui('document.getElementById("message").value = "Keep account draft"; [...document.querySelectorAll(".model-option")].find(b => b.textContent.includes("Another account model")).click()');
+    for (let n = 0; n < 100; n++) {
+      if (await ui('state.hello?.model === "second-account-model" && !connectionBusy')) break;
+      await pause(30);
+    }
+    assert.equal(await ui('state.hello.model'), 'second-account-model');
+    assert.equal(await ui('document.getElementById("composer-model").textContent'), 'Another account model');
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft');
+    assert.deepEqual(await ui('[...document.getElementById("composer-reasoning").options].filter(o => !o.disabled).map(o => o.value)'), ['default', 'medium', 'xhigh']);
+    assert.equal(await ui('document.querySelector("#composer-reasoning option[value=ultra]").disabled'), true);
+    assert.equal(fixtureLogins, 1, 'switching models reuses the signed-in account');
+    assert.match(fs.readFileSync(path.join(tempHome, 'config.toml'), 'utf8'), /\[profiles.chatgpt\]\nkind = "chatgpt"\nmodel = ""/);
+    if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-account-models.png'), (await win.capturePage()).toPNG());
     assert.equal(await ui('document.getElementById("composer-usage").classList.contains("hidden")'), false, 'ChatGPT usage control is visible beside the model');
     win.setSize(720, 560);
     await pause(150);
     assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'ChatGPT model and usage controls fit the narrow window');
     await ui('showDialog(state.target)');
     await ui('document.getElementById("saved-profile").value = "chatgpt"; document.getElementById("saved-profile").dispatchEvent(new Event("change"))');
+    assert.equal(await ui('document.getElementById("provider-dialog").open'), false, 'choosing a connected account does not require setup');
+    await ui('showProviderSetup(); document.getElementById("model-kind").value = "chatgpt"; document.getElementById("setup-profile").value = "chatgpt"; setupAccount = savedProfiles.find(p => p.name === "chatgpt").account; updateProviderForm()');
     await ui('document.getElementById("chatgpt-logout").click()');
     for (let n = 0; n < 100; n++) {
       if (await ui('!providerBusy && state.hello === null')) break;

@@ -98,3 +98,14 @@ test('old host CLI errors explain how to update instead of exposing a model auth
   });
   await assert.rejects(service.request({ kind: 'ssh', host: 'test' }, { action: 'profiles' }), /Install or update SUI on SSH host/);
 });
+
+test('catalog metadata survives the public boundary without tokens or model instructions', async () => {
+  const { service, requests } = fixture(() => ({ type: 'models', cached: true, fetched_at: 123, warning: 'Using saved catalog', items: [{ id: 'exact-id', name: 'Display label', access_token: 'private-token', base_instructions: 'private-instructions', default_reasoning: 'high', reasoning_levels: [{ effort: 'high', description: 'Deep thinking', private_field: 'private-description' }] }] }));
+  const result = await service.request({ kind: 'local' }, { action: 'models', name: 'chatgpt', refresh: true, access_token: 'private-injection' });
+  assert.equal(requests[0].request.refresh, true);
+  assert.equal(result.cached, true);
+  assert.equal(result.items[0].reasoning_levels[0].effort, 'high');
+  assert.equal(result.items[0].default_reasoning, 'high');
+  assert.ok(!JSON.stringify(result).includes('private-'));
+  assert.ok(!JSON.stringify(requests).includes('private-'));
+});

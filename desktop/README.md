@@ -16,11 +16,14 @@ agent loop.
 - **Starting and following work:** starter cards fill an editable draft without
   sending it. The composer shows the connected model, even in a narrow window.
   Jump to latest returns to the end of a long conversation when you scroll up.
-- **Model picker:** click the model badge above the composer to search profiles
-  configured on the workspace host (local or SSH). The current profile is marked.
-  Selecting another profile starts a new chat and preserves the draft; the previous
-  chat remains in recent chats. Switching is disabled while a turn runs. Use
-  Configure a model to add another profile through the connection screen.
+- **Model picker:** click the model badge above the composer to search all
+  visible models from connected ChatGPT accounts and the host's configured
+  profiles. Each account keeps a private 15-minute catalog cache; **Refresh models**
+  reloads it. Reasoning levels and defaults follow each account model's metadata.
+  Unsupported catalog modes are disabled. Switching models or reasoning starts
+  a new chat and preserves the draft; previous chats remain in recent chats.
+  Switching is disabled while a turn runs. Saved chats restore their selected
+  model without changing the account profile or signing in again.
 - **Themes:** system, light, or dark, from Appearance & companion. Fonts are
   bundled (Inter, SIL OFL); Thai and other scripts use your system fonts.
 - **Window chrome:** macOS keeps its traffic lights in the title row, Windows
@@ -127,8 +130,8 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
    checksum-checking `install.sh` over SSH on that host.
 2. Choose a saved model profile from the host's dropdown, or choose **Add a
    provider**. For **ChatGPT**, click **Continue with ChatGPT**, approve ChatGPT
-   plan usage in your system browser, choose an available model, then click
-   **Use this model**. No API key is needed. **OpenAI API** uses an API key and
+   plan usage in your system browser, then open the workspace. Choose or switch
+   account models beside the message box; no repeat sign-in or API key is needed. **OpenAI API** uses an API key and
    its preset Responses endpoint; **Ollama** uses a local endpoint without a key.
    Other compatible Chat Completions and Responses endpoints can be entered too.
 3. Send a task. The app streams agent output and shows each tool approval with
@@ -155,7 +158,10 @@ The app stores project locations and profile names locally, never API keys.
 
 ChatGPT setup follows OpenAI's [Sign in with ChatGPT guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt).
 Plan access depends on account eligibility and the permissions actually granted.
-The model list uses the account's current catalog: display names are labels,
+The model list uses the account's catalog, cached privately on the workspace
+host with its reasoning metadata. Explicit refresh bypasses the cache. Cached
+choices from an expired catalog are marked when a network/server refresh fails;
+authentication failures never fall back to stale access. Display names are labels,
 and only the exact model slug is sent to the public Responses API. This is a
 separate `kind = "chatgpt"` transport; existing `codex-oauth` profiles and API-key
 profiles keep their existing behavior. ChatGPT plan cost remains unknown.

@@ -19,6 +19,8 @@ enum Sub {
         resume: Option<String>,
         #[arg(long, value_enum)]
         reasoning_effort: Option<sui::reasoning::Effort>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Save a desktop model profile from one private JSON line on stdin
     DesktopSetup,
@@ -71,7 +73,7 @@ enum Sub {
 )]
 struct Cli {
     /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=1))]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=2))]
     desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -200,10 +202,17 @@ async fn main() -> Result<()> {
         profile,
         resume,
         reasoning_effort,
+        model,
     }) = &cli.sub
     {
-        return sui::desktop_bridge::run(workspace, profile, resume.as_deref(), *reasoning_effort)
-            .await;
+        return sui::desktop_bridge::run(
+            workspace,
+            profile,
+            resume.as_deref(),
+            *reasoning_effort,
+            model.as_deref(),
+        )
+        .await;
     }
     if let Some(Sub::DesktopSetup) = &cli.sub {
         return sui::desktop_bridge::setup();
@@ -357,6 +366,9 @@ async fn main() -> Result<()> {
         cfg.prompt_cache_key = p.prompt_cache_key.or(cfg.prompt_cache_key);
     }
     if let Some(saved) = &saved {
+        if cfg.transport == config::Transport::Chatgpt {
+            cfg.model = saved.header.model.clone();
+        }
         if saved.header.reasoning_effort.is_some() {
             cfg.reasoning_effort = saved.header.reasoning_effort;
         }

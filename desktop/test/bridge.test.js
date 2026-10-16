@@ -45,3 +45,11 @@ test('reasoning uses argv for new chats and native stored settings for resume', 
   assert.ok(!bridgeSpec({ isPackaged: false }, target, 'saved').args.includes('--reasoning-effort'));
   assert.throws(() => bridgeSpec({ isPackaged: false }, { ...target, reasoning_effort: 'medium; touch /tmp/x' }));
 });
+
+test('account model selection is independent of its profile and quoted on SSH', () => {
+  const target = { kind: 'local', workspace: '/tmp/work', profile: 'chatgpt', model: "model'$(false)", reasoning_effort: 'high' };
+  const args = bridgeSpec({ isPackaged: false }, target).args;
+  assert.deepEqual(args.slice(-4), ['--reasoning-effort', 'high', '--model', "model'$(false)"]);
+  assert.ok(!bridgeSpec({ isPackaged: false }, target, 'saved').args.includes('--model'));
+  assert.match(remoteCommand('/tmp/work', 'chatgpt', null, 'high', target.model), /--model 'model'\\''\$\(false\)'/);
+});

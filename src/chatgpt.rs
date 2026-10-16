@@ -83,6 +83,9 @@ fn path(name: &str) -> Result<PathBuf> {
     Ok(root()?.join(format!("{name}.json")))
 }
 fn read_json(path: &std::path::Path) -> Result<Value> {
+    read_json_bounded(path, 65_536)
+}
+fn read_json_bounded(path: &std::path::Path, limit: usize) -> Result<Value> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -97,9 +100,9 @@ fn read_json(path: &std::path::Path) -> Result<Value> {
         bail!("ChatGPT account store must be a regular file");
     }
     let mut bytes = Vec::new();
-    file.take(65_537).read_to_end(&mut bytes)?;
-    if bytes.len() > 65_536 {
-        bail!("ChatGPT account store exceeds 64 KiB");
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        bail!("ChatGPT store exceeds its byte limit");
     }
     serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid ChatGPT account store; sign in again"))
@@ -113,7 +116,21 @@ fn save(name: &str, account: &Account) -> Result<()> {
     if bytes.len() > 65_536 {
         bail!("ChatGPT account store exceeds 64 KiB");
     }
-    crate::auth::write_secret(&path(name)?, &bytes)
+    let previous = load(name).ok();
+    // Persist revocation/identity changes even if cache cleanup later fails.
+    crate::auth::write_secret(&path(name)?, &bytes)?;
+    if !account.sharing()
+        || previous
+            .as_ref()
+            .is_none_or(|old| catalog_identity(old) != catalog_identity(account))
+    {
+        match std::fs::remove_file(catalog_path(name)?) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clear previous ChatGPT model catalog"),
+        }
+    }
+    Ok(())
 }
 async fn lock(name: &str) -> Result<crate::auth::StoreLock> {
     crate::auth::StoreLock::acquire_path(&path(name)?.with_extension("lock")).await
@@ -636,45 +653,217 @@ pub(crate) async fn logout(name: &str) -> Result<Value> {
     save(name, &account)?;
     Ok(json!({"type":"account","account":account.summary(),"revocation_confirmed":confirmed}))
 }
-pub(crate) async fn models(name: &str) -> Result<Vec<(String, String)>> {
+// Cache only display/capability metadata, never model instructions or tokens.
+// A profile is an account connection; its model is merely a legacy default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ReasoningLevel {
+    pub effort: String,
+    pub description: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct Model {
+    pub id: String,
+    pub name: String,
+    pub reasoning_levels: Option<Vec<ReasoningLevel>>,
+    pub default_reasoning: Option<String>,
+}
+impl Model {
+    pub fn reasoning_choices(
+        &self,
+        profile: &crate::config::Profile,
+    ) -> Vec<crate::reasoning::Effort> {
+        let Some(levels) = &self.reasoning_levels else {
+            return crate::reasoning::choices(profile);
+        };
+        let mut choices = vec![crate::reasoning::Effort::Default];
+        for level in levels {
+            if let Ok(effort) =
+                serde_json::from_value::<crate::reasoning::Effort>(json!(level.effort))
+            {
+                if !choices.contains(&effort) {
+                    choices.push(effort);
+                }
+            }
+        }
+        choices
+    }
+}
+#[derive(Serialize, Deserialize)]
+struct ModelCache {
+    account: String,
+    fetched_at: u64,
+    items: Vec<Model>,
+}
+pub(crate) struct Catalog {
+    pub items: Vec<Model>,
+    pub fetched_at: u64,
+    pub cached: bool,
+    pub warning: Option<String>,
+}
+const CATALOG_TTL: u64 = 15 * 60;
+fn catalog_path(name: &str) -> Result<PathBuf> {
+    Ok(path(name)?.with_extension("models.json"))
+}
+fn catalog_identity(account: &Account) -> String {
+    crate::context::sha256_hex(format!("{}:{}", account.client_id, account.subject).as_bytes())
+}
+fn read_catalog(name: &str, account: &Account) -> Option<ModelCache> {
+    if !account.sharing() {
+        return None;
+    }
+    // Use the same no-follow, bounded reads as credential records. Large model
+    // catalogs have a separate explicit byte limit.
+    let value = read_json_bounded(&catalog_path(name).ok()?, 1024 * 1024).ok()?;
+    let cache: ModelCache = serde_json::from_value(value).ok()?;
+    (cache.account == catalog_identity(account)
+        && cache.items.len() <= 1000
+        && cache.fetched_at <= crate::auth::now())
+    .then_some(cache)
+}
+pub(crate) async fn catalog(name: &str, refresh: bool) -> Result<Catalog> {
+    catalog_at(name, refresh, &format!("{RESOURCE}/models")).await
+}
+async fn catalog_at(name: &str, refresh: bool, endpoint: &str) -> Result<Catalog> {
+    let account = load(name).context("Connect your ChatGPT account in provider setup")?;
+    if !account.sharing() {
+        bail!("Enable ChatGPT plan usage by reconnecting this account");
+    }
+    let identity = catalog_identity(&account);
+    let cache = read_catalog(name, &account);
+    if !refresh {
+        if let Some(cache) = &cache {
+            if crate::auth::now().saturating_sub(cache.fetched_at) < CATALOG_TTL {
+                return Ok(Catalog {
+                    items: cache.items.clone(),
+                    fetched_at: cache.fetched_at,
+                    cached: true,
+                    warning: None,
+                });
+            }
+        }
+    }
     let access = access(name).await?;
     let client = crate::auth::client()?;
-    let value = json_response(
-        client
-            .get(format!("{RESOURCE}/models"))
-            .bearer_auth(access)
-            .send()
-            .await
-            .map_err(crate::provider::failure::Failure::transport)?,
-    )
-    .await?;
-    parse_models(&value)
+    let response = client.get(endpoint).bearer_auth(access).send().await;
+    // Connectivity/rate-limit/server failures may use this account's last
+    // catalog, visibly marked stale. Auth failures never reuse stale access.
+    let retryable = response.as_ref().map_or(true, |r| {
+        r.status().as_u16() == 429 || r.status().is_server_error()
+    });
+    let result = match response {
+        Ok(response) => match json_response(response).await {
+            Ok(value) => parse_models(&value),
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(crate::provider::failure::Failure::transport(error).into()),
+    };
+    let _lock = lock(name).await?;
+    let current = load(name)?;
+    if !current.sharing() || catalog_identity(&current) != identity {
+        bail!("ChatGPT account changed while loading models; refresh the model picker");
+    }
+    let items = match result {
+        Ok(items) => items,
+        Err(error) => {
+            if retryable {
+                if let Some(cache) = cache {
+                    return Ok(Catalog { items: cache.items, fetched_at: cache.fetched_at, cached: true,
+                        warning: Some("Could not refresh models. Showing this account's previously saved catalog; retry Refresh models.".into()) });
+                }
+            }
+            return Err(error);
+        }
+    };
+    let fetched_at = crate::auth::now();
+    let bytes = serde_json::to_vec(&ModelCache {
+        account: identity,
+        fetched_at,
+        items: items.clone(),
+    })?;
+    if bytes.len() > 1024 * 1024 {
+        bail!("ChatGPT model catalog exceeds 1 MiB");
+    }
+    crate::auth::write_secret(&catalog_path(name)?, &bytes)?;
+    Ok(Catalog {
+        items,
+        fetched_at,
+        cached: false,
+        warning: None,
+    })
 }
-fn parse_models(value: &Value) -> Result<Vec<(String, String)>> {
+pub(crate) fn cached_default_model(name: &str) -> Option<String> {
+    let account = load(name).ok()?;
+    read_catalog(name, &account)?
+        .items
+        .first()
+        .map(|m| m.id.clone())
+}
+pub(crate) async fn models(name: &str) -> Result<Vec<(String, String)>> {
+    Ok(catalog(name, false)
+        .await?
+        .items
+        .into_iter()
+        .map(|m| (m.id, m.name))
+        .collect())
+}
+fn parse_models(value: &Value) -> Result<Vec<Model>> {
     let rows = value["models"]
         .as_array()
         .context("ChatGPT model catalog is missing")?;
     if rows.len() > 1000 {
         bail!("ChatGPT model catalog exceeds 1000 entries");
     }
-    Ok(rows
-        .iter()
-        .filter(|row| row["visibility"] == "list")
-        .filter_map(|row| {
-            let id = row["slug"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 200)?;
-            Some((
-                id.into(),
-                row["display_name"]
+    let mut models = Vec::new();
+    for row in rows.iter().filter(|row| row["visibility"] == "list") {
+        let Some(id) = row["slug"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 200)
+        else {
+            continue;
+        };
+        if models.iter().any(|m: &Model| m.id == id) {
+            continue;
+        }
+        let reasoning_levels = row["supported_reasoning_levels"].as_array().map(|levels| {
+            let mut options = Vec::new();
+            for level in levels.iter().take(32) {
+                let Some(effort) = level["effort"]
                     .as_str()
-                    .unwrap_or(id)
-                    .chars()
-                    .take(200)
-                    .collect(),
-            ))
-        })
-        .collect())
+                    .filter(|s| !s.is_empty() && s.len() <= 32)
+                else {
+                    continue;
+                };
+                if options.iter().any(|l: &ReasoningLevel| l.effort == effort) {
+                    continue;
+                }
+                options.push(ReasoningLevel {
+                    effort: effort.into(),
+                    description: level["description"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect(),
+                });
+            }
+            options
+        });
+        models.push(Model {
+            id: id.into(),
+            name: row["display_name"]
+                .as_str()
+                .unwrap_or(id)
+                .chars()
+                .take(200)
+                .collect(),
+            reasoning_levels,
+            default_reasoning: row["default_reasoning_level"]
+                .as_str()
+                .filter(|s| s.len() <= 32)
+                .map(String::from),
+        });
+    }
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -855,11 +1044,98 @@ mod tests {
         assert_eq!(
             models,
             vec![
-                ("second".into(), "Second model".into()),
-                ("first".into(), "First model".into())
+                Model {
+                    id: "second".into(),
+                    name: "Second model".into(),
+                    reasoning_levels: None,
+                    default_reasoning: None
+                },
+                Model {
+                    id: "first".into(),
+                    name: "First model".into(),
+                    reasoning_levels: None,
+                    default_reasoning: None
+                }
             ]
         );
         assert!(parse_models(&json!({"data":[]})).is_err());
+    }
+    #[test]
+    fn catalog_cache_refresh_metadata_and_account_isolation() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _home = crate::test_http::AuthHome::new();
+        let catalog_body = |id: &str| {
+            json!({"models":[{"slug":id,"display_name":"Account model","visibility":"list",
+            "base_instructions":"private-model-instructions", "default_reasoning_level":"high",
+            "supported_reasoning_levels":[{"effort":"low","description":"Fast"},{"effort":"high","description":"Deep"},{"effort":"ultra","description":"Delegation mode"}]}]}).to_string()
+        };
+        let (base, requests, task) = crate::test_http::server(vec![
+            (200, "application/json", catalog_body("first")),
+            (200, "application/json", catalog_body("refreshed")),
+            (200, "application/json", catalog_body("expired")),
+            (503, "application/json", "{}".into()),
+            (401, "application/json", "private-error-body".into()),
+        ]);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut account = account();
+            save("work", &account).unwrap();
+            let first = catalog_at("work", false, &base).await.unwrap();
+            assert!(!first.cached);
+            assert_eq!(first.items[0].id, "first");
+            assert_eq!(first.items[0].default_reasoning.as_deref(), Some("high"));
+            assert_eq!(first.items[0].reasoning_levels.as_ref().unwrap().len(), 3);
+            let cached = catalog_at("work", false, &base).await.unwrap();
+            assert!(cached.cached);
+            assert_eq!(requests.lock().unwrap().len(), 1, "fresh cache avoids HTTP");
+            let refreshed = catalog_at("work", true, &base).await.unwrap();
+            assert_eq!(refreshed.items[0].id, "refreshed");
+            let mut stored = read_catalog("work", &account).unwrap();
+            stored.fetched_at -= CATALOG_TTL + 1;
+            crate::auth::write_secret(
+                &catalog_path("work").unwrap(),
+                &serde_json::to_vec(&stored).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                catalog_at("work", false, &base).await.unwrap().items[0].id,
+                "expired"
+            );
+            let stale = catalog_at("work", true, &base).await.unwrap();
+            assert!(stale.cached && stale.warning.is_some());
+            assert_eq!(stale.items[0].id, "expired");
+            assert!(
+                catalog_at("work", true, &base).await.is_err(),
+                "401 cannot fall back to cache"
+            );
+            let bytes = std::fs::read(catalog_path("work").unwrap()).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(catalog_path("work").unwrap())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            // Refreshing credentials for the same account preserves metadata.
+            account.access_token = "rotated-private-access".into();
+            save("work", &account).unwrap();
+            assert!(read_catalog("work", &account).is_some());
+            // The same profile name used by another account cannot see it.
+            account.subject = "another-subject".into();
+            assert!(read_catalog("work", &account).is_none());
+            save("work", &account).unwrap();
+            assert!(!catalog_path("work").unwrap().exists());
+            account.clear_tokens();
+            assert!(read_catalog("work", &account).is_none());
+            save("work", &account).unwrap();
+        });
+        task.join().unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 5);
     }
     #[test]
     fn refresh_rotates_tokens_as_one_record_and_never_sends_the_dynamic_client_id() {

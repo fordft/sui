@@ -11,6 +11,8 @@ enum Request {
     Profiles,
     Models {
         name: String,
+        #[serde(default)]
+        refresh: bool,
     },
     Login {
         name: String,
@@ -57,23 +59,20 @@ pub async fn run() -> Result<()> {
                 json!({"name":name,"model":p.model,"kind":p.kind,"account":account})
             }).collect::<Vec<_>>()})
         }
-        Request::Models { name } => {
+        Request::Models { name, refresh } => {
             let profile = crate::config::resolve_profile(&name, None)?;
-            let models: Vec<(String, String)> =
-                if profile.transport == crate::config::Transport::Chatgpt {
-                    crate::chatgpt::models(&name).await?
-                } else {
-                    crate::provider::list_models_with_transport(
-                        &profile.base_url,
-                        profile.api_key.as_deref(),
-                        profile.transport,
-                    )
-                    .await?
-                    .into_iter()
-                    .map(|m| (m.id.clone(), m.id))
-                    .collect()
-                };
-            json!({"type":"models","truncated":models.len() > 200,"items":models.into_iter().take(200).map(|(id,name)| json!({"id":id,"name":name})).collect::<Vec<_>>()})
+            if profile.transport == crate::config::Transport::Chatgpt {
+                let catalog = crate::chatgpt::catalog(&name, refresh).await?;
+                json!({"type":"models","truncated":catalog.items.len() > 200,"items":catalog.items.into_iter().take(200).collect::<Vec<_>>(),"cached":catalog.cached,"fetched_at":catalog.fetched_at,"warning":catalog.warning})
+            } else {
+                let models = crate::provider::list_models_with_transport(
+                    &profile.base_url,
+                    profile.api_key.as_deref(),
+                    profile.transport,
+                )
+                .await?;
+                json!({"type":"models","truncated":models.len()>200,"items":models.into_iter().take(200).map(|m|json!({"id":m.id,"name":m.id})).collect::<Vec<_>>()})
+            }
         }
         Request::Login {
             name,
@@ -86,7 +85,7 @@ pub async fn run() -> Result<()> {
             emit(&json!({"type":"authorize","url":login.url}))?;
             let result = login.finish(transfer).await?;
             if !transfer {
-                // An empty model is deliberate until account-specific discovery.
+                // Model selection belongs to the composer, independent of sign-in.
                 let existing = crate::config::profiles(None)?
                     .get(&name)
                     .and_then(|p| p.model.clone())

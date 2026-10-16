@@ -77,7 +77,7 @@ function startBridge(item, resume) {
   let buffer = '';
   let settled = false;
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => fail(new Error('SUI did not start within 20 seconds.')), 20000);
+    const timeout = setTimeout(() => fail(new Error('SUI did not start within 60 seconds.')), 60000);
     function fail(error) {
       if (settled) return;
       settled = true;
@@ -108,7 +108,7 @@ function startBridge(item, resume) {
       }
     });
     child.on('close', code => {
-      if (!settled) fail(new Error(stderr.trim() || `SUI exited with code ${code}.`));
+      if (!settled) fail(new Error(stderr.includes('--desktop-protocol') ? 'Update SUI on this host to use the current model picker.' : stderr.trim() || `SUI exited with code ${code}.`));
       else if (bridge === child) { activeRun = null; bridge = undefined; emit({ type: 'disconnected', message: stderr.trim() || `SUI exited with code ${code}.` }); }
     });
   });
@@ -143,7 +143,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 1 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 1 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 2 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 2 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;

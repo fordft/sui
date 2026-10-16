@@ -394,6 +394,15 @@ pub fn profiles(config_path: Option<&Path>) -> Result<BTreeMap<String, ProfileCf
         }
     }
     inject_detected_profiles(&mut out);
+    // Account profiles need no pinned model. The saved catalog supplies a
+    // default for existing CLI/TUI callers without mutating the TOML file.
+    for (name, profile) in &mut out {
+        if profile.kind.as_deref() == Some("chatgpt")
+            && profile.model.as_deref().is_none_or(str::is_empty)
+        {
+            profile.model = crate::chatgpt::cached_default_model(name);
+        }
+    }
     Ok(out)
 }
 

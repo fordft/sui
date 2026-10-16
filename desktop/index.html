@@ -185,13 +185,14 @@
 
   <dialog id="model-dialog" class="dialog" aria-labelledby="model-title" aria-describedby="model-help">
     <header class="dlg-head">
-      <div class="dlg-titles"><h2 id="model-title">Change model</h2><p id="model-help">Choose a profile on this project's host. Switching starts a new chat; this chat stays in recent chats.</p></div>
+      <div class="dlg-titles"><h2 id="model-title">Change model</h2><p id="model-help">Choose from your connected accounts and model profiles. Switching starts a new chat; this chat stays in recent chats.</p></div>
       <button type="button" id="close-model-picker" class="icon-btn" aria-label="Close model picker"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
     </header>
     <div class="dlg-body">
       <label class="field"><span>Find a model or profile</span><input id="model-filter" type="search" autocomplete="off" placeholder="Search models…"></label>
       <p id="model-picker-status" class="field-help" role="status"></p>
-      <div id="model-options" class="model-options" aria-label="Model profiles"></div>
+      <button type="button" id="refresh-model-catalog" class="link-btn">Refresh models</button>
+      <div id="model-options" class="model-options" aria-label="Available models"></div>
     </div>
     <footer class="dlg-foot"><button type="button" id="configure-model" class="btn btn-soft">Configure a model…</button></footer>
   </dialog>
@@ -263,7 +264,7 @@
             <button type="button" id="chatgpt-login" class="btn btn-soft">Continue with ChatGPT</button>
             <button type="button" id="cancel-sign-in" class="link-btn hidden">Cancel sign-in</button>
             <p id="chatgpt-status" class="field-help" role="status"></p>
-            <label class="field"><span>Model available to your account</span><select id="chatgpt-model"><option value="">Sign in to load models…</option></select></label>
+            <p class="field-help">Sign in once. All account models are available from the model picker beside the message box.</p>
             <div class="provider-actions"><button type="button" id="reload-chatgpt-models" class="link-btn">Refresh models</button><button type="button" id="chatgpt-usage" class="link-btn">Manage usage</button><button type="button" id="chatgpt-logout" class="link-btn hidden">Sign out</button></div>
           </div>
           <div id="api-setup" class="provider-fields hidden">

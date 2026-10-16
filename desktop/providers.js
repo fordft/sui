@@ -79,14 +79,14 @@ function createProviders({ spawn, openExternal }) {
         return publicResult(result);
       } finally { if (login === controller) login = undefined; }
     }
-    return publicResult(await call(target, { action, name, ...(action === 'select' ? { model: String(input.model || '') } : {}) }));
+    return publicResult(await call(target, { action, name, ...(action === 'models' ? { refresh: input.refresh === true } : {}), ...(action === 'select' ? { model: String(input.model || '') } : {}) }));
   }
   return { request, cancel };
 }
 
 function publicResult(result) {
   if (result.type === 'profiles') return { type: 'profiles', truncated: !!result.truncated, items: (result.items || []).slice(0, 200).map(p => ({ name: p.name, model: p.model, kind: p.kind, account: p.account ? accountSummary(p.account) : null })) };
-  if (result.type === 'models') return { type: 'models', truncated: !!result.truncated, items: (result.items || []).slice(0, 200).map(m => ({ id: m.id, name: m.name })) };
+  if (result.type === 'models') return { type: 'models', truncated: !!result.truncated, cached: !!result.cached, fetched_at: Number.isFinite(result.fetched_at) ? result.fetched_at : null, warning: typeof result.warning === 'string' ? result.warning.slice(0, 1000) : null, items: (result.items || []).slice(0, 200).map(m => ({ id: String(m.id || '').slice(0, 200), name: String(m.name || m.id || '').slice(0, 200), default_reasoning: typeof m.default_reasoning === 'string' ? m.default_reasoning.slice(0, 32) : null, reasoning_levels: Array.isArray(m.reasoning_levels) ? m.reasoning_levels.slice(0, 32).map(l => ({ effort: String(l.effort || '').slice(0, 32), description: String(l.description || '').slice(0, 200) })) : null })) };
   if (result.type === 'account') return { type: 'account', account: accountSummary(result.account), revocation_confirmed: result.revocation_confirmed };
   if (result.type === 'profile_saved') return { type: 'profile_saved', name: result.name };
   throw new Error('Unexpected provider result.');

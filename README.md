@@ -10,7 +10,7 @@ ever covering it. The Rust agent runs on the machine holding the workspace;
 remote previews use SSH port forwarding. The app can install SUI on an SSH
 host and configure providers from its connection screen. Choose **Add a provider →
 ChatGPT → Continue with ChatGPT** to connect an eligible ChatGPT plan without an
-API key, then select an account model. OpenAI API, Ollama, and compatible APIs
+API key. Sign in once, then choose any account model beside the message box. OpenAI API, Ollama, and compatible APIs
 have separate setup options. Choose local folders
 with the system picker, or select an alias from `~/.ssh/config` and browse
 folders on the SSH host. Recent workspaces are remembered per host. See
@@ -18,13 +18,21 @@ folders on the SSH host. Recent workspaces are remembered per host. See
 and the current notarization limitation.
 The terminal UI remains available.
 
-Click the model badge above the desktop composer to search profiles configured
-on the workspace host. Selecting another profile starts a new chat; the previous
-chat remains in recent chats. Model switching is available between turns. The adjacent reasoning selector uses
-the supported levels for recognized models; changing it starts a new chat and
-preserves your draft. Saved chats retain their reasoning level. The mode selector
-switches between **Ask before changes** and **Auto edits** for the current chat.
-Commands, web access, and browser actions retain independent approval.
+Click the model badge above the desktop composer to search all visible models
+from each connected ChatGPT account, alongside profiles configured on the host.
+Sign-in does not require selecting or pinning a model. Sui stores the account
+catalog and reasoning metadata privately on the workspace host for 15 minutes;
+**Refresh models** fetches it again. Account changes invalidate the saved catalog,
+and a failed refresh shows an explicit warning when using older cached choices.
+
+Model switching is available between turns. Selecting a different model or
+reasoning level starts a new chat, preserves your draft, and keeps the previous
+chat in recent chats. Saved chats retain their model and reasoning level.
+ChatGPT reasoning choices and defaults come from the selected model's catalog;
+unsupported catalog modes appear disabled. Other providers use known model
+capabilities. The mode selector switches between **Ask before changes** and
+**Auto edits** for the current chat. Commands, web access, and browser actions
+retain independent approval.
 
 If an SSH host reports an older CLI, choose **Install or update SUI on SSH host**
 and retry. Desktop checks compatibility before invoking provider commands.

@@ -94,10 +94,12 @@ bash_timeout_max_ms = 600000
 
 # Public Sign in with ChatGPT: created by Desktop → Add a provider → ChatGPT.
 # The runtime stores its issued registration and tokens privately, not in TOML.
-# Choose the exact account-specific model slug in setup; no API key/base_url.
+# No model selection at sign-in. Desktop loads the account catalog and lets
+# you switch models in the composer; no API key/base_url.
 # [profiles.chatgpt]
 # kind = "chatgpt"
-# model = "your-account-model-slug"
+# model = "" # optional legacy default; otherwise use the saved catalog
+# reasoning_effort = "medium" # optional; Desktop uses model catalog metadata
 # Multiple named ChatGPT profiles keep their registrations separate.
 #
 # Legacy Codex-sign-in profile: uses your `codex login` session (or

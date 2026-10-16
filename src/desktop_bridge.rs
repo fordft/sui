@@ -245,6 +245,7 @@ pub async fn run(
     profile: &str,
     resume: Option<&str>,
     reasoning_effort: Option<crate::reasoning::Effort>,
+    model_override: Option<&str>,
 ) -> Result<()> {
     let workspace = workspace
         .canonicalize()
@@ -253,29 +254,87 @@ pub async fn run(
         bail!("workspace is not a directory");
     }
     let mut prof = crate::config::resolve_profile(profile, None)?;
-    let reasoning_choices = crate::reasoning::choices(&prof);
-    if let Some(effort) = reasoning_effort {
-        if !reasoning_choices.contains(&effort) {
-            bail!("choose a reasoning level supported by this model and transport");
-        }
-        prof.reasoning_effort = Some(effort);
-    }
-    let model = prof.model.clone();
     let chatgpt = prof.transport == crate::config::Transport::Chatgpt;
-    if model.trim().is_empty() {
-        bail!("choose a model in provider setup before connecting");
-    }
     if chatgpt && !crate::chatgpt::connected(profile) {
         bail!("connect this ChatGPT account and enable plan usage in provider setup");
     }
     let saved = resume
         .map(|id| crate::session::SavedSession::load(&crate::session::runs_root(), id, &workspace))
         .transpose()?;
-    if reasoning_effort.is_none() {
-        if let Some(effort) = saved.as_ref().and_then(|s| s.header.reasoning_effort) {
-            prof.reasoning_effort = Some(effort);
+    let catalog = if chatgpt {
+        Some(crate::chatgpt::catalog(profile, false).await?)
+    } else {
+        None
+    };
+    let selected_model = model_override.or_else(|| {
+        saved
+            .as_ref()
+            .filter(|_| chatgpt)
+            .map(|s| s.header.model.as_str())
+    });
+    if let Some(selected) = selected_model {
+        if selected != prof.model {
+            prof.reasoning_effort = None;
+        }
+        if !chatgpt && selected != prof.model {
+            bail!("this provider uses the model configured in its profile");
+        }
+        prof.model = selected.into();
+    }
+    let catalog_model = if let Some(catalog) = &catalog {
+        let chosen = catalog
+            .items
+            .iter()
+            .find(|m| m.id == prof.model)
+            .or_else(|| {
+                if selected_model.is_none() {
+                    catalog.items.first()
+                } else {
+                    None
+                }
+            })
+            .context(
+                "choose a model available to this ChatGPT account; refresh models in the composer",
+            )?;
+        if chosen.id != prof.model {
+            prof.reasoning_effort = None;
+        }
+        prof.model = chosen.id.clone();
+        Some(chosen)
+    } else {
+        None
+    };
+    let model = prof.model.clone();
+    if model.trim().is_empty() {
+        bail!("choose a model in provider setup before connecting");
+    }
+    let model_name = catalog_model.map(|m| m.name.as_str()).unwrap_or(&model);
+    let reasoning_choices = catalog_model
+        .map(|m| m.reasoning_choices(&prof))
+        .unwrap_or_else(|| crate::reasoning::choices(&prof));
+    let reasoning_levels = catalog_model.and_then(|m| m.reasoning_levels.as_ref());
+    let default_reasoning = catalog_model
+        .and_then(|m| m.default_reasoning.as_ref())
+        .and_then(|effort| serde_json::from_value::<crate::reasoning::Effort>(json!(effort)).ok())
+        .filter(|e| reasoning_choices.contains(e));
+    let requested = reasoning_effort.or(match &saved {
+        Some(saved) => saved.header.reasoning_effort,
+        None => prof.reasoning_effort,
+    });
+    if let Some(effort) = requested {
+        if !reasoning_choices.contains(&effort) {
+            bail!("choose a reasoning level supported by this model and transport");
         }
     }
+    // Honor the account catalog's model-specific default, when it publishes one.
+    prof.reasoning_effort = if saved.is_some() && reasoning_effort.is_none() {
+        requested
+    } else {
+        match requested {
+            None | Some(crate::reasoning::Effort::Default) => default_reasoning.or(requested),
+            Some(effort) => Some(effort),
+        }
+    };
     let reasoning_effort = prof.reasoning_effort.unwrap_or(
         if prof.transport == crate::config::Transport::CodexOauth {
             crate::reasoning::Effort::High
@@ -360,7 +419,7 @@ pub async fn run(
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"approval":"ask","kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"approval":"ask","kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
     )?;
     let mut pending: std::collections::HashMap<u64, mpsc::UnboundedSender<GateChoice>> =
         std::collections::HashMap::new();

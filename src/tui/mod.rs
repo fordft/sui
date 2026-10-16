@@ -518,6 +518,7 @@ pub async fn run_with_resume(
                                 Ok(data) => {
                                     let (saved, profile, dir) = *data;
                                     if app.workspace != saved.header.workspace || resolve_to_profile(&app, &profile.name).map(|mut current| {
+                                        if current.transport == config::Transport::Chatgpt { current.model = saved.header.model.clone(); }
                                         if saved.header.reasoning_effort.is_some() { current.reasoning_effort = saved.header.reasoning_effort; }
                                         solo_signature(&current)
                                     }) != Some(solo_signature(&profile)) {
@@ -527,7 +528,10 @@ pub async fn run_with_resume(
                                     }
                                     match start_solo(profile.clone(), app.workspace.clone(), dir.clone(), ev_tx.clone(), app.cancel.clone(), app.stop_flag.clone(), app.auto.clone(), app.web.clone(), Some(&saved)) {
                                         Ok(new_solo) => {
-                                            if let Some(p) = app.profiles.get_mut(&profile.name) { p.reasoning_effort = profile.reasoning_effort; }
+                                            if let Some(p) = app.profiles.get_mut(&profile.name) {
+                                                p.reasoning_effort = profile.reasoning_effort;
+                                                if profile.transport == config::Transport::Chatgpt { p.model = Some(profile.model.clone()); }
+                                            }
                                             app.restore_saved(&saved, &profile.name, dir.clone());
                                             solo = Some(new_solo);
                                             jdir = dir;
@@ -664,6 +668,7 @@ pub async fn run_with_resume(
                         let result = tokio::task::spawn_blocking(move || -> Result<_> {
                             let saved = crate::session::SavedSession::load(&crate::session::runs_root(), &id, &workspace)?;
                             let mut matches = profiles.into_iter().map(|mut p| {
+                                if p.transport == config::Transport::Chatgpt { p.model = saved.header.model.clone(); }
                                 if saved.header.reasoning_effort.is_some() { p.reasoning_effort = saved.header.reasoning_effort; }
                                 p
                             }).filter(|p| saved.header.profile.as_ref().is_none_or(|name| name == &p.name)

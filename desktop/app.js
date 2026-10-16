@@ -262,7 +262,7 @@ function setWorkspace(directory) {
 function updateConnectForm() {
   const item = formTarget();
   const browsing = !$('folder-browser').classList.contains('hidden');
-  $('connect-button').disabled = connectionBusy || providerBusy || savedProfiles.some(p => p.name === item.profile && p.kind === 'chatgpt' && (!p.model || !p.account?.sharing)) || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
+  $('connect-button').disabled = connectionBusy || providerBusy || savedProfiles.some(p => p.name === item.profile && p.kind === 'chatgpt' && !p.account?.sharing) || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
   $('browse-workspace').disabled = connectionBusy || browsing || (item.kind === 'ssh' && !item.host);
 }
 
@@ -485,8 +485,9 @@ function updateProviderForm() {
   $('cancel-sign-in').classList.toggle('hidden', !providerBusy);
   $('model-kind').disabled = providerBusy;
   $('setup-profile').disabled = providerBusy;
+  $('save-model').textContent = chatgpt ? 'Use this account' : 'Use this model';
   $('save-model').disabled = !available || !validName || (chatgpt
-    ? !setupAccount?.sharing || !$('chatgpt-model').value
+    ? !setupAccount?.sharing
     : !$('model-id').value.trim() || !$('model-url').value.trim() || ($('model-kind').value === 'openai-responses' && !$('model-key').value.trim()));
   updateConnectForm();
 }
@@ -498,7 +499,6 @@ function resetProvider() {
   setupAccount = null;
   $('model-key').value = '';
   $('chatgpt-status').textContent = '';
-  $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', ''));
   updateProviderForm();
 }
 
@@ -519,7 +519,7 @@ async function refreshProfiles() {
     savedProfiles = result.items || [];
     const select = $('saved-profile');
     select.replaceChildren(new Option('Choose a saved profile…', ''));
-    for (const p of savedProfiles) select.append(new Option(`${p.model || 'Choose a model'} · ${p.name}${p.account?.email ? ' · ' + p.account.email : ''}`, p.name));
+    for (const p of savedProfiles) select.append(new Option(`${p.kind === 'chatgpt' ? 'ChatGPT account' : p.model || 'Model profile'} · ${p.name}${p.account?.email ? ' · ' + p.account.email : ''}`, p.name));
     const current = savedProfiles.find(p => p.name === $('profile').value);
     if (current) select.value = current.name;
     else if (savedProfiles.length) { select.value = savedProfiles[0].name; $('profile').value = select.value; }
@@ -556,16 +556,11 @@ function changeProvider() {
   updateProviderForm();
 }
 
-async function loadChatgptModels(item = providerTarget(), generation = providerGeneration) {
-  $('chatgpt-model').replaceChildren(new Option('Loading models…', ''));
-  const result = await window.sui.provider(item, { action: 'models', name: item.profile });
+async function loadChatgptModels(item = providerTarget(), generation = providerGeneration, refresh = false) {
+  $('chatgpt-status').textContent = 'Loading account models…';
+  const result = await window.sui.provider(item, { action: 'models', name: item.profile, refresh });
   if (generation !== providerGeneration || providerLocation(item) !== providerLocation() || item.profile !== $('setup-profile').value.trim()) return;
-  const select = $('chatgpt-model');
-  select.replaceChildren(new Option('Choose a model…', ''));
-  for (const m of result.items || []) select.append(new Option(m.name || m.id, m.id));
-  const previous = savedProfiles.find(p => p.name === item.profile)?.model;
-  if ([...select.options].some(option => option.value === previous)) select.value = previous;
-  $('chatgpt-status').textContent = !result.items?.length ? 'No models available for this account. Check ChatGPT plan usage.' : `${setupAccount?.email || 'ChatGPT account'} · ChatGPT plan usage enabled.${result.truncated ? ' Showing the first 200 models.' : ''}`;
+  $('chatgpt-status').textContent = result.warning || (!result.items?.length ? 'No models available for this account. Check ChatGPT plan usage.' : `${setupAccount?.email || 'ChatGPT account'} · ${result.items.length} models ready. Choose a model beside the message box.${result.truncated ? ' Showing the first 200 models.' : ''}`);
   updateProviderForm();
 }
 
@@ -580,9 +575,14 @@ async function signInChatgpt() {
     const result = await window.sui.provider(item, { action: 'login', name: item.profile });
     if (generation !== providerGeneration) return;
     setupAccount = result.account;
-    if (setupAccount.sharing) await loadChatgptModels(item, generation);
-    else $('chatgpt-status').textContent = 'Signed in. Reconnect and allow ChatGPT plan usage to load models.';
-    await refreshProfiles();
+    if (setupAccount.sharing) {
+      await loadChatgptModels(item, generation).catch(error => { $('chatgpt-status').textContent = String(error.message || error); });
+      if (generation !== providerGeneration) return;
+      $('profile').value = item.profile;
+      await refreshProfiles();
+      closeProviderSetup();
+      $('connect-button').focus();
+    } else $('chatgpt-status').textContent = 'Signed in. Reconnect and allow ChatGPT plan usage to load models.';
   } catch (error) { if (generation === providerGeneration) $('chatgpt-status').textContent = String(error.message || error); }
   finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
 }
@@ -597,8 +597,7 @@ async function saveModel() {
   updateProviderForm();
   try {
     const kind = $('model-kind').value;
-    if (kind === 'chatgpt') await window.sui.provider(item, { action: 'select', name: item.profile, model: $('chatgpt-model').value });
-    else await window.sui.configure(item, { name: item.profile, kind: kind === 'responses-compatible' ? 'openai-responses' : kind, base_url: $('model-url').value.trim(), model: $('model-id').value.trim(), api_key: $('model-key').value });
+    if (kind !== 'chatgpt') await window.sui.configure(item, { name: item.profile, kind: kind === 'responses-compatible' ? 'openai-responses' : kind, base_url: $('model-url').value.trim(), model: $('model-id').value.trim(), api_key: $('model-key').value });
     if (generation !== providerGeneration) return;
     $('profile').value = item.profile;
     $('model-key').value = '';
@@ -615,41 +614,79 @@ async function saveModel() {
   finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
 }
 
+let modelPickerRequest = 0;
 function renderModelOptions() {
   const list = $('model-options');
   list.replaceChildren();
   if (!state.profiles) return;
   const query = $('model-filter').value.trim().toLowerCase();
-  const matches = state.profiles.filter(item => `${item.name} ${item.model || ''}`.toLowerCase().includes(query));
+  const matches = state.profiles.filter(item => `${item.profile} ${item.model || ''} ${item.name || ''}`.toLowerCase().includes(query));
   for (const item of matches) {
-    const current = item.name === state.target?.profile;
+    const current = item.profile === state.target?.profile && item.model === state.hello?.model;
     const button = h('button', 'model-option');
     button.type = 'button';
     button.setAttribute('aria-current', String(current));
-    button.append(h('span', '', item.model || item.name), h('small', '', `${item.name}${current ? ' · Current' : ''}`));
+    button.append(h('span', '', item.name || item.model), h('small', '', `${item.profile}${item.email ? ' · ' + item.email : ''}${current ? ' · Current' : ''}`));
+    if (item.reasoning_levels?.length) button.title = 'Reasoning: ' + item.reasoning_levels.map(l => l.effort).join(', ');
     button.addEventListener('click', () => {
-      if (!state.hello || connectionBusy || state.activeRun !== null) return;
+      if (!state.hello || connectionBusy || state.activeRun !== null || state.settingsPending) return;
       $('model-dialog').close();
       if (current) { $('message').focus(); return; }
-      const target = { ...state.target, profile: item.name };
+      const target = { ...state.target, profile: item.profile };
+      if (item.kind === 'chatgpt') target.model = item.model;
+      else delete target.model;
       delete target.reasoning_effort;
       connect(target);
     });
     list.append(button);
   }
-  $('model-picker-status').textContent = !state.profiles.length ? 'No model profiles configured on this host.' : !matches.length ? 'No matching models.' : state.profilesTruncated ? 'Showing the first 200 profiles.' : '';
+  $('model-picker-status').textContent = state.modelCatalogNote || (!state.profiles.length ? 'No models available on this host.' : !matches.length ? 'No matching models.' : state.profilesTruncated ? 'Showing the first 200 models per account.' : '');
+}
+
+async function loadModelPicker(refresh = false) {
+  const request = ++modelPickerRequest;
+  const target = state.target;
+  const current = () => request === modelPickerRequest && $('model-dialog').open && state.hello && state.target === target;
+  $('refresh-model-catalog').disabled = true;
+  $('model-picker-status').textContent = 'Loading models…';
+  try {
+    const result = await window.sui.provider(target, { action: 'profiles' });
+    if (!current()) return;
+    const warnings = [];
+    let truncated = !!result.truncated;
+    const catalogs = await Promise.all((result.items || []).map(async profile => {
+      if (profile.kind !== 'chatgpt') return [{ profile: profile.name, model: profile.model, name: profile.model || profile.name, kind: profile.kind }];
+      if (!profile.account?.sharing) return [];
+      try {
+        const models = await window.sui.provider(target, { action: 'models', name: profile.name, refresh });
+        if (models.warning) warnings.push(`${profile.name}: ${models.warning}`);
+        truncated ||= !!models.truncated;
+        return (models.items || []).map(m => ({ ...m, profile: profile.name, model: m.id, kind: 'chatgpt', email: profile.account.email }));
+      } catch (error) {
+        warnings.push(`${profile.name}: ${String(error.message || error)}`);
+        // Keep the active model visible while refresh is unavailable.
+        return profile.name === target.profile ? [{ profile: profile.name, model: state.hello?.model, name: state.hello?.model_name || state.hello?.model, kind: 'chatgpt' }] : [];
+      }
+    }));
+    if (!current()) return;
+    state.profiles = catalogs.flat();
+    state.profilesTruncated = truncated;
+    state.modelCatalogNote = warnings.join(' ').slice(0, 4000);
+    renderModelOptions();
+  } catch (error) {
+    if (current()) $('model-picker-status').textContent = String(error.message || error);
+  } finally { if (current()) $('refresh-model-catalog').disabled = false; }
 }
 
 async function showModelPicker() {
-  if (!state.hello || connectionBusy || state.activeRun !== null) return;
+  if (!state.hello || connectionBusy || state.activeRun !== null || state.settingsPending) return;
   state.profiles = null;
+  state.modelCatalogNote = '';
   $('model-filter').value = '';
   $('model-options').replaceChildren();
-  $('model-picker-status').textContent = 'Loading model profiles…';
   window.SuiUI.openDialog($('model-dialog'));
   $('model-filter').focus();
-  try { await window.sui.command({ type: 'list_profiles' }); }
-  catch (error) { $('model-picker-status').textContent = String(error.message || error); }
+  await loadModelPicker();
 }
 
 async function connect(item, resume = null) {
@@ -670,12 +707,23 @@ async function connect(item, resume = null) {
     pet().setAsking(false);
     $('workspace-title').textContent = projectName(item);
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
-    $('composer-model').textContent = hello.model;
+    $('composer-model').textContent = hello.model_name || hello.model;
     $('composer-model').title = hello.model;
     state.settingsPending = false;
     state.target.reasoning_effort = hello.reasoning_effort || 'default';
+    if (hello.kind === 'chatgpt') state.target.model = hello.model;
     const effortLabels = { default: 'Provider default', none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
     $('composer-reasoning').replaceChildren(...(hello.reasoning_choices || ['default']).map(value => new Option(effortLabels[value] || value, value)));
+    for (const level of hello.reasoning_levels || []) {
+      const existing = [...$('composer-reasoning').options].find(o => o.value === level.effort);
+      if (existing) existing.title = level.description || '';
+      else {
+        const option = new Option(`${level.effort} (unavailable)`, level.effort);
+        option.disabled = true;
+        option.title = 'This catalog mode is not supported by SUI.';
+        $('composer-reasoning').append(option);
+      }
+    }
     $('composer-reasoning').value = hello.reasoning_effort || 'default';
     $('composer-mode').value = hello.approval || 'ask';
     $('composer-usage').classList.toggle('hidden', hello.kind !== 'chatgpt');
@@ -685,6 +733,7 @@ async function connect(item, resume = null) {
     setStatus(item.kind === 'ssh' ? 'SSH connected' : 'Local', true);
     transcript().replaceChildren();
     for (const message of hello.history || []) appendMessage(message.role, message.content);
+    if (hello.catalog_warning) appendNotice(hello.catalog_warning, true);
     if (hello.history_truncated) appendNotice('Earlier conversation text is omitted from this preview; SUI restored the full native session.');
     setStage();
     $('remote-preview').classList.toggle('hidden', item.kind !== 'ssh');
@@ -799,13 +848,6 @@ function onEvent(event) {
       setBusy(state.activeRun !== null);
       break;
     case 'sessions': renderSessions(event.items || []); break;
-    case 'profiles':
-      if (!$('model-dialog').open || !state.hello) break;
-      if (event.error) { $('model-picker-status').textContent = event.error; break; }
-      state.profiles = event.items || [];
-      state.profilesTruncated = !!event.truncated;
-      renderModelOptions();
-      break;
     case 'disconnected':
       $('model-dialog').close();
       state.hello = null; state.activeRun = null; state.settingsPending = false; setBusy(false); setStatus('Disconnected', false);
@@ -924,6 +966,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('provider-dialog').addEventListener('cancel', event => { event.preventDefault(); closeProviderSetup(); });
   $('save-model').addEventListener('click', saveModel);
   $('choose-model').addEventListener('click', showModelPicker);
+  $('refresh-model-catalog').addEventListener('click', () => loadModelPicker(true));
   $('composer-reasoning').addEventListener('change', () => {
     if (!state.hello || state.activeRun !== null || state.settingsPending) return;
     connect({ ...state.target, reasoning_effort: $('composer-reasoning').value });
@@ -959,15 +1002,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('install-remote').addEventListener('click', installRemote);
   $('model-kind').addEventListener('change', changeProvider);
   for (const id of ['setup-profile', 'model-id', 'model-key', 'model-url']) $(id).addEventListener('input', () => {
-    if (id === 'setup-profile') { setupAccount = null; $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', '')); }
+    if (id === 'setup-profile') setupAccount = null;
     updateProviderForm();
   });
-  $('chatgpt-model').addEventListener('change', updateProviderForm);
   $('refresh-profiles').addEventListener('click', refreshProfiles);
   $('saved-profile').addEventListener('change', () => {
     $('profile').value = $('saved-profile').value;
     const selected = savedProfiles.find(p => p.name === $('profile').value);
-    if (selected?.kind === 'chatgpt') {
+    if (selected?.kind === 'chatgpt' && !selected.account?.sharing) {
       resetProvider();
       $('model-kind').value = 'chatgpt';
       $('setup-profile').value = selected.name;
@@ -979,7 +1021,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   $('chatgpt-login').addEventListener('click', signInChatgpt);
   $('cancel-sign-in').addEventListener('click', resetProvider);
-  $('reload-chatgpt-models').addEventListener('click', () => loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); }));
+  $('reload-chatgpt-models').addEventListener('click', () => loadChatgptModels(providerTarget(), providerGeneration, true).catch(error => { $('chatgpt-status').textContent = String(error.message || error); }));
   for (const id of ['chatgpt-usage', 'composer-usage']) $(id).addEventListener('click', () => window.sui.manageUsage().catch(() => {}));
   $('chatgpt-logout').addEventListener('click', async () => {
     const item = providerTarget();
@@ -997,8 +1039,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         announce('Signed out of ChatGPT');
       }
       setupAccount = result.account;
-      $('chatgpt-model').replaceChildren(new Option('Sign in to load models…', ''));
-      $('chatgpt-status').textContent = result.revocation_confirmed ? 'Signed out.' : 'Signed out locally. Remote revocation was not confirmed; disconnect SUI in ChatGPT Settings.';
+          $('chatgpt-status').textContent = result.revocation_confirmed ? 'Signed out.' : 'Signed out locally. Remote revocation was not confirmed; disconnect SUI in ChatGPT Settings.';
       await refreshProfiles();
     } catch (error) { if (generation === providerGeneration) $('chatgpt-status').textContent = String(error.message || error); }
     finally { if (generation === providerGeneration) { providerBusy = false; updateProviderForm(); } }
