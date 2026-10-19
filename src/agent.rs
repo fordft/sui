@@ -130,9 +130,22 @@ pub struct Agent {
     /// Web session consent belongs to this agent, separate from local AUTO.
     web_approved: bool,
     desktop_yolo: Option<Arc<AtomicBool>>,
+    mission_chat: bool,
 }
 
 impl Agent {
+    pub(crate) fn set_mission_chat(&mut self, enabled: bool) {
+        if self.mission_chat && !enabled {
+            self.runtime_observation("Conversation mode is now Solo. The prior Mission discussion restriction has ended; normal tool permissions apply. Workers still require an explicit Mission execution request.");
+        }
+        self.mission_chat = enabled;
+        self.ident.role = if enabled { "control" } else { "worker" }.into();
+    }
+
+    pub(crate) fn observe_runtime(&mut self, text: String) {
+        self.runtime_observation(&text);
+    }
+
     pub(crate) fn set_desktop_approval(&mut self, yolo: Option<Arc<AtomicBool>>) {
         self.desktop_yolo = yolo;
     }
@@ -197,6 +210,7 @@ impl Agent {
             stop: Arc::new(AtomicBool::new(false)),
             web_approved: false,
             desktop_yolo: None,
+            mission_chat: false,
         }
     }
 
@@ -416,6 +430,14 @@ impl Agent {
             )
         } else {
             user_input.to_string()
+        };
+        let msg = if self.mission_chat {
+            format!(
+                "{msg}\n\n[Runtime conversation mode]\n{}",
+                crate::mission::chat::GUIDANCE
+            )
+        } else {
+            msg
         };
         let content = if images.is_empty() {
             crate::types::UserContent::Text(msg)
@@ -849,6 +871,13 @@ impl Agent {
                         format!("status: error\nerror: {why} — call not executed"),
                         crate::events::ToolStatus::Skipped,
                     )
+                } else if self.mission_chat
+                    && !crate::mission::chat::read_only_tool(
+                        name,
+                        plan.as_ref().expect("validated arguments"),
+                    )
+                {
+                    Disp::new("status: denied\nerror: Mission discussion is read-only. Use Run mission (TUI: /run <objective>) to execute in isolated worktrees.".into(), crate::events::ToolStatus::Denied)
                 } else if let Some(hit) = self.interceptor.as_ref().and_then(|f| f(call)) {
                     let (r, fin) = match hit {
                         Intercept::Result(r) => (r, false),

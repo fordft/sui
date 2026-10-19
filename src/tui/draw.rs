@@ -324,7 +324,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     } else if app.running {
         " Ctrl+S stop · Ctrl+P commands"
     } else if app.tab == Tab::Chat {
-        if compact {
+        if app.mode == super::app::Mode::Mission {
+            " Enter chat · /run <objective> · ^P commands"
+        } else if compact {
             " Enter send · ^N newline · ^P commands"
         } else {
             " Enter send · Ctrl+N newline · Ctrl+P commands"
@@ -1516,7 +1518,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
 Ctrl+T  Cycle views · Esc returns to Chat
 Ctrl+O  Solo / Mission · Ctrl+B sidebar
 Ctrl+R  Reasoning display
-Enter   Send task · Ctrl+N newline
+Enter   Chat · /run <objective> executes a Mission · Ctrl+N newline
 Ctrl+S  Stop task · Ctrl+Q quit
 PgUp/PgDn scroll · End returns to live
 ↑ recalls a task when the composer is empty
@@ -1532,7 +1534,7 @@ Shift+drag uses native terminal selection
 Settings → mouse turns capture on/off
 
 Commands
-/mission /solo /export /help
+/mission /run <objective> /solo /export /help
 Settings → theme: slime, dark or terminal
 Click the slime · Settings → motion
 

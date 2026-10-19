@@ -73,7 +73,7 @@ enum Sub {
 )]
 struct Cli {
     /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=3))]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=4))]
     desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -107,7 +107,7 @@ struct Cli {
     #[arg(long, global = true)]
     mission: bool,
     /// Resume a recorded native session (exact run ID or "latest"). No old tools are rerun.
-    #[arg(long, global = true, conflicts_with = "mission")]
+    #[arg(long, global = true)]
     resume: Option<String>,
     /// One-shot prompt; omit to open the TUI (or REPL when not a terminal)
     prompt: Option<String>,

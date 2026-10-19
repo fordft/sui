@@ -5,6 +5,7 @@ use super::app::{App, Mode, Tab};
 pub enum Command {
     View(Tab),
     Mode(Mode),
+    RunMission,
     Sidebar,
     Reasoning,
     Theme,
@@ -16,7 +17,7 @@ pub enum Command {
     Quit,
 }
 impl Command {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::View(Tab::Chat),
         Self::View(Tab::Tasks),
         Self::View(Tab::Changes),
@@ -24,6 +25,7 @@ impl Command {
         Self::View(Tab::Settings),
         Self::Mode(Mode::Solo),
         Self::Mode(Mode::Mission),
+        Self::RunMission,
         Self::Sidebar,
         Self::Reasoning,
         Self::Theme,
@@ -43,6 +45,7 @@ impl Command {
             Self::View(Tab::Settings) => "Settings",
             Self::Mode(Mode::Solo) => "Switch to Solo",
             Self::Mode(Mode::Mission) => "Switch to Mission",
+            Self::RunMission => "Run mission from draft",
             Self::Sidebar => "Toggle sidebar",
             Self::Reasoning => "Cycle reasoning display",
             Self::Theme => "Toggle theme: slime / terminal / dark",
@@ -63,11 +66,19 @@ impl Command {
             Self::Quit => "Ctrl+Q",
             Self::Export => "/export",
             Self::Sessions => "/resume",
+            Self::RunMission => "/run",
             _ => "",
         }
     }
     pub fn unavailable(self, app: &App) -> Option<&'static str> {
         match self {
+            Self::RunMission if app.running || app.resume_pending => {
+                Some("stop or finish the current task first")
+            }
+            Self::RunMission if app.mode != Mode::Mission => Some("switch to Mission first"),
+            Self::RunMission if app.input.is_empty() => {
+                Some("type the mission objective in the draft first")
+            }
             Self::Sessions | Self::Mode(_) if app.resume_pending => Some("session is loading"),
             Self::Sessions if app.running => Some("stop the current task first"),
             Self::Stop if !app.running => Some("no task running"),

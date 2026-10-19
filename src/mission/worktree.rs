@@ -32,6 +32,16 @@ pub async fn head(repo: &Path) -> Result<String> {
     git(repo, &["rev-parse", "HEAD"]).await
 }
 
+/// Read-only prerequisite check. Never initialize, stage or commit user files.
+pub async fn preflight(repo: &Path) -> Result<String> {
+    let inside = git(repo, &["rev-parse", "--is-inside-work-tree"]).await
+        .context("Mission execution needs a Git repository with a commit. You can keep chatting with the coordinator without Git; initialize and commit the intended project files before running a mission")?;
+    if inside != "true" {
+        bail!("Mission execution needs a working Git checkout, not a bare repository");
+    }
+    head(repo).await.context("Mission execution needs at least one Git commit. Commit the intended project files first; coordinator chat remains available")
+}
+
 /// Resolve any ref to a commit sha.
 pub async fn git_rev(repo: &Path, r: &str) -> Result<String> {
     git(repo, &["rev-parse", &format!("{r}^{{commit}}")]).await

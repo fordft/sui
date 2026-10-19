@@ -107,13 +107,19 @@ fn run_dir() -> PathBuf {
 /// A long-lived solo agent: one conversation session (append-only
 /// history keeps the provider cache warm across chat turns).
 pub struct Solo {
-    tx: UnboundedSender<SoloTask>,
+    tx: UnboundedSender<SoloCommand>,
     sig: String, // profile+model signature; change → respawn
 }
+enum SoloCommand {
+    Turn(SoloTask),
+    Mission(Box<mission::MissionCfg>),
+}
+
 struct SoloTask {
     run: u64,
     msg: String,
     web: WebUpdate,
+    mission_chat: bool,
     desktop_yolo: Option<Arc<AtomicBool>>,
     images: Vec<crate::types::ContentPart>,
 }
@@ -124,13 +130,14 @@ enum WebUpdate {
 impl Solo {
     pub fn send(&self, run: u64, msg: String) -> bool {
         self.tx
-            .send(SoloTask {
+            .send(SoloCommand::Turn(SoloTask {
                 run,
                 msg,
                 web: WebUpdate::Keep,
+                mission_chat: false,
                 desktop_yolo: None,
                 images: Vec::new(),
-            })
+            }))
             .is_ok()
     }
 
@@ -143,13 +150,14 @@ impl Solo {
         yolo: Arc<AtomicBool>,
     ) -> bool {
         self.tx
-            .send(SoloTask {
+            .send(SoloCommand::Turn(SoloTask {
                 run,
                 msg,
                 web: WebUpdate::Keep,
+                mission_chat: false,
                 desktop_yolo: Some(yolo),
                 images,
-            })
+            }))
             .is_ok()
     }
 
@@ -161,14 +169,38 @@ impl Solo {
         web: Option<Arc<crate::web::WebService>>,
     ) -> bool {
         self.tx
-            .send(SoloTask {
+            .send(SoloCommand::Turn(SoloTask {
                 run,
                 msg,
                 web: WebUpdate::Replace(web),
+                mission_chat: false,
                 desktop_yolo: None,
                 images: Vec::new(),
-            })
+            }))
             .is_ok()
+    }
+    pub fn send_mission_chat(
+        &self,
+        run: u64,
+        msg: String,
+        web: Option<Arc<crate::web::WebService>>,
+        images: Vec<crate::types::ContentPart>,
+        desktop_yolo: Option<Arc<AtomicBool>>,
+    ) -> bool {
+        self.tx
+            .send(SoloCommand::Turn(SoloTask {
+                run,
+                msg,
+                web: WebUpdate::Replace(web),
+                mission_chat: true,
+                desktop_yolo,
+                images,
+            }))
+            .is_ok()
+    }
+
+    pub fn run_mission(&self, cfg: mission::MissionCfg) -> bool {
+        self.tx.send(SoloCommand::Mission(Box::new(cfg))).is_ok()
     }
 }
 
@@ -226,7 +258,7 @@ pub fn start_solo(
 ) -> Result<Solo> {
     config::validate_native_config(None, &workspace)?;
     let lock = crate::session::SessionLock::acquire(&jdir)?;
-    let (tx, mut rx) = unbounded_channel::<SoloTask>();
+    let (tx, mut rx) = unbounded_channel::<SoloCommand>();
     let sig = solo_signature(&prof);
     let workspace_for_log = workspace.canonicalize()?.display().to_string();
     let al = crate::config::agent_limits(&workspace);
@@ -275,6 +307,14 @@ pub fn start_solo(
     agent.set_run_id(0);
     if let Some(saved) = saved {
         agent.restore_session(saved)?;
+        let mission_chat = saved
+            .events
+            .iter()
+            .rev()
+            .find(|event| event["type"] == "task")
+            .and_then(|event| event["data"]["mode"].as_str())
+            .is_some_and(|mode| mode.starts_with("mission-"));
+        agent.set_mission_chat(mission_chat);
         agent.jlog("session_resumed", serde_json::json!({"source": saved.id}));
     } else {
         agent.record_session(Some(prof.name.clone()))?;
@@ -289,14 +329,22 @@ pub fn start_solo(
                 "sui_version": env!("CARGO_PKG_VERSION"),
             }),
         );
-        while let Some(SoloTask {
-            run,
-            msg,
-            web,
-            desktop_yolo,
-            images,
-        }) = rx.recv().await
-        {
+        while let Some(command) = rx.recv().await {
+            let SoloTask {
+                run,
+                msg,
+                web,
+                mission_chat,
+                desktop_yolo,
+                images,
+            } = match command {
+                SoloCommand::Turn(task) => task,
+                SoloCommand::Mission(cfg) => {
+                    run_interactive_mission(&mut agent, *cfg, &sink).await;
+                    continue;
+                }
+            };
+            agent.set_mission_chat(mission_chat);
             agent.set_desktop_approval(desktop_yolo);
             if let WebUpdate::Replace(web) = web {
                 agent.set_web_service(web);
@@ -305,6 +353,7 @@ pub fn start_solo(
             agent.jlog("task", serde_json::json!({
                 "task": msg,
                 "run": run,
+                "mode": if mission_chat { "mission-chat" } else { "solo" },
                 "approval": if session.load(std::sync::atomic::Ordering::Relaxed) { "auto" } else { "ask" },
             }));
             let r = agent.run_turn_with_images(&msg, images).await;
@@ -344,6 +393,58 @@ pub fn start_solo(
         }
     });
     Ok(Solo { tx, sig })
+}
+
+/// Serialize execution with coordinator conversation. Journal the runtime result
+/// before publishing completion, so reconnect and follow-up chat see it.
+async fn run_interactive_mission(agent: &mut Agent, mut cfg: mission::MissionCfg, sink: &Sink) {
+    let run = cfg.run;
+    let dir = cfg.run_dir.clone();
+    let request = cfg.objective.clone();
+    cfg.objective = mission::chat::objective(&request, agent.history());
+    agent.set_run_id(run);
+    agent.set_mission_chat(true);
+    agent.jlog(
+        "task",
+        serde_json::json!({"task":request,"run":run,"mode":"mission-run"}),
+    );
+    agent.jlog("turn_start", serde_json::json!({"run":run}));
+    agent.push_user(&format!("The user requested Mission execution: {request}"));
+    let (tx, mut rx) = unbounded_channel();
+    cfg.events = Some(tx);
+    let out = sink.clone();
+    let forward = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if !matches!(event, UiEvent::RunDone { .. }) {
+                let _ = out.send(event);
+            }
+        }
+    });
+    let result = mission::run(cfg).await;
+    let _ = forward.await;
+    let (outcome, branch, sha) = match result {
+        Ok(report) => (report.outcome, report.branch, report.accepted_sha),
+        Err(error) => (format!("error: {error:#}"), None, None),
+    };
+    agent.observe_runtime(mission::chat::summary(
+        &outcome,
+        branch.as_deref(),
+        sha.as_deref(),
+        &dir,
+    ));
+    agent.jlog("turn_end", serde_json::json!({"run":run,"outcome":outcome}));
+    let _ = sink.send(UiEvent::MissionResult {
+        run,
+        outcome: outcome.clone(),
+        branch,
+        accepted_sha: sha.clone(),
+        run_dir: dir,
+    });
+    let _ = sink.send(UiEvent::RunDone {
+        run,
+        outcome,
+        accepted_sha: sha,
+    });
 }
 
 pub fn resolve_to_profile(app: &App, name: &str) -> Option<Profile> {
@@ -428,11 +529,6 @@ pub async fn run_with_resume(
         app.auto.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if let Some(id) = resume {
-        if force_mission {
-            anyhow::bail!(
-                "Resume supports native Solo/headless sessions; start missions separately"
-            );
-        }
         app.resume_pending = true;
         app.status = "loading session…".into();
         app.effects.push(Effect::ResumeSession { id });
@@ -700,117 +796,134 @@ pub async fn run_with_resume(
                 Effect::Stop => {} // notify+flag already fired in app.stop()
                 Effect::SendTask { task, mode, run } => {
                     let workspace = app.workspace.clone();
-                    match mode {
-                        Mode::Solo => {
-                            let pname = app.role_profile(Role::Solo);
-                            let prof = pname.as_deref().and_then(|n| resolve_to_profile(&app, n));
-                            match prof {
-                                Some(p) => {
-                                    let sig = solo_signature(&p);
-                                    if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
-                                        if solo.is_some() {
-                                            jdir = run_dir();
-                                            app.run_dir = Some(jdir.clone());
-                                        }
-                                        solo = Some(spawn_solo(
-                                            p,
-                                            workspace.clone(),
-                                            jdir.clone(),
-                                            ev_tx.clone(),
-                                            app.cancel.clone(),
-                                            app.stop_flag.clone(),
-                                            app.auto.clone(),
-                                            app.web.clone(),
-                                        ));
-                                    }
-                                    if !solo.as_ref().unwrap().send_with_web(
-                                        run,
-                                        task,
-                                        app.web.clone(),
-                                    ) {
-                                        app.apply_event(UiEvent::RunDone {
-                                            run,
-                                            outcome: "error: session unavailable".into(),
-                                            accepted_sha: None,
-                                        });
-                                    }
+                    let role = if mode == Mode::Mission {
+                        Role::Orchestrator
+                    } else {
+                        Role::Solo
+                    };
+                    let prof = app
+                        .role_profile(role)
+                        .and_then(|name| resolve_to_profile(&app, &name));
+                    if let Some(p) = prof {
+                        let sig = solo_signature(&p);
+                        if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
+                            if solo.is_some() {
+                                jdir = run_dir();
+                            }
+                            solo = Some(spawn_solo(
+                                p,
+                                workspace,
+                                jdir.clone(),
+                                ev_tx.clone(),
+                                app.cancel.clone(),
+                                app.stop_flag.clone(),
+                                app.auto.clone(),
+                                app.web.clone(),
+                            ));
+                        }
+                        app.run_dir = Some(jdir.clone());
+                        let sent = if mode == Mode::Mission {
+                            solo.as_ref().unwrap().send_mission_chat(
+                                run,
+                                task,
+                                app.web.clone(),
+                                Vec::new(),
+                                None,
+                            )
+                        } else {
+                            solo.as_ref()
+                                .unwrap()
+                                .send_with_web(run, task, app.web.clone())
+                        };
+                        if !sent {
+                            app.apply_event(UiEvent::RunDone {
+                                run,
+                                outcome: "error: conversation unavailable".into(),
+                                accepted_sha: None,
+                            });
+                        }
+                    } else {
+                        app.apply_event(UiEvent::Error {
+                            run,
+                            agent: "ui".into(),
+                            msg: "configure the conversation role in Settings → roles".into(),
+                        });
+                        app.apply_event(UiEvent::RunDone {
+                            run,
+                            outcome: "error: profile missing".into(),
+                            accepted_sha: None,
+                        });
+                    }
+                }
+                Effect::RunMission { task, run } => {
+                    let workspace = app.workspace.clone();
+                    let control = app
+                        .role_profile(Role::Orchestrator)
+                        .and_then(|n| resolve_to_profile(&app, &n));
+                    let worker = app
+                        .role_profile(Role::Worker)
+                        .and_then(|n| resolve_to_profile(&app, &n));
+                    let auditor = app
+                        .role_profile(Role::Auditor)
+                        .and_then(|n| resolve_to_profile(&app, &n));
+                    match (control, worker) {
+                        (Some(control), Some(worker)) => {
+                            let sig = solo_signature(&control);
+                            if solo.as_ref().map(|s| &s.sig) != Some(&sig) {
+                                if solo.is_some() {
+                                    jdir = run_dir();
                                 }
-                                None => {
-                                    app.apply_event(UiEvent::Error {
-                                        run,
-                                        agent: "ui".into(),
-                                        msg: "no solo profile configured — Settings → roles".into(),
-                                    });
-                                    app.apply_event(UiEvent::RunDone {
-                                        run,
-                                        outcome: "error: no solo profile".into(),
-                                        accepted_sha: None,
-                                    });
-                                    app.running = false;
-                                }
+                                solo = Some(spawn_solo(
+                                    control.clone(),
+                                    workspace.clone(),
+                                    jdir.clone(),
+                                    ev_tx.clone(),
+                                    app.cancel.clone(),
+                                    app.stop_flag.clone(),
+                                    app.auto.clone(),
+                                    app.web.clone(),
+                                ));
+                            }
+                            let al = config::agent_limits(&workspace);
+                            let mission_dir = jdir.join(format!("mission-{run}"));
+                            app.run_dir = Some(mission_dir.clone());
+                            let cfg = mission::MissionCfg {
+                                repo: workspace,
+                                run_dir: mission_dir,
+                                control,
+                                worker,
+                                auditor,
+                                objective: task,
+                                max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
+                                session: format!("tui-{:032x}", rand::random::<u128>()),
+                                keep_worktrees: false,
+                                request_timeout: Duration::from_millis(al.request_timeout_ms),
+                                task_timeout: Duration::from_secs(900),
+                                context_budget: al.context_token_budget,
+                                context_reserve: al.context_reserve_tokens,
+                                control_max_turns: al.max_turns,
+                                worker_max_turns: al.max_turns,
+                                events: Some(ev_tx.clone()),
+                                cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
+                                session_approve: Some(app.auto.clone()),
+                                web: app.web.clone(),
+                                run,
+                            };
+                            if !solo.as_ref().unwrap().run_mission(cfg) {
+                                app.apply_event(UiEvent::RunDone {
+                                    run,
+                                    outcome: "error: conversation unavailable".into(),
+                                    accepted_sha: None,
+                                });
                             }
                         }
-                        Mode::Mission => {
-                            let control = app
-                                .role_profile(Role::Orchestrator)
-                                .and_then(|n| resolve_to_profile(&app, &n));
-                            let worker = app
-                                .role_profile(Role::Worker)
-                                .and_then(|n| resolve_to_profile(&app, &n));
-                            let auditor = app
-                                .role_profile(Role::Auditor)
-                                .and_then(|n| resolve_to_profile(&app, &n));
-                            match (control, worker) {
-                                (Some(control), Some(worker)) => {
-                                    let al = config::agent_limits(&workspace);
-                                    let cfg = mission::MissionCfg {
-                                        repo: workspace.clone(),
-                                        run_dir: jdir.clone(),
-                                        control,
-                                        worker,
-                                        auditor,
-                                        objective: task,
-                                        max_workers: app.ui.worker_count.unwrap_or(1).clamp(1, 2),
-                                        // Unique per mission — a constant
-                                        // session would reuse branch names and
-                                        // `worktree add`'s `branch -D` would
-                                        // force-delete the PREVIOUS mission's
-                                        // accepted integration branch.
-                                        session: format!("tui-{}-{}", std::process::id(), run),
-                                        keep_worktrees: false, // accepted branch survives cleanup
-                                        request_timeout: Duration::from_millis(
-                                            al.request_timeout_ms,
-                                        ),
-                                        task_timeout: Duration::from_secs(900),
-                                        context_budget: al.context_token_budget,
-                                        context_reserve: al.context_reserve_tokens,
-                                        control_max_turns: al.max_turns,
-                                        worker_max_turns: al.max_turns,
-                                        events: Some(ev_tx.clone()),
-                                        cancel: Some((app.cancel.clone(), app.stop_flag.clone())),
-                                        session_approve: Some(app.auto.clone()),
-                                        web: app.web.clone(),
-                                        run,
-                                    };
-                                    tokio::spawn(async move {
-                                        let _ = mission::run(cfg).await;
-                                    });
-                                }
-                                _ => {
-                                    app.apply_event(UiEvent::Error {
-                                    run,
-                                    agent: "ui".into(),
-                                    msg: "mission needs orchestrator + worker profiles — Settings"
-                                        .into(),
-                                });
-                                    app.apply_event(UiEvent::RunDone {
-                                        run,
-                                        outcome: "error: profiles missing".into(),
-                                        accepted_sha: None,
-                                    });
-                                    app.running = false;
-                                }
-                            }
+                        _ => {
+                            app.apply_event(UiEvent::Error { run, agent:"ui".into(), msg:"Mission execution needs orchestrator and worker profiles in Settings → roles".into() });
+                            app.apply_event(UiEvent::RunDone {
+                                run,
+                                outcome: "error: profiles missing".into(),
+                                accepted_sha: None,
+                            });
                         }
                     }
                 }

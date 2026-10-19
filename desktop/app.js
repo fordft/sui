@@ -1,7 +1,8 @@
 const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
-  browserOpen: false, browserShown: false, permissionId: null, permissionSending: false, log: null, messages: 0, projects: [], profiles: null, settingsPending: false, images: [], imagesLoading: 0, pendingSubmission: null
+  browserOpen: false, browserShown: false, permissionId: null, permissionSending: false, log: null, messages: 0, projects: [], profiles: null, settingsPending: false, images: [], imagesLoading: 0, pendingSubmission: null,
+  conversationMode: 'solo', lastMissionTask: '', missionInfo: null, activeMission: false, missionCard: null, missionStreams: new Map(), permissionQueue: []
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -47,11 +48,14 @@ function setStatus(label, connected, busy = false) {
 
 function updateSend() {
   const draft = $('message').value.trim() || state.annotation || state.images.length;
+  $('run-mission').disabled = !state.hello || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || state.images.length > 0 || !(String($('message').value).trim() || state.lastMissionTask);
   $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (state.images.length > 0 && !state.hello?.image_input) || !draft;
 }
 
 function setBusy(busy) {
   const ready = !!state.hello;
+  $('composer-execution').disabled = !ready || busy || state.settingsPending;
+  for (const id of ['mission-worker', 'mission-auditor', 'mission-workers']) $(id).disabled = !ready || busy;
   $('choose-model').disabled = !ready || busy || state.settingsPending;
   $('composer-reasoning').disabled = !ready || busy || state.settingsPending || (state.hello?.reasoning_choices || []).length < 2;
   $('composer-mode').disabled = !ready || (busy && state.permissionId === null) || state.settingsPending || state.permissionSending;
@@ -61,7 +65,7 @@ function setBusy(busy) {
   $('message').disabled = !ready;
   $('composer-context').classList.toggle('hidden', !ready);
   $('stop').classList.toggle('hidden', !busy);
-  $('composer-hint').textContent = busy ? 'SUI is working…' : ready ? 'Enter to send · Shift+Enter for a new line' : 'Connect a project to start';
+  $('composer-hint').textContent = busy ? 'SUI is working…' : ready ? state.conversationMode === 'mission' ? 'Enter to chat · Run mission starts workers' : 'Enter to send · Shift+Enter for a new line' : 'Connect a project to start';
   $('connection-pill').classList.toggle('busy', busy && ready);
   updateSend();
   pet().setBusy(busy);
@@ -103,10 +107,17 @@ function appendNotice(text, error = false) {
   scrollToEnd(stick);
 }
 
-function streamDelta(text) {
+function streamDelta(text, agent) {
   const stick = pinned();
-  if (!state.assistant) { closeLog(true); state.assistant = appendMessage('assistant', ''); }
-  const message = state.assistant;
+  let message;
+  if (state.activeMission) {
+    const key = String(agent || 'mission').slice(0, 120);
+    message = state.missionStreams.get(key);
+    if (!message) { message = appendMessage('assistant', ''); message.body.before(h('div', 'mission-agent', key)); state.missionStreams.set(key, message); }
+  } else {
+    if (!state.assistant) { closeLog(true); state.assistant = appendMessage('assistant', ''); }
+    message = state.assistant;
+  }
   message.raw += text;
   if (!message.queued) {
     message.queued = true;
@@ -707,6 +718,9 @@ async function connect(item, resume = null) {
     $('permission').classList.add('hidden');
     state.permissionId = null;
     state.permissionSending = false;
+    state.permissionQueue = []; state.activeMission = false; state.missionCard = null; state.missionStreams = new Map();
+    state.conversationMode = hello.conversation_mode || 'solo'; state.lastMissionTask = hello.last_mission_task || '';
+    setMissionInfo(hello.mission);
     pet().setAsking(false);
     $('workspace-title').textContent = projectName(item);
     $('workspace-subtitle').textContent = `${item.kind === 'ssh' ? item.host + '  /  ' : ''}${item.workspace}  ·  ${hello.model}`;
@@ -827,6 +841,52 @@ function restoreSubmission() {
   setBusy(false);
 }
 
+function renderMissionMode() {
+  const enabled = state.conversationMode === 'mission';
+  $('composer-execution').value = state.conversationMode;
+  $('run-mission').classList.toggle('hidden', !enabled);
+  $('mission-options').classList.toggle('hidden', !enabled);
+  $('mission-help').classList.toggle('hidden', !enabled);
+  $('mission-help').textContent = state.missionInfo?.issue || 'Discuss the objective, then Run mission. Workers run from committed HEAD in a separate branch; uncommitted edits are excluded.';
+  setBusy(state.activeRun !== null);
+}
+
+function setMissionInfo(info) {
+  state.missionInfo = info;
+  for (const id of ['mission-worker', 'mission-auditor']) {
+    const previous = $(id).value;
+    $(id).replaceChildren(new Option('Current model', ''), ...(info?.profiles || []).map(profile => new Option(`${profile.name}${profile.model ? ' · ' + profile.model : ''}`, profile.name)));
+    $(id).value = [...$(id).options].some(option => option.value === previous) ? previous : '';
+  }
+  renderMissionMode();
+}
+
+function beginMission(run) {
+  const root = h('section', 'mission-card');
+  root.setAttribute('aria-label', 'Mission progress');
+  const stage = h('strong', '', 'Mission · Starting');
+  const tasks = h('ul', 'mission-tasks');
+  const audit = h('p', 'field-help');
+  const result = h('p', 'mission-result');
+  root.append(stage, tasks, audit, result);
+  transcript().append(root);
+  state.missionCard = { run, root, stage, tasks, audit, result };
+  state.missionStreams = new Map();
+  scrollToEnd();
+}
+
+function showPermission(event) {
+  state.permissionId = event.id;
+  state.permissionSending = false;
+  $('permission-summary').textContent = `${state.activeMission && event.agent ? event.agent + ': ' : ''}${event.summary}`;
+  document.querySelector('[data-choice="session"]').classList.toggle('hidden', event.allow_session === false);
+  document.querySelector('[data-choice="yolo"]').classList.toggle('hidden', event.allow_yolo !== true);
+  $('permission').classList.remove('hidden');
+  document.querySelector('.dock').scrollTop = 0;
+  setBusy(true); pet().setAsking(true);
+  announce(`SUI needs your approval: ${event.summary}`);
+}
+
 // ── sending and bridge events ────────────────────────────────────────────
 
 function formatAnnotation(annotation, comment) {
@@ -843,12 +903,14 @@ function clearAnnotation() {
   pet().refresh();
 }
 
-async function send() {
+async function send(executeMission = false) {
+  executeMission = executeMission === true;
   if (!state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading) return;
   if (state.images.length && !state.hello.image_input) { imageError('Choose an image-capable model before sending images.'); return; }
   const message = $('message').value.trim();
   const comment = $('annotation-comment').value.trim();
-  if (!message && !state.annotation && !state.images.length) return;
+  if (!message && !state.annotation && !state.images.length && !(executeMission && state.lastMissionTask)) return;
+  if (executeMission && state.images.length) { imageError('Send images to the coordinator before running the mission.'); return; }
   if (state.annotation && !comment) { $('annotation-comment').focus(); return; }
   const text = [message, state.annotation ? formatAnnotation(state.annotation, comment) : ''].filter(Boolean).join('\n\n');
   const display = [message, state.annotation ? `◎ ${comment}` : '', ...state.images.map(image => `Attached image: ${image.name}`)].filter(Boolean).join('\n');
@@ -859,18 +921,24 @@ async function send() {
   state.activeRun = run;
   state.assistant = null;
   closeLog(true);
-  appendMessage('user', display);
+  appendMessage('user', executeMission ? `Run mission: ${display || state.lastMissionTask}` : display);
+  state.activeMission = executeMission;
+  if (executeMission) beginMission(run);
+  else if (state.conversationMode === 'mission') state.lastMissionTask = text;
   $('message').value = '';
   window.SuiUI.autosize($('message'));
   clearAnnotation();
   setBusy(true);
-  try { await window.sui.command({ type: 'send', run, text, images: images.map(({ name, mime, data }) => ({ name, mime, data })) }); }
+  const command = executeMission
+    ? { type: 'run_mission', run, text, worker_profile: $('mission-worker').value || null, auditor_profile: $('mission-auditor').value || null, max_workers: Number($('mission-workers').value) }
+    : { type: 'send', run, text, mode: state.conversationMode, images: images.map(({ name, mime, data }) => ({ name, mime, data })) };
+  try { await window.sui.command(command); }
   catch (error) { appendNotice(`Send failed: ${error.message}`, true); restoreSubmission(); }
 }
 
 function finishRun(outcome) {
   const ok = outcome === 'done' || outcome === 'accepted';
-  const failed = outcome.startsWith('error');
+  const failed = outcome.startsWith('error') || outcome.startsWith('failed');
   closeLog(ok, !ok);
   if (!ok) appendNotice(`Run ${outcome}`, failed);
   if (ok) pet().cheer();
@@ -882,35 +950,46 @@ function onEvent(event) {
   switch (event.type) {
     case 'request_start': state.pendingSubmission = null; break;
     case 'send_error':
-      if (event.run === state.activeRun) { appendNotice(event.message || 'Message was not accepted', true); restoreSubmission(); }
+      if (event.run === state.activeRun) { if (state.activeMission && state.missionCard) state.missionCard.stage.textContent = 'Mission · Not started'; state.activeMission = false; appendNotice(event.message || 'Message was not accepted', true); restoreSubmission(); }
       break;
     case 'permission_resolved':
-      if (event.id === state.permissionId) clearPermission();
+      state.permissionQueue = state.permissionQueue.filter(ask => ask.id !== event.id);
+      if (event.id === state.permissionId) { clearPermission(); const next = state.permissionQueue.shift(); if (next) showPermission(next); }
       break;
     case 'delta':
       if (event.run !== state.activeRun) return;
-      streamDelta(event.text);
+      streamDelta(event.text, event.agent);
       break;
     case 'tool_start': logLine(event.summary); break;
     case 'tool_done': if (event.status !== 'ok') logLine(`${event.name}: ${event.status}${event.result ? ' · ' + event.result.slice(0, 220) : ''}`, 'fail'); break;
     case 'phase': logLine(event.text, 'phase'); break;
     case 'permission':
-      state.permissionId = event.id;
-      state.permissionSending = false;
-      $('permission-summary').textContent = event.summary;
-      document.querySelector('[data-choice="session"]').classList.toggle('hidden', event.allow_session === false);
-      document.querySelector('[data-choice="yolo"]').classList.toggle('hidden', event.allow_yolo !== true);
-      document.querySelectorAll('[data-choice]').forEach(button => { button.disabled = false; });
-      $('permission').classList.remove('hidden');
-      document.querySelector('.dock').scrollTop = 0;
-      setBusy(true);
-      pet().setAsking(true);
-      announce(`SUI needs your approval: ${event.summary}`);
+      if (state.permissionId !== null) {
+        if (state.permissionQueue.length < 32) state.permissionQueue.push(event);
+        else { appendNotice('Too many pending approvals; stopping the run.', true); window.sui.command({ type: 'stop' }).catch(() => {}); }
+      } else showPermission(event);
+      break;
+    case 'mission_info': setMissionInfo(event.mission); break;
+    case 'mission_started': if (event.run === state.activeRun) { state.pendingSubmission = null; state.activeMission = true; } break;
+    case 'mission_state': if (state.missionCard) state.missionCard.stage.textContent = `Mission · ${String(event.state).slice(0, 100)}`; break;
+    case 'task_rows':
+      if (state.missionCard && Array.isArray(event.rows)) {
+        state.missionCard.tasks.replaceChildren(...event.rows.slice(0, 20).map(row => h('li', '', `${String(row.id || '?').slice(0, 100)} · ${String(row.status || 'planned').slice(0, 200)}`)));
+        if (event.rows.length > 20) state.missionCard.tasks.append(h('li', '', `${event.rows.length - 20} more tasks omitted`));
+      }
+      break;
+    case 'audit_result': if (state.missionCard) state.missionCard.audit.textContent = `Audit · ${String(event.result?.verdict || 'recorded').slice(0, 100)}`; break;
+    case 'change_set': if (state.missionCard) state.missionCard.result.textContent = `Candidate changes: ${(event.files || []).slice(0, 20).join(', ').slice(0, 3000)}`; break;
+    case 'mission_result':
+      if (state.missionCard?.run === event.run) {
+        state.missionCard.stage.textContent = `Mission · ${String(event.outcome).slice(0, 2000)}`;
+        state.missionCard.result.textContent = `Branch: ${event.branch || 'none'}\nAccepted commit: ${event.accepted_sha || 'none'}\nRun records: ${event.run_dir}\nYour current checkout was not updated. Review the candidate branch before applying it.`;
+      }
       break;
     case 'run_done': {
       const outcome = String(event.outcome || '');
       if (event.run === state.activeRun) { state.activeRun = null; state.assistant = null; setBusy(false); }
-      state.pendingSubmission = null;
+      state.pendingSubmission = null; state.activeMission = false; state.permissionQueue = [];
       clearPermission();
       finishRun(outcome);
       window.sui.command({ type: 'list_sessions' }).catch(() => {});
@@ -937,7 +1016,7 @@ function onEvent(event) {
     case 'sessions': renderSessions(event.items || []); break;
     case 'disconnected':
       $('model-dialog').close();
-      state.hello = null; state.activeRun = null; state.settingsPending = false; state.permissionId = null; state.permissionSending = false; setBusy(false); setStatus('Disconnected', false);
+      state.hello = null; state.activeRun = null; state.settingsPending = false; state.permissionId = null; state.permissionSending = false; state.permissionQueue = []; state.activeMission = false; setBusy(false); setStatus('Disconnected', false);
       closeLog(false, true);
       pet().setAsking(false);
       $('permission').classList.add('hidden');
@@ -1140,7 +1219,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   transcript().addEventListener('scroll', updateScrollButton, { passive: true });
   new ResizeObserver(updateScrollButton).observe(transcript());
   $('refresh-sessions').addEventListener('click', () => window.sui.command({ type: 'list_sessions' }).catch(() => {}));
-  $('send').addEventListener('click', send);
+  $('send').addEventListener('click', () => send());
+  $('run-mission').addEventListener('click', () => send(true));
+  $('composer-execution').addEventListener('change', () => { state.conversationMode = $('composer-execution').value; renderMissionMode(); if (state.conversationMode === 'mission') window.sui.command({ type: 'mission_info' }).catch(error => appendNotice(error.message, true)); });
   $('attach-image').addEventListener('click', () => $('image-picker').click());
   $('image-picker').addEventListener('change', async () => { await addImages([...$('image-picker').files]); $('image-picker').value = ''; });
   document.addEventListener('dragover', event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); $('composer').classList.add('drop-active'); } });

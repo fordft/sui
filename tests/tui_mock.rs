@@ -394,6 +394,41 @@ async fn tui_stop_cancels_running_tool() {
     assert!(!app.running);
 }
 
+#[tokio::test]
+async fn tui_mission_enter_chats_without_git_and_run_is_explicit() {
+    let repo = jdir();
+    let port = common::serve(|_, _| sse_text("Hello from the coordinator"));
+    let mut app = app_with_mock(&repo, port);
+    app.mode = Mode::Mission;
+    app.input.set("hi");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let Effect::SendTask { task, mode, run } = app.effects.pop().unwrap() else {
+        panic!("Enter must chat")
+    };
+    assert_eq!(mode, Mode::Mission);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let profile = sui::tui::resolve_to_profile(&app, "mock-ctrl").unwrap();
+    let solo = sui::tui::spawn_solo(
+        profile,
+        repo.clone(),
+        jdir(),
+        tx,
+        app.cancel.clone(),
+        app.stop_flag.clone(),
+        app.auto.clone(),
+        None,
+    );
+    assert!(solo.send_mission_chat(run, task, None, vec![], None));
+    assert!(pump(&mut app, &mut rx).await);
+    assert!(app.groups.last().unwrap().items.iter().any(|item| matches!(item, Act::Assistant { text, .. } if text.contains("Hello from the coordinator"))));
+    assert!(!repo.join(".git").exists());
+    app.input.set("/run build it");
+    app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(app.effects.pop(), Some(Effect::RunMission { task, .. }) if task == "build it")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tui_mission_events_flow() {
     let repo = fixture_repo();
@@ -452,12 +487,12 @@ async fn tui_mission_events_flow() {
 
     let mut app = app_with_mock(&repo, port);
     app.mode = Mode::Mission;
-    app.input.set("build the thing");
+    app.input.set("/run build the thing");
     app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    let Effect::SendTask { task, mode, run } = app.effects.pop().unwrap() else {
+    let Effect::RunMission { task, run } = app.effects.pop().unwrap() else {
         panic!()
     };
-    assert_eq!(mode, Mode::Mission);
+    assert_eq!(task, "build the thing");
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
     let prof = |name: &str, model: &str| Profile {

@@ -96,7 +96,7 @@ function writeBridge(value) {
   const line = JSON.stringify(value);
   if (Buffer.byteLength(line) > 12 * 1024 * 1024) throw new Error('Message exceeds the 12 MiB bridge limit.');
   bridge.stdin.write(line + '\n');
-  if (value.type === 'send') { activeRun = value.run; saveConnection(target, sessionId); }
+  if (value.type === 'send' || value.type === 'run_mission') { activeRun = value.run; saveConnection(target, sessionId); }
 }
 
 async function startBridge(item, resume) {
@@ -180,7 +180,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 3 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 3 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 4 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 4 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;

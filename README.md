@@ -726,7 +726,25 @@ release-verification.
 
 ## Missions
 
-`sui --mission` or `sui-mission` headless:
+In the TUI, choose Mission with `Ctrl+O` or `/mission`. Enter chats with the
+coordinator; `/run <objective>` (or **Ctrl+P → Run mission from draft**) starts
+the workers. Discussion is read-only and works outside Git repositories.
+
+Desktop has the same Solo/Mission conversation selector. Enter sends discussion;
+**Run mission** launches execution using your draft, or your last Mission request
+when the draft is empty. Expand Mission options to choose worker/auditor profiles
+and one or two workers. Their default is the current model and reasoning setting.
+Progress, concurrent approvals, audit results and the accepted branch/commit appear
+in the transcript. Browser and web consent remain separate. Execution runs local
+commands in disposable worktrees; the conversation approval selector does not
+restrict those worker commands.
+
+Execution requires a Git working checkout with at least one commit. It starts
+from committed HEAD; uncommitted changes are not copied. Sui does not initialize
+or commit your project automatically. Discussion and completed execution results
+can resume as one conversation; active worker execution cannot resume.
+
+`sui --mission` opens coordinator chat. For immediate headless execution:
 
 ```bash
 sui-mission --control-profile strong --worker-profile cheap \
@@ -766,7 +784,7 @@ is refused explicitly by CLI/TUI recovery. Desktop may recover a complete
 journal ending in an interrupted turn, marking unresolved tool outcomes unknown
 in a new fork. It never reruns those commands. Desktop image attachments with
 verified private replay files can resume; older memory-only tool observations
-cannot. Recovery is bounded to 32 MiB of journal and 64 MiB of replay state. Missions use their own lifecycle and cannot be resumed this way.
+cannot. Recovery is bounded to 32 MiB of journal and 64 MiB of replay state. Mission conversations retain their discussion and completed runtime results; worker execution itself uses a separate lifecycle and is not resumed.
 Sessions recorded before resume headers were introduced remain exportable;
 they cannot promise the same request header and are marked unavailable.
 

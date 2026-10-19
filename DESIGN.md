@@ -726,3 +726,18 @@ Opaque replay items stay in bounded 0600 content-addressed sidecars in the
 Replay verifies path, hash and size, and refuses missing or altered state.
 Cost estimates partition total input into ordinary, cache-read and cache-write
 buckets; estimated or incomplete telemetry/pricing cannot imply zero cost.
+
+### Interactive Mission conversation (Desktop protocol 4)
+
+Mission Enter uses the long-lived native conversation with runtime-enforced
+read-only tool dispatch. Git is only required by the explicit execution action
+(`/run` in the TUI, Run mission in Desktop). Execution carries bounded discussion
+text into the existing MissionCfg driver; images and opaque tool/reasoning data
+are not copied into the objective. The runtime retains ownership of all proof.
+
+A serialized command queue prevents discussion and execution from racing. Native
+mission events are forwarded, but completion is published once, after the final
+report is appended to the conversation journal as a runtime observation. Resume
+restores discussion mode and completed results without replaying workers.
+Desktop maps agent-local permission IDs to connection-wide IDs and queues prompts
+so parallel workers cannot overwrite one another's permission request.

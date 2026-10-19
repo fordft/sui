@@ -41,7 +41,7 @@ function guardedRemote(args) {
     `else echo 'SUI is not installed on this SSH host' >&2; exit 127; fi; ` +
     `if ! "$sui_bin" --help 2>/dev/null | grep -q -- '--desktop-protocol'; then ` +
     `echo 'This SSH host has an older SUI CLI. Choose Install or update SUI on SSH host, then retry.' >&2; exit 78; fi; ` +
-    `exec "$sui_bin" --desktop-protocol 3 ${args}`;
+    `exec "$sui_bin" --desktop-protocol 4 ${args}`;
 }
 
 function remoteSetupCommand(subcommand = 'desktop-setup') {
@@ -63,7 +63,7 @@ function bridgeSpec(app, target, resume) {
     return { command: 'ssh', args: sshArgs(host, remoteCommand(workspace, profile, resume, target.reasoning_effort, target.model)) };
   }
   if (target.kind !== 'local') throw new Error('Choose Local or SSH.');
-  return { command: localBinary(app), args: ['--desktop-protocol', '3', 'desktop-bridge', '--workspace', workspace, '--profile', profile, ...(resume ? ['--resume', resume] : [...reasoningArg(target.reasoning_effort), ...modelArg(target.model)])] };
+  return { command: localBinary(app), args: ['--desktop-protocol', '4', 'desktop-bridge', '--workspace', workspace, '--profile', profile, ...(resume ? ['--resume', resume] : [...reasoningArg(target.reasoning_effort), ...modelArg(target.model)])] };
 }
 
 function spawnBridge(app, target, resume) {
@@ -73,7 +73,7 @@ function spawnBridge(app, target, resume) {
 
 function spawnSetup(app, target, subcommand = 'desktop-setup') {
   if (target.kind === 'ssh') return spawn('ssh', sshArgs(target.host, remoteSetupCommand(subcommand)), { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
-  if (target.kind === 'local') return spawn(localBinary(app), ['--desktop-protocol', '3', subcommand], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
+  if (target.kind === 'local') return spawn(localBinary(app), ['--desktop-protocol', '4', subcommand], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   throw new Error('Choose Local or SSH.');
 }
 

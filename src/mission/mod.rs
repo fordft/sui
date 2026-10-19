@@ -5,6 +5,7 @@
 //! (plans, verdicts); the runtime owns scheduling, transitions, budgets.
 //! Nothing model-driven manages the process.
 
+pub mod chat;
 pub mod plan;
 pub mod prompts;
 pub mod worktree;
@@ -1003,7 +1004,7 @@ async fn body(
 
     // ── PLANNING ────────────────────────────────────────────────────
     state!(S::Planning);
-    let base = match worktree::head(&cfg.repo).await {
+    let base = match worktree::preflight(&cfg.repo).await {
         Ok(b) => b,
         Err(e) => fail!(format!("resolve repo HEAD: {e:#}")),
     };

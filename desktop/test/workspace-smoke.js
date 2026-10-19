@@ -147,10 +147,16 @@ async function run() {
   const pixels = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEn8AAAAASUVORK5CYII=';
   await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'mac-screen.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
   await waitFor('state.images.length === 1 && !state.imagesLoading', 'dropped image draft');
+  await ui('document.getElementById("composer-execution").value="mission"; document.getElementById("composer-execution").dispatchEvent(new Event("change"))');
+  await waitFor('state.conversationMode === "mission" && state.missionInfo !== null', 'Mission mode available over SSH');
+  assert.equal(await ui('document.getElementById("mission-options").classList.contains("hidden")'), false);
+  assert.equal(await ui('document.getElementById("run-mission").disabled'), true, 'execution blocked without Git while coordinator chat remains available');
   const originalRun = await ui('state.hello.run_id');
   await ui('document.getElementById("message").value = "SSH screenshot"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("send").click()');
   await waitFor('state.activeRun === null && state.messages > 0', 'image turn over SSH');
   assert.equal(modelRequests.length, 1);
+  assert.equal(await ui('document.getElementById("run-mission").disabled'), true, 'chat succeeds but execution stays unavailable until a commit exists');
+  assert.ok(JSON.stringify(modelRequests[0].messages).includes('Runtime conversation mode'), 'Enter sends coordinator discussion, not worker execution');
   assert.ok(JSON.stringify(modelRequests[0].messages).includes(pixels), 'remote runtime sends the exact dropped pixels to the model');
   const bookmark = JSON.parse(fs.readFileSync(path.join(fixtureHome, 'connection.json'), 'utf8'));
   assert.equal(bookmark.session, originalRun);
@@ -160,6 +166,7 @@ async function run() {
   win.webContents.reload(); await loaded;
   await waitFor('state.hello !== null && !connectionBusy && state.hello.history.some(m => m.content.includes("SSH screenshot"))', 'restart restores the same native conversation');
   assert.equal(await ui('document.getElementById("connect-dialog").open'), false, 'restart requires no connection setup');
+  assert.equal(await ui('state.conversationMode'), 'mission', 'Mission mode survives native SSH recovery');
   assert.notEqual(await ui('state.hello.run_id'), originalRun, 'native recovery forks the original journal');
   assert.equal(modelRequests.length, 1, 'opening a saved chat does not run the model or replay tools');
   await ui('document.getElementById("message").value = "Use the earlier image"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("send").click()');

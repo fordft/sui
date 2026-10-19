@@ -845,6 +845,10 @@ pub enum Effect {
         mode: Mode,
         run: u64,
     },
+    RunMission {
+        task: String,
+        run: u64,
+    },
     Stop,
     Quit,
     /// Run one tiny web search to verify the service + credentials.
@@ -1703,6 +1707,24 @@ impl App {
                     at: now_hm(),
                 });
             }
+            UiEvent::MissionResult {
+                run,
+                outcome,
+                branch,
+                accepted_sha,
+                run_dir,
+            } => {
+                self.apply_event(UiEvent::Phase {
+                    run,
+                    agent: "mission".into(),
+                    text: crate::mission::chat::summary(
+                        &outcome,
+                        branch.as_deref(),
+                        accepted_sha.as_deref(),
+                        &run_dir,
+                    ),
+                });
+            }
             UiEvent::MissionState(s) => {
                 self.stage = s;
             }
@@ -2530,6 +2552,18 @@ impl App {
                 {
                     let task = self.input.text();
                     if task.starts_with('/') {
+                        if let Some(objective) = task.strip_prefix("/run ") {
+                            if self.mode == Mode::Mission {
+                                self.submit_task(objective.trim().into(), true);
+                            } else {
+                                self.status = "switch to Mission with /mission before /run".into();
+                            }
+                            return;
+                        }
+                        if task == "/run" {
+                            self.status = "usage: /run <mission objective> — Enter chats with the coordinator".into();
+                            return;
+                        }
                         match task.as_str() {
                             "/mission" => {
                                 self.command(Command::Mode(Mode::Mission));
@@ -2559,44 +2593,7 @@ impl App {
                         }
                         return;
                     }
-                    self.input.clear();
-                    // one activity group per submitted task — events with
-                    // this run id route here until RunDone
-                    self.next_run += 1;
-                    let run = self.next_run;
-                    self.groups.push(ActGroup {
-                        id: run,
-                        task: task.clone(),
-                        at: now_hm(),
-                        started: Instant::now(),
-                        done: false,
-                        failed: false,
-                        outcome: String::new(),
-                        expanded: false,
-                        collapsed: false,
-                        items: vec![],
-                        dur_ms: 0,
-                        reqs: 0,
-                        tools_ok: 0,
-                        tools_bad: 0,
-                        tools_other: 0,
-                    });
-                    self.history.push(task.clone());
-                    if self.history.len() > 200 {
-                        self.history.remove(0);
-                    }
-                    self.hist_i = None;
-                    self.running = true;
-                    self.started = Some(Instant::now());
-                    self.outcome.clear();
-                    self.follow();
-                    self.stop_flag
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.effects.push(Effect::SendTask {
-                        task,
-                        mode: self.mode,
-                        run,
-                    });
+                    self.submit_task(task, false);
                 } else if self.tab == Tab::Settings {
                     self.settings_activate(self.settings_sel);
                 }
@@ -2798,7 +2795,7 @@ impl App {
         self.status = if mode == Mode::Solo {
             "mode: solo (one worker)"
         } else {
-            "mode: mission (orchestrator → workers → auditor)"
+            "Mission: Enter chats · /run <objective> starts workers"
         }
         .into();
     }
@@ -2942,6 +2939,17 @@ impl App {
                         });
                     }
                 }
+                Some("runtime_observation")
+                    if d["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Mission result:")) =>
+                {
+                    self.apply_event(UiEvent::Phase {
+                        run,
+                        agent: "mission".into(),
+                        text: preview_text(d["content"].as_str().unwrap_or("")),
+                    });
+                }
                 Some("tool") => {
                     let status = match d["status"].as_str() {
                         Some("ok") => crate::events::ToolStatus::Ok,
@@ -2986,13 +2994,76 @@ impl App {
             }
         }
         self.run_dir = Some(dir);
-        self.ui.solo_profile = Some(profile.into());
-        self.mode = Mode::Solo;
+        self.mode = if saved
+            .events
+            .iter()
+            .rev()
+            .find(|e| e["type"] == "task")
+            .and_then(|e| e["data"]["mode"].as_str())
+            .is_some_and(|m| m.starts_with("mission-"))
+        {
+            Mode::Mission
+        } else {
+            Mode::Solo
+        };
+        if self.mode == Mode::Mission {
+            self.ui.orchestrator_profile = Some(profile.into());
+        } else {
+            self.ui.solo_profile = Some(profile.into());
+        }
         self.tab = Tab::Chat;
         self.running = false;
         self.resume_pending = false;
         self.status = format!("resumed {} · saved checks are historical", saved.id);
         self.sync_layout();
+    }
+
+    fn submit_task(&mut self, task: String, execute_mission: bool) {
+        if task.trim().is_empty() || self.running || self.resume_pending {
+            return;
+        }
+        self.input.clear();
+        // one activity group per submitted task — events with
+        // this run id route here until RunDone
+        self.next_run += 1;
+        let run = self.next_run;
+        self.groups.push(ActGroup {
+            id: run,
+            task: task.clone(),
+            at: now_hm(),
+            started: Instant::now(),
+            done: false,
+            failed: false,
+            outcome: String::new(),
+            expanded: false,
+            collapsed: false,
+            items: vec![],
+            dur_ms: 0,
+            reqs: 0,
+            tools_ok: 0,
+            tools_bad: 0,
+            tools_other: 0,
+        });
+        self.history.push(task.clone());
+        if self.history.len() > 200 {
+            self.history.remove(0);
+        }
+        self.hist_i = None;
+        self.running = true;
+        self.started = Some(Instant::now());
+        self.outcome.clear();
+        self.follow();
+        self.stop_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if execute_mission {
+            self.effects.push(Effect::RunMission { task, run });
+        } else {
+            self.effects.push(Effect::SendTask {
+                task,
+                mode: self.mode,
+                run,
+            });
+        }
     }
 
     pub fn command(&mut self, command: Command) {
@@ -3007,6 +3078,7 @@ impl App {
                 self.sel = None;
             }
             Command::Mode(m) => self.set_mode(m),
+            Command::RunMission => self.submit_task(self.input.text(), true),
             Command::Sidebar => self.sidebar = !self.sidebar,
             Command::Reasoning => self.cycle_reasoning(),
             Command::Theme => {

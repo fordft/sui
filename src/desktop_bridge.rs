@@ -79,7 +79,20 @@ enum Command {
         text: String,
         #[serde(default)]
         images: Vec<crate::desktop_images::Image>,
+        #[serde(default)]
+        mode: ConversationMode,
     },
+    RunMission {
+        run: u64,
+        text: String,
+        #[serde(default)]
+        images: Vec<crate::desktop_images::Image>,
+        worker_profile: Option<String>,
+        auditor_profile: Option<String>,
+        #[serde(default = "one_worker")]
+        max_workers: usize,
+    },
+    MissionInfo,
     Approve {
         id: u64,
         choice: String,
@@ -90,6 +103,32 @@ enum Command {
     SetApproval {
         mode: ApprovalMode,
     },
+}
+
+fn one_worker() -> usize {
+    1
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ConversationMode {
+    #[default]
+    Solo,
+    Mission,
+}
+
+async fn mission_info(workspace: &Path) -> Value {
+    let issue = crate::mission::worktree::preflight(workspace)
+        .await
+        .err()
+        .map(|error| error.to_string());
+    let profiles = crate::config::profiles(None)
+        .unwrap_or_default()
+        .into_iter()
+        .take(200)
+        .map(|(name, p)| json!({"name":name,"model":p.model}))
+        .collect::<Vec<_>>();
+    json!({"ready":issue.is_none(),"issue":issue,"profiles":profiles})
 }
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -221,6 +260,16 @@ fn project_event(event: UiEvent) -> (Value, Option<PermissionReply>) {
         ),
         UiEvent::Error { run, agent, msg } => (
             json!({"type":"error","run":run,"agent":agent,"message":msg}),
+            None,
+        ),
+        UiEvent::MissionResult {
+            run,
+            outcome,
+            branch,
+            accepted_sha,
+            run_dir,
+        } => (
+            json!({"type":"mission_result","run":run,"outcome":outcome,"branch":branch,"accepted_sha":accepted_sha,"run_dir":run_dir}),
             None,
         ),
         UiEvent::MissionState(state) => (json!({"type":"mission_state","state":state}), None),
@@ -394,7 +443,7 @@ pub async fn run(
             let entries = session.events.iter().filter_map(|event| {
                 let role = match event["type"].as_str()? {
                     "task" => "user",
-                    "assistant" => "assistant",
+                    "assistant" | "runtime_observation" => "assistant",
                     _ => return None,
                 };
                 let content = event["data"][if role == "user" { "task" } else { "content" }]
@@ -434,19 +483,42 @@ pub async fn run(
     let cancel = Arc::new(Notify::new());
     let stopped = Arc::new(AtomicBool::new(false));
     let session_allow = Arc::new(AtomicBool::new(false));
+    let selected_profile = prof.clone();
+    let web = Some(crate::web::WebService::new(crate::web::load_cfg(None)));
     let solo = crate::tui::start_solo(
         prof,
         workspace.clone(),
         dir.clone(),
-        event_tx,
+        event_tx.clone(),
         cancel.clone(),
         stopped.clone(),
         session_allow.clone(),
-        Some(crate::web::WebService::new(crate::web::load_cfg(None))),
+        web.clone(),
         saved.as_ref(),
     )?;
     let recovered = saved.as_ref().is_some_and(|s| s.recovered);
+    let conversation_mode = saved
+        .as_ref()
+        .and_then(|s| s.events.iter().rev().find(|e| e["type"] == "task"))
+        .and_then(|e| e["data"]["mode"].as_str())
+        .filter(|m| m.starts_with("mission-"))
+        .map(|_| "mission")
+        .unwrap_or("solo");
+    let mut last_mission_task = saved
+        .as_ref()
+        .and_then(|s| {
+            s.events.iter().rev().find(|e| {
+                e["type"] == "task"
+                    && e["data"]["mode"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("mission-"))
+            })
+        })
+        .and_then(|e| e["data"]["task"].as_str())
+        .unwrap_or("")
+        .to_string();
     drop(saved);
+    let mission = mission_info(&workspace).await;
     let (command_tx, mut command_rx) = mpsc::channel::<Result<Command, String>>(4);
     std::thread::spawn(move || {
         use std::io::Read;
@@ -478,20 +550,21 @@ pub async fn run(
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"conversation_mode":conversation_mode,"last_mission_task":last_mission_task,"mission":mission,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
     )?;
     let mut pending: std::collections::HashMap<
         u64,
         (PermissionScope, mpsc::UnboundedSender<GateChoice>),
     > = std::collections::HashMap::new();
     let mut active = None;
+    let mut next_permission = 0u64;
     let mut input_open = true;
     let yolo = Arc::new(AtomicBool::new(false));
     let mut approval = ApprovalMode::Ask;
     loop {
         tokio::select! {
             command = command_rx.recv(), if input_open => match command {
-                Some(Ok(Command::Send { run, text, images })) => {
+                Some(Ok(Command::Send { run, text, images, mode })) => {
                     if (text.trim().is_empty() && images.is_empty()) || text.len() > MAX_MESSAGE || run == 0 {
                         send_line(&json!({"type":"send_error","run":run,"message":"provide text or images, at most 65536 text bytes, and a positive run number"}))?;
                     } else if active.is_some() {
@@ -504,7 +577,47 @@ pub async fn run(
                         pending.clear();
                         stopped.store(false, Ordering::SeqCst);
                         active = Some(run);
-                        if !solo.send_desktop(run, text, images, yolo.clone()) { bail!("agent session closed"); }
+                        let sent = if mode == ConversationMode::Mission {
+                            last_mission_task = text.clone();
+                            solo.send_mission_chat(run, text, web.clone(), images, Some(yolo.clone()))
+                        } else { solo.send_desktop(run, text, images, yolo.clone()) };
+                        if !sent { bail!("agent session closed"); }
+                    }
+                }
+                Some(Ok(Command::MissionInfo)) => send_line(&json!({"type":"mission_info","mission":mission_info(&workspace).await}))?,
+                Some(Ok(Command::RunMission { run, text, images, worker_profile, auditor_profile, max_workers })) => {
+                    let objective = if text.trim().is_empty() { last_mission_task.clone() } else { text };
+                    let preparation = async {
+                        if active.is_some() { bail!("a turn is already running"); }
+                        if run == 0 || objective.trim().is_empty() || objective.len() > MAX_MESSAGE { bail!("provide a mission objective of at most 65536 bytes"); }
+                        if !images.is_empty() { bail!("Send images to the coordinator before running the mission"); }
+                        if !(1..=2).contains(&max_workers) { bail!("choose one or two workers"); }
+                        crate::mission::worktree::preflight(&workspace).await?;
+                        let resolve = |name: Option<String>| -> Result<crate::config::Profile> {
+                            match name.filter(|n| !n.is_empty()) {
+                                Some(name) if name != profile => crate::config::resolve_profile(&name, None),
+                                _ => Ok(selected_profile.clone()),
+                            }
+                        };
+                        Ok((resolve(worker_profile)?, resolve(auditor_profile)?))
+                    }.await;
+                    match preparation {
+                        Err(error) => send_line(&json!({"type":"send_error","run":run,"message":error.to_string()}))?,
+                        Ok((worker, auditor)) => {
+                            stopped.store(false, Ordering::SeqCst);
+                            pending.clear(); active = Some(run); last_mission_task = objective.clone();
+                            let al = crate::config::agent_limits(&workspace);
+                            let session = format!("desktop-{:032x}",rand::random::<u128>());
+                            let cfg = crate::mission::MissionCfg {
+                                repo:workspace.clone(), run_dir:dir.join(&session), control:selected_profile.clone(), worker, auditor:Some(auditor), objective,
+                                max_workers, session, keep_worktrees:false,
+                                request_timeout:std::time::Duration::from_millis(al.request_timeout_ms), task_timeout:std::time::Duration::from_secs(900),
+                                context_budget:al.context_token_budget, context_reserve:al.context_reserve_tokens, control_max_turns:al.max_turns, worker_max_turns:al.max_turns,
+                                events:Some(event_tx.clone()), cancel:Some((cancel.clone(),stopped.clone())), session_approve:Some(session_allow.clone()), web:web.clone(), run,
+                            };
+                            send_line(&json!({"type":"mission_started","run":run}))?;
+                            if !solo.run_mission(cfg) { bail!("agent session closed"); }
+                        }
                     }
                 }
                 Some(Ok(Command::Approve { id, choice })) => {
@@ -564,8 +677,12 @@ pub async fn run(
             },
             event = event_rx.recv() => match event {
                 Some(event) => {
-                    let (value, reply) = project_event(event);
-                    if let Some((id, scope, reply)) = reply { pending.insert(id, (scope, reply)); }
+                    let (mut value, reply) = project_event(event);
+                    if let Some((_, scope, reply)) = reply {
+                        next_permission = next_permission.checked_add(1).context("permission sequence exhausted")?;
+                        value["id"] = json!(next_permission);
+                        pending.insert(next_permission, (scope, reply));
+                    }
                     let done = value["type"] == "run_done";
                     if done { active = None; pending.clear(); }
                     send_projected(&value)?;

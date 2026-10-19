@@ -172,6 +172,14 @@ pub enum UiEvent {
     },
     /// Mission state machine transition.
     MissionState(String),
+    /// Runtime report, separate from streamed model claims.
+    MissionResult {
+        run: u64,
+        outcome: String,
+        branch: Option<String>,
+        accepted_sha: Option<String>,
+        run_dir: std::path::PathBuf,
+    },
     /// Task-contract status row (from plan / worker results).
     TaskRows(Value),
     /// Files changed on a candidate (+ branch/sha when known).
