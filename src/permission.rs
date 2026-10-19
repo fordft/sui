@@ -175,34 +175,6 @@ impl Gate {
     }
 }
 
-/// Conservative inspection forms only. No shell operators, expansions, scripts,
-/// external diff drivers, or destructive commands inherit Desktop YOLO.
-pub(crate) fn inspection_command(command: &str) -> bool {
-    if command
-        .bytes()
-        .any(|b| !(b.is_ascii_alphanumeric() || b" ./_-=\t".contains(&b)))
-    {
-        return false;
-    }
-    let words: Vec<_> = command.split_whitespace().collect();
-    if words.iter().any(|w| w.contains("..") || w.starts_with('/')) {
-        return false;
-    }
-    match words.as_slice() {
-        ["pwd"] => true,
-        ["git", "status", rest @ ..] => rest
-            .iter()
-            .all(|s| matches!(*s, "--short" | "--porcelain" | "--branch")),
-        ["git", "diff", "--no-ext-diff", "--no-textconv", rest @ ..] => rest
-            .iter()
-            .all(|s| matches!(*s, "--stat" | "--name-only" | "--")),
-        ["ls", rest @ ..] => rest
-            .iter()
-            .all(|s| !s.starts_with('-') || matches!(*s, "-a" | "-l" | "-la" | "-al" | "-1")),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -514,10 +514,12 @@ Remote loopback previews use SSH forwarding. Browser guest content receives no
 filesystem, shell, Electron IPC or agent permission authority.
 
 Protocol 3 adds bounded image submissions and typed Local/Command/Independent
-permission scopes. Session approval covers edits only. Desktop YOLO also permits
-conservative inspection command forms; arbitrary scripts and potentially
-destructive commands still need a specific approval. Independent surface grants
-never inherit local mode. EOF stops the turn and drains runtime events before
+permission scopes. Session approval covers edits only. Explicit Desktop YOLO
+covers every local command/script, including destructive actions; it does not
+classify commands by text. The live mode flag is checked on each dispatch.
+Switching to YOLO resolves waiting Local and Command permissions; Auto edits
+resolves only Local permissions. Independent surface grants never inherit local
+mode. Ask/Auto edits revoke local command auto-approval. EOF stops the turn and drains runtime events before
 shutdown, preserving a closed journal boundary.
 
 The main process stores an owner-only connection bookmark and chat pointer,

@@ -34,10 +34,12 @@ agent loop.
   Enter sends (not while an input method is composing), Shift+Enter inserts a
   newline, and you can keep drafting while SUI works.
 - **Approvals:** Ask, Auto edits, and YOLO can be changed while idle or while
-  approval is waiting. YOLO allows file edits and simple inspection commands;
-  scripts, potentially destructive commands, web, and browser permissions still
-  ask. **Switch to YOLO & allow once** approves the displayed action explicitly.
-  Approval choices are never restored from a previous connection.
+  approval is waiting. YOLO approves all local commands and scripts, including
+  destructive actions, and file edits. Switching the dropdown to YOLO releases
+  waiting local approvals immediately. Web/browser consent remains independent.
+  **Switch to YOLO** also grants local command auto-approval for
+  subsequent calls. Ask and Auto edits revoke that command grant. Approval
+  choices are never restored from a previous connection.
 - **Images:** drag and drop, paste, or attach PNG/JPEG/WebP files, then Send.
   Up to four images (4 MiB each, 8 MiB total) travel over SSH to the native agent.
   The account catalog supplies ChatGPT image capability; other profiles require

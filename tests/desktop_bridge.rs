@@ -115,6 +115,152 @@ fn desktop_setup_and_bridge_start_without_a_terminal() {
 mod common;
 
 #[test]
+fn yolo_dropdown_releases_pending_commands_and_keeps_surface_consent_independent() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let requests = AtomicUsize::new(0);
+    let port = common::serve(move |_, _| {
+        let request = requests.fetch_add(1, Ordering::SeqCst) + 1;
+        let tool = match request {
+            1 => Some((
+                "bash",
+                json!({"command":"pwd && ls -la && printf first > first.txt"}),
+            )),
+            2 => Some((
+                "bash",
+                json!({"command":"python3 - <<'PY'\nfrom pathlib import Path\nPath('first.txt').unlink()\nPath('script.txt').write_text('ran')\nPY"}),
+            )),
+            3 => Some(("web_fetch", json!({"url":"http://127.0.0.1/never-fetch"}))),
+            4 => Some(("write_file", json!({"path":"auto.txt","content":"written"}))),
+            6 => Some(("bash", json!({"command":"rm script.txt"}))),
+            8 => Some((
+                "write_file",
+                json!({"path":"denied.txt","content":"must not write"}),
+            )),
+            _ => None,
+        };
+        let event = match tool {
+            Some((name, args)) => {
+                json!({"type":"response.output_item.done","item":{"type":"function_call","call_id":format!("call-{request}"),"name":name,"arguments":args.to_string()}})
+            }
+            None => json!({"type":"response.output_text.delta","delta":"done"}),
+        };
+        format!(
+            "data: {event}\n\ndata: {}\n\n",
+            json!({"type":"response.completed","response":{"model":"gpt-6.1-sol"}})
+        )
+    });
+    let root =
+        std::env::temp_dir().join(format!("sui-yolo-dropdown-{:016x}", rand::random::<u64>()));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[profiles.test]\nkind=\"openai-responses\"\nmodel=\"gpt-6.1-sol\"\nbase_url=\"http://127.0.0.1:{port}/v1\"\n[web]\naccess=\"ask\"\n")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sui"))
+        .args(["--desktop-protocol", "3", "desktop-bridge", "--workspace"])
+        .arg(&workspace)
+        .args(["--profile", "test"])
+        .env("HOME", &root)
+        .env("SUI_HOME", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let next = || {
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("bridge timed out")
+    };
+    assert_eq!(next()["approval"], "ask");
+    for (run, mode) in [(1, "ask"), (2, "auto-edits"), (3, "ask")] {
+        if run != 1 {
+            writeln!(input, "{}", json!({"type":"set_approval","mode":mode})).unwrap();
+            assert_eq!(next()["approval"], mode);
+        }
+        writeln!(
+            input,
+            "{}",
+            json!({"type":"send","run":run,"text":"Exercise the local approval policy."})
+        )
+        .unwrap();
+        let mut prompts = 0;
+        loop {
+            let event = next();
+            if event["type"] == "permission" {
+                prompts += 1;
+                if run == 1 && prompts == 1 {
+                    assert_eq!(event["allow_session"], false);
+                    writeln!(input, "{}", json!({"type":"set_approval","mode":"yolo"})).unwrap();
+                    let resolved = next();
+                    assert_eq!(resolved["type"], "permission_resolved");
+                    assert_eq!(resolved["id"], event["id"]);
+                    assert_eq!(next()["approval"], "yolo");
+                    // No separate Allow click: this command must now execute.
+                    continue;
+                }
+                if run == 1 {
+                    assert_eq!(
+                        prompts, 2,
+                        "YOLO must not prompt for scripts or file writes"
+                    );
+                    assert_eq!(
+                        event["allow_yolo"], false,
+                        "only independent web consent may prompt"
+                    );
+                    writeln!(input, "{}", json!({"type":"set_approval","mode":"yolo"})).unwrap();
+                    assert_eq!(
+                        next()["type"],
+                        "settings",
+                        "changing YOLO must not resolve web consent"
+                    );
+                }
+                writeln!(
+                    input,
+                    "{}",
+                    json!({"type":"approve","id":event["id"],"choice":"deny"})
+                )
+                .unwrap();
+            }
+            if event["type"] == "run_done" {
+                break;
+            }
+        }
+        assert_eq!(prompts, if run == 1 { 2 } else { 1 });
+        assert_eq!(next()["type"], "settings");
+    }
+    assert!(
+        !workspace.join("first.txt").exists(),
+        "YOLO authorizes local deletion"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("script.txt")).unwrap(),
+        "ran"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("auto.txt")).unwrap(),
+        "written"
+    );
+    assert!(
+        !workspace.join("denied.txt").exists(),
+        "Ask must revoke file approval"
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn reasoning_and_edit_mode_reach_runtime_without_granting_commands() {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -426,7 +572,7 @@ fn image_turn_live_yolo_switch_and_eof_restore_preserve_real_runtime_state() {
         requests.push(serde_json::from_slice(body).unwrap());
         let tool = match requests.len() {
             1 => Some(("write_file", json!({"path":"keep.txt","content":"keep"}))),
-            2 => Some(("bash", json!({"command":"pwd"}))),
+            2 => Some(("bash", json!({"command":"pwd && ls -la"}))),
             3 => Some(("bash", json!({"command":"rm keep.txt"}))),
             5 => Some((
                 "write_file",
@@ -495,21 +641,25 @@ fn image_turn_live_yolo_switch_and_eof_restore_preserve_real_runtime_state() {
         if event["type"] == "permission" {
             prompts += 1;
             assert_eq!(event["allow_yolo"], true);
-            if prompts == 1 {
-                assert_eq!(event["allow_session"], true);
-            } else {
-                assert_eq!(event["allow_session"], false);
-                assert!(event["summary"].as_str().unwrap().contains("rm keep.txt"));
-            }
-            writeln!(input,"{}",json!({"type":"approve","id":event["id"],"choice":if prompts==1 {"yolo"}else{"deny"}})).unwrap();
+            assert_eq!(
+                prompts, 1,
+                "YOLO must not prompt for later local commands: {event}"
+            );
+            assert_eq!(event["allow_session"], true);
+            writeln!(
+                input,
+                "{}",
+                json!({"type":"approve","id":event["id"],"choice":"yolo"})
+            )
+            .unwrap();
         }
         if event["type"] == "run_done" {
             break;
         }
     }
     assert_eq!(
-        prompts, 2,
-        "inspection commands may run, destructive commands still prompt"
+        prompts, 1,
+        "YOLO approves compound commands and destructive local commands"
     );
     assert_eq!(next()["approval"], "yolo");
     writeln!(input, "{}", json!({"type":"set_approval","mode":"ask"})).unwrap();
@@ -531,9 +681,9 @@ fn image_turn_live_yolo_switch_and_eof_restore_preserve_real_runtime_state() {
         "EOF should cancel and finish journaling before exit"
     );
     assert!(!workspace.join("cancelled.txt").exists());
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
-        "keep"
+    assert!(
+        !workspace.join("keep.txt").exists(),
+        "YOLO approved the removal"
     );
     assert_eq!(requests.lock().unwrap().len(), 5);
     let journal = root

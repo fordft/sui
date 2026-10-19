@@ -122,7 +122,7 @@
               <div class="permission-actions">
                 <button data-choice="deny" class="btn btn-sm btn-danger-soft" type="button">Deny</button>
                 <button data-choice="once" class="btn btn-sm btn-ghost" type="button">Allow once</button>
-                <button data-choice="yolo" class="btn btn-sm btn-primary hidden" type="button">Switch to YOLO &amp; allow once</button>
+                <button data-choice="yolo" class="btn btn-sm btn-primary hidden" type="button">Switch to YOLO</button>
                 <button data-choice="session" class="btn btn-sm btn-primary" type="button">Allow session</button>
               </div>
             </div>
@@ -135,7 +135,7 @@
               <div id="composer-context" class="composer-context hidden">
                 <button type="button" id="choose-model" class="model-pill" aria-label="Change model" aria-haspopup="dialog" title="Change model"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span><span aria-hidden="true">⌄</span></button>
                 <label class="composer-setting" title="Reasoning effort. Changing it starts a new chat and preserves your draft."><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="sr-only">Reasoning level</span><select id="composer-reasoning" aria-label="Reasoning level"><option value="default">Provider default</option></select></label>
-                <label class="composer-setting" title="Auto edits approves file changes. YOLO also approves simple inspection commands. Scripts, potentially destructive commands, web and browser still ask."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option><option value="yolo">YOLO</option></select></label>
+                <label class="composer-setting" title="Auto edits approves file changes. YOLO approves all local commands and scripts, including destructive actions. Web and browser permissions remain separate."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option><option value="yolo">YOLO</option></select></label>
                 <span id="composer-target" class="composer-target"></span><button type="button" id="composer-usage" class="link-btn hidden">Using ChatGPT plan · Manage usage</button>
               </div>
               <div id="image-attachments" class="image-attachments hidden" aria-label="Attached images"></div>

@@ -1,6 +1,6 @@
 {
   "name": "sui-desktop",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "private": true,
   "description": "SUI Desktop for macOS and Linux",
   "main": "main.js",

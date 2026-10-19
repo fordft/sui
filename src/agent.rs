@@ -137,15 +137,12 @@ impl Agent {
         self.desktop_yolo = yolo;
     }
 
-    async fn approve_local(&mut self, name: &str, summary: &str, args: &Value) -> bool {
+    async fn approve_local(&mut self, name: &str, summary: &str) -> bool {
         if let Some(yolo) = &self.desktop_yolo {
             if !matches!(name, "write_file" | "edit_file" | "patch_files") {
-                // Arbitrary shell/scripts cannot be proved non-destructive.
-                // YOLO only skips command prompts for bounded inspection forms.
-                if yolo.load(Ordering::SeqCst)
-                    && name == "bash"
-                    && crate::permission::inspection_command(args["command"].as_str().unwrap_or(""))
-                {
+                // Explicit YOLO grants all local commands/scripts. Independent
+                // web/browser consent is checked before reaching this gate.
+                if yolo.load(Ordering::SeqCst) {
                     return !self.stop.load(Ordering::Relaxed);
                 }
                 return self
@@ -866,9 +863,7 @@ impl Agent {
                 } else if let Some(d) = self.web_gate(name, &summary).await {
                     d
                 } else if needs_approval(name, plan.as_ref().expect("batch_ok implies parsed"))
-                    && !self
-                        .approve_local(name, &summary, plan.as_ref().expect("validated arguments"))
-                        .await
+                    && !self.approve_local(name, &summary).await
                 {
                     if self.stop.load(Ordering::Relaxed) {
                         Disp::new(

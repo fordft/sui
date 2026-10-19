@@ -42,8 +42,9 @@ Integration binaries: `sui`, `sui-mission`, `sui-certify`.
   proof; plans/verdicts/decisions go through `submit_result` and are
   re-validated. Reported tool activity is evidence, not re-executed.
 - **Original repos are never touched by missions** — worktrees only.
-- **Permissions are independent per surface.** YOLO/session auto-approve
-  never enables web egress or destructive actions.
+- **Permissions are independent per surface.** Desktop YOLO explicitly grants
+  all local commands and scripts, including destructive actions. Auto edits
+  grants file edits only. Neither mode enables independent web/browser access.
 - **Honest telemetry.** Unknown cost/cache stays unknown — never
   report $0 or fabricated hits. Secrets never enter journals, exports,
   model messages, or spawned-agent environments.

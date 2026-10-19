@@ -518,8 +518,8 @@ pub async fn run(
                                 session_allow.store(true, Ordering::SeqCst);
                                 yolo.store(true, Ordering::SeqCst);
                                 send_line(&json!({"type":"settings","approval":approval.label()}))?;
-                                // The click approves this specific pending action once;
-                                // potentially destructive future commands still ask.
+                                // The explicit click also grants future local commands.
+                                // Independent surface permissions remain separate.
                                 GateChoice::Once
                             },
                             _ => GateChoice::Deny,
@@ -548,7 +548,7 @@ pub async fn run(
                         session_allow.store(mode != ApprovalMode::Ask, Ordering::SeqCst);
                         yolo.store(mode == ApprovalMode::Yolo, Ordering::SeqCst);
                         if mode != ApprovalMode::Ask {
-                            let local: Vec<_> = pending.iter().filter(|(_, (scope, _))| *scope == PermissionScope::Local).map(|(id, _)| *id).collect();
+                            let local: Vec<_> = pending.iter().filter(|(_, (scope, _))| *scope == PermissionScope::Local || (mode == ApprovalMode::Yolo && *scope == PermissionScope::Command)).map(|(id, _)| *id).collect();
                             for id in local { if let Some((_, reply)) = pending.remove(&id) { let _ = reply.send(GateChoice::Once); send_line(&json!({"type":"permission_resolved","id":id}))?; } }
                         }
                         send_line(&json!({"type":"settings","approval":approval.label()}))?;

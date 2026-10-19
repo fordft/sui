@@ -32,9 +32,10 @@ ChatGPT reasoning choices and defaults come from the selected model's catalog;
 unsupported catalog modes appear disabled. Other providers use known model
 capabilities. The mode selector offers **Ask before changes**, **Auto edits**,
 and **YOLO** for the current chat, including while an approval is waiting.
-YOLO allows file edits and simple inspection commands; arbitrary scripts,
-potentially destructive commands, web access, and browser actions still ask.
-A pending action can be approved once while switching to YOLO. Long command
+YOLO approves all local commands and scripts, including destructive actions,
+as well as file edits. Web and browser permissions remain separate. Switching
+to YOLO also releases any waiting local approval without another Allow click.
+Switching back to Ask or Auto edits revokes command auto-approval. Long command
 previews scroll inside the approval card so its buttons stay reachable.
 
 Drag PNG, JPEG, or WebP images onto the app, paste them, or use the attachment
