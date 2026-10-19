@@ -302,6 +302,7 @@ pub fn start_solo(
                 .map(|k| context::sha256_hex(k.as_bytes())),
         },
     );
+    agent.enable_mission_discussion();
     agent.set_quiet(true);
     agent.wire_ui(sink.clone(), cancel, flag.clone(), Some(session.clone()));
     agent.set_run_id(0);
@@ -401,7 +402,7 @@ async fn run_interactive_mission(agent: &mut Agent, mut cfg: mission::MissionCfg
     let run = cfg.run;
     let dir = cfg.run_dir.clone();
     let request = cfg.objective.clone();
-    cfg.objective = mission::chat::objective(&request, agent.history());
+    let objective = agent.mission_objective(&request);
     agent.set_run_id(run);
     agent.set_mission_chat(true);
     agent.jlog(
@@ -410,18 +411,25 @@ async fn run_interactive_mission(agent: &mut Agent, mut cfg: mission::MissionCfg
     );
     agent.jlog("turn_start", serde_json::json!({"run":run}));
     agent.push_user(&format!("The user requested Mission execution: {request}"));
-    let (tx, mut rx) = unbounded_channel();
-    cfg.events = Some(tx);
-    let out = sink.clone();
-    let forward = tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if !matches!(event, UiEvent::RunDone { .. }) {
-                let _ = out.send(event);
-            }
+    let result = match objective {
+        Ok(objective) => {
+            cfg.objective = objective;
+            let (tx, mut rx) = unbounded_channel();
+            cfg.events = Some(tx);
+            let out = sink.clone();
+            let forward = tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if !matches!(event, UiEvent::RunDone { .. }) {
+                        let _ = out.send(event);
+                    }
+                }
+            });
+            let result = mission::run(cfg).await;
+            let _ = forward.await;
+            result
         }
-    });
-    let result = mission::run(cfg).await;
-    let _ = forward.await;
+        Err(error) => Err(error),
+    };
     let (outcome, branch, sha) = match result {
         Ok(report) => (report.outcome, report.branch, report.accepted_sha),
         Err(error) => (format!("error: {error:#}"), None, None),

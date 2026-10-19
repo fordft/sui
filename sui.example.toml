@@ -182,6 +182,7 @@ bash_timeout_max_ms = 600000
 # workspace = "~/workspaces"         # default workspace dir
 # mode = "solo"                      # "solo" | "mission"; Mission Enter chats, /run <objective> executes
 # solo_profile = "cheap"
+# Mission execution keeps original discussion up to 128 KiB; overflow asks for a new complete brief.
 # orchestrator_profile = "strong"
 # worker_profile = "cheap"
 # auditor_profile = "strong"         # unset = reuse orchestrator

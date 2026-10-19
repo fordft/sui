@@ -2,7 +2,7 @@ const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
   browserOpen: false, browserShown: false, permissionId: null, permissionSending: false, log: null, messages: 0, projects: [], profiles: null, settingsPending: false, images: [], imagesLoading: 0, pendingSubmission: null,
-  conversationMode: 'solo', lastMissionTask: '', missionInfo: null, activeMission: false, missionCard: null, missionStreams: new Map(), permissionQueue: []
+  conversationMode: 'solo', lastMissionTask: '', missionInfo: null, missionInfoPending: false, activeMission: false, missionCard: null, missionStreams: new Map(), permissionQueue: []
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -48,12 +48,13 @@ function setStatus(label, connected, busy = false) {
 
 function updateSend() {
   const draft = $('message').value.trim() || state.annotation || state.images.length;
-  $('run-mission').disabled = !state.hello || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || state.images.length > 0 || !(String($('message').value).trim() || state.lastMissionTask);
+  $('run-mission').disabled = !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || state.images.length > 0 || !(String($('message').value).trim() || state.lastMissionTask);
   $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (state.images.length > 0 && !state.hello?.image_input) || !draft;
 }
 
 function setBusy(busy) {
   const ready = !!state.hello;
+  $('refresh-mission').disabled = !ready || busy || state.missionInfoPending;
   $('composer-execution').disabled = !ready || busy || state.settingsPending;
   for (const id of ['mission-worker', 'mission-auditor', 'mission-workers']) $(id).disabled = !ready || busy;
   $('choose-model').disabled = !ready || busy || state.settingsPending;
@@ -719,6 +720,7 @@ async function connect(item, resume = null) {
     state.permissionId = null;
     state.permissionSending = false;
     state.permissionQueue = []; state.activeMission = false; state.missionCard = null; state.missionStreams = new Map();
+    state.missionInfoPending = false;
     state.conversationMode = hello.conversation_mode || 'solo'; state.lastMissionTask = hello.last_mission_task || '';
     setMissionInfo(hello.mission);
     pet().setAsking(false);
@@ -829,6 +831,13 @@ function clearPermission() {
   pet().setAsking(false);
   setBusy(state.activeRun !== null);
 }
+function acceptSubmission(run) {
+  const submission = state.pendingSubmission;
+  if (!submission || submission.run !== run) return;
+  if (submission.missionObjective !== null) state.lastMissionTask = submission.missionObjective;
+  state.pendingSubmission = null;
+}
+
 function restoreSubmission() {
   const submission = state.pendingSubmission;
   if (submission) {
@@ -847,11 +856,26 @@ function renderMissionMode() {
   $('run-mission').classList.toggle('hidden', !enabled);
   $('mission-options').classList.toggle('hidden', !enabled);
   $('mission-help').classList.toggle('hidden', !enabled);
+  $('refresh-mission').classList.toggle('hidden', !enabled);
   $('mission-help').textContent = state.missionInfo?.issue || 'Discuss the objective, then Run mission. Workers run from committed HEAD in a separate branch; uncommitted edits are excluded.';
   setBusy(state.activeRun !== null);
 }
 
+function refreshMissionInfo() {
+  if (!state.hello || state.conversationMode !== 'mission' || state.activeRun !== null || state.missionInfoPending) return;
+  const session = state.hello;
+  state.missionInfoPending = true;
+  setBusy(false);
+  window.sui.command({ type: 'mission_info' }).catch(error => {
+    if (state.hello !== session) return;
+    state.missionInfoPending = false;
+    setBusy(state.activeRun !== null);
+    appendNotice(`Could not check the project: ${error.message}`, true);
+  });
+}
+
 function setMissionInfo(info) {
+  state.missionInfoPending = false;
   state.missionInfo = info;
   for (const id of ['mission-worker', 'mission-auditor']) {
     const previous = $(id).value;
@@ -914,23 +938,23 @@ async function send(executeMission = false) {
   if (state.annotation && !comment) { $('annotation-comment').focus(); return; }
   const text = [message, state.annotation ? formatAnnotation(state.annotation, comment) : ''].filter(Boolean).join('\n\n');
   const display = [message, state.annotation ? `◎ ${comment}` : '', ...state.images.map(image => `Attached image: ${image.name}`)].filter(Boolean).join('\n');
+  const objective = executeMission ? text || state.lastMissionTask : null;
   const run = state.nextRun++;
   const images = state.images;
-  state.pendingSubmission = { run, draft: $('message').value, images };
+  state.pendingSubmission = { run, draft: $('message').value, images, missionObjective: executeMission ? objective : state.conversationMode === 'mission' ? text : null };
   state.images = []; renderImages(); imageError();
   state.activeRun = run;
   state.assistant = null;
   closeLog(true);
-  appendMessage('user', executeMission ? `Run mission: ${display || state.lastMissionTask}` : display);
+  appendMessage('user', executeMission ? `Run mission: ${objective}` : display);
   state.activeMission = executeMission;
   if (executeMission) beginMission(run);
-  else if (state.conversationMode === 'mission') state.lastMissionTask = text;
   $('message').value = '';
   window.SuiUI.autosize($('message'));
   clearAnnotation();
   setBusy(true);
   const command = executeMission
-    ? { type: 'run_mission', run, text, worker_profile: $('mission-worker').value || null, auditor_profile: $('mission-auditor').value || null, max_workers: Number($('mission-workers').value) }
+    ? { type: 'run_mission', run, text: objective, worker_profile: $('mission-worker').value || null, auditor_profile: $('mission-auditor').value || null, max_workers: Number($('mission-workers').value) }
     : { type: 'send', run, text, mode: state.conversationMode, images: images.map(({ name, mime, data }) => ({ name, mime, data })) };
   try { await window.sui.command(command); }
   catch (error) { appendNotice(`Send failed: ${error.message}`, true); restoreSubmission(); }
@@ -948,9 +972,9 @@ function finishRun(outcome) {
 
 function onEvent(event) {
   switch (event.type) {
-    case 'request_start': state.pendingSubmission = null; break;
+    case 'request_start': acceptSubmission(event.run); break;
     case 'send_error':
-      if (event.run === state.activeRun) { if (state.activeMission && state.missionCard) state.missionCard.stage.textContent = 'Mission · Not started'; state.activeMission = false; appendNotice(event.message || 'Message was not accepted', true); restoreSubmission(); }
+      if (event.run === state.activeRun) { if (state.activeMission && state.missionCard) state.missionCard.stage.textContent = 'Mission · Not started'; state.activeMission = false; appendNotice(event.message || 'Message was not accepted', true); restoreSubmission(); refreshMissionInfo(); }
       break;
     case 'permission_resolved':
       state.permissionQueue = state.permissionQueue.filter(ask => ask.id !== event.id);
@@ -970,7 +994,7 @@ function onEvent(event) {
       } else showPermission(event);
       break;
     case 'mission_info': setMissionInfo(event.mission); break;
-    case 'mission_started': if (event.run === state.activeRun) { state.pendingSubmission = null; state.activeMission = true; } break;
+    case 'mission_started': if (event.run === state.activeRun) { acceptSubmission(event.run); state.activeMission = true; } break;
     case 'mission_state': if (state.missionCard) state.missionCard.stage.textContent = `Mission · ${String(event.state).slice(0, 100)}`; break;
     case 'task_rows':
       if (state.missionCard && Array.isArray(event.rows)) {
@@ -988,11 +1012,13 @@ function onEvent(event) {
       break;
     case 'run_done': {
       const outcome = String(event.outcome || '');
+      acceptSubmission(event.run);
       if (event.run === state.activeRun) { state.activeRun = null; state.assistant = null; setBusy(false); }
       state.pendingSubmission = null; state.activeMission = false; state.permissionQueue = [];
       clearPermission();
       finishRun(outcome);
       window.sui.command({ type: 'list_sessions' }).catch(() => {});
+      refreshMissionInfo();
       break;
     }
     case 'error':
@@ -1016,7 +1042,7 @@ function onEvent(event) {
     case 'sessions': renderSessions(event.items || []); break;
     case 'disconnected':
       $('model-dialog').close();
-      state.hello = null; state.activeRun = null; state.settingsPending = false; state.permissionId = null; state.permissionSending = false; state.permissionQueue = []; state.activeMission = false; setBusy(false); setStatus('Disconnected', false);
+      state.hello = null; state.activeRun = null; state.settingsPending = false; state.permissionId = null; state.permissionSending = false; state.permissionQueue = []; state.activeMission = false; state.missionInfoPending = false; setBusy(false); setStatus('Disconnected', false);
       closeLog(false, true);
       pet().setAsking(false);
       $('permission').classList.add('hidden');
@@ -1221,7 +1247,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('refresh-sessions').addEventListener('click', () => window.sui.command({ type: 'list_sessions' }).catch(() => {}));
   $('send').addEventListener('click', () => send());
   $('run-mission').addEventListener('click', () => send(true));
-  $('composer-execution').addEventListener('change', () => { state.conversationMode = $('composer-execution').value; renderMissionMode(); if (state.conversationMode === 'mission') window.sui.command({ type: 'mission_info' }).catch(error => appendNotice(error.message, true)); });
+  $('composer-execution').addEventListener('change', () => { state.conversationMode = $('composer-execution').value; renderMissionMode(); refreshMissionInfo(); });
+  $('refresh-mission').addEventListener('click', refreshMissionInfo);
+  window.addEventListener('focus', refreshMissionInfo);
   $('attach-image').addEventListener('click', () => $('image-picker').click());
   $('image-picker').addEventListener('change', async () => { await addImages([...$('image-picker').files]); $('image-picker').value = ''; });
   document.addEventListener('dragover', event => { if ([...event.dataTransfer.types].includes('Files')) { event.preventDefault(); $('composer').classList.add('drop-active'); } });

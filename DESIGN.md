@@ -732,8 +732,12 @@ buckets; estimated or incomplete telemetry/pricing cannot imply zero cost.
 Mission Enter uses the long-lived native conversation with runtime-enforced
 read-only tool dispatch. Git is only required by the explicit execution action
 (`/run` in the TUI, Run mission in Desktop). Execution carries bounded discussion
-text into the existing MissionCfg driver; images and opaque tool/reasoning data
-are not copied into the objective. The runtime retains ownership of all proof.
+text into the existing MissionCfg driver. A separate 128 KiB discussion buffer
+retains original user text, assistant decisions and runtime Mission results,
+independent of provider context compaction. It is reconstructed from existing
+journal events on resume, including legacy user envelopes. Exceeding the bound
+rejects execution before planning instead of discarding earlier constraints.
+Images and opaque tool/reasoning data are not copied into the objective. The runtime retains ownership of all proof.
 
 A serialized command queue prevents discussion and execution from racing. Native
 mission events are forwarded, but completion is published once, after the final
@@ -741,3 +745,7 @@ report is appended to the conversation journal as a runtime observation. Resume
 restores discussion mode and completed results without replaying workers.
 Desktop maps agent-local permission IDs to connection-wide IDs and queues prompts
 so parallel workers cannot overwrite one another's permission request.
+
+Desktop sends the displayed objective explicitly on each execution request and
+updates its repeat value only after native acceptance. Git readiness refreshes
+after turns, on window focus and through an explicit project-status refresh.

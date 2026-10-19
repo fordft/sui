@@ -357,3 +357,114 @@ async fn execution_preflight_does_not_create_a_commit_in_an_empty_repository() {
     assert_eq!(git(&repo, &["status", "--porcelain"]), before);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn committed_workspace(root: &Path) {
+    let repo = root.join("workspace");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.email", "test@example.invalid"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"]);
+}
+
+#[test]
+fn execution_keeps_early_goals_and_long_constraints_after_discussion_and_resume() {
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = captured.clone();
+    let goal = format!(
+        "REAL_GOAL: fix checkout. {}\nUSER CONSTRAINT: preserve billing",
+        "details ".repeat(450)
+    );
+    let plan = format!(
+        "{}\nCOORDINATOR CONSTRAINT: preserve authentication",
+        "plan ".repeat(500)
+    );
+    let reply = plan.clone();
+    let port = common::serve(move |raw, _| {
+        let mut requests = requests.lock().unwrap();
+        requests.push(serde_json::from_slice(raw).unwrap());
+        sse_text(if requests.len() == 1 {
+            &reply
+        } else {
+            "Clarification recorded"
+        })
+    });
+    let root = fixture(port);
+    committed_workspace(&root);
+    let mut bridge = Bridge::open(&root, None);
+    let hello = bridge.next();
+    let id = hello["run_id"].as_str().unwrap().to_string();
+    for run in 1..=8 {
+        bridge.send(json!({"type":"send","run":run,"mode":"mission","text":if run == 1 { &goal } else { "Clarify the tests" }}));
+        bridge.until("run_done");
+    }
+    bridge.close();
+    let mut resumed = Bridge::open(&root, Some(&id));
+    assert_eq!(resumed.next()["type"], "hello");
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        8,
+        "resume never calls the model"
+    );
+    resumed.send(json!({"type":"run_mission","run":9,"text":"Proceed"}));
+    resumed.until("run_done");
+    let requests = captured.lock().unwrap();
+    let prompt = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        prompt.contains(&goal),
+        "all original user constraints reach execution"
+    );
+    assert!(
+        prompt.contains(&plan),
+        "coordinator decisions are not truncated at 2000 bytes"
+    );
+    drop(requests);
+    resumed.close();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn oversized_discussion_stops_before_planning_and_stays_blocked_after_resume() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let port = common::serve(move |_, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        sse_text("Discussed")
+    });
+    let root = fixture(port);
+    committed_workspace(&root);
+    let mut bridge = Bridge::open(&root, None);
+    let hello = bridge.next();
+    let id = hello["run_id"].as_str().unwrap().to_string();
+    for run in 1..=3 {
+        bridge.send(json!({"type":"send","run":run,"mode":"mission","text":"x".repeat(60_000)}));
+        bridge.until("run_done");
+    }
+    for resumed in [false, true] {
+        if resumed {
+            bridge.close();
+            bridge = Bridge::open(&root, Some(&id));
+            assert_eq!(bridge.next()["type"], "hello");
+        }
+        bridge.send(json!({"type":"run_mission","run":4,"text":"Proceed"}));
+        let events = bridge.until("run_done");
+        assert!(events.last().unwrap()["outcome"]
+            .as_str()
+            .unwrap()
+            .contains("No workers were started"));
+        assert!(!events.iter().any(|e| e["type"] == "mission_state"));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "no planner or workers may run with dropped constraints"
+        );
+    }
+    bridge.close();
+    std::fs::remove_dir_all(root).unwrap();
+}

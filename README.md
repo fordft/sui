@@ -732,7 +732,11 @@ the workers. Discussion is read-only and works outside Git repositories.
 
 Desktop has the same Solo/Mission conversation selector. Enter sends discussion;
 **Run mission** launches execution using your draft, or your last Mission request
-when the draft is empty. Expand Mission options to choose worker/auditor profiles
+when the draft is empty. Every Run sends the exact objective shown in the
+transcript; rejected submissions do not replace the last accepted request.
+Git readiness refreshes after turns and when you return to the window; use
+**Refresh project status** after creating a repository or commit externally.
+Expand Mission options to choose worker/auditor profiles
 and one or two workers. Their default is the current model and reasoning setting.
 Progress, concurrent approvals, audit results and the accepted branch/commit appear
 in the transcript. Browser and web consent remain separate. Execution runs local
@@ -743,6 +747,12 @@ Execution requires a Git working checkout with at least one commit. It starts
 from committed HEAD; uncommitted changes are not copied. Sui does not initialize
 or commit your project automatically. Discussion and completed execution results
 can resume as one conversation; active worker execution cannot resume.
+The original conversation text and decisions are kept for execution across
+context compaction and resume. Discussion is limited to 128 KiB; if it exceeds
+that bound, execution stops before planning. Start a new chat with a complete
+brief containing the goal and all constraints. Text is never silently cut down
+to the last few turns; image pixels, tool output and private reasoning are not
+copied into the mission objective.
 
 `sui --mission` opens coordinator chat. For immediate headless execution:
 

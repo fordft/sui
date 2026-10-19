@@ -22,7 +22,7 @@ dialog.showOpenDialog = async (_window, options) => {
 // UI-only ChatGPT fixture: native OAuth/JWT/transport and private IPC are
 // exercised separately; this never opens a real account or spends plan usage.
 let fixtureChatgpt = false, fixtureLogins = 0, fixtureRefreshes = 0;
-let fixtureApproval = false, fixtureImages = false, fixtureMission = false;
+let fixtureApproval = false, fixtureImages = false, fixtureMission = false, fixtureMissionReject = false, fixtureMissionChecks = 0;
 const missionCommands = [];
 const approvalCommands = [], imageCommands = [];
 const accountModels = [
@@ -31,9 +31,17 @@ const accountModels = [
 ];
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
-  if (channel === 'sui:command' && fixtureMission && args[0].type === 'mission_info') return true;
+  if (channel === 'sui:command' && fixtureMission && args[0].type === 'mission_info') {
+    fixtureMissionChecks++;
+    setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', {type:'mission_info',mission:{ready:true,profiles:[{name:'fixture-role',model:'fixture'}]}}));
+    return true;
+  }
   if (channel === 'sui:command' && fixtureMission && ['send', 'run_mission'].includes(args[0].type)) {
     const command = args[0]; missionCommands.push(command);
+    if (fixtureMissionReject && command.type === 'send') {
+      setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', {type:'send_error',run:command.run,message:'fixture rejected'}));
+      return true;
+    }
     const view = BrowserWindow.getAllWindows()[0].webContents;
     setImmediate(() => {
       if (command.type === 'run_mission') {
@@ -311,12 +319,33 @@ async function run() {
     // Refresh metadata for the UI-only committed-repository fixture.
     await ui('setMissionInfo({ ready: true, profiles: [{name:"fixture-role", model:"fixture"}] }); document.getElementById("mission-options").open=true; document.getElementById("mission-worker").value="fixture-role"; document.getElementById("mission-workers").value="2"');
     assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'Mission options fit the minimum width');
-    await ui('document.getElementById("run-mission").click()');
+    for (let n = 0; n < 100 && await ui('state.missionInfoPending'); n++) await pause(30);
+    await ui('document.getElementById("message").value="Goal B"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("run-mission").click()');
     for (let n = 0; n < 100 && missionCommands.length < 2; n++) await pause(30);
     for (let n = 0; n < 100 && await ui('state.activeRun !== null'); n++) await pause(30);
     assert.equal(missionCommands[1].type, 'run_mission'); assert.equal(missionCommands[1].worker_profile, 'fixture-role'); assert.equal(missionCommands[1].max_workers, 2);
     assert.equal(await ui('document.querySelector(".mission-result").textContent.includes("fixture-sha")'), true, 'runtime branch and acceptance are visible');
     assert.equal(await ui('state.missionStreams.size'), 2, 'parallel worker text stays separate');
+    assert.equal(missionCommands[1].text, 'Goal B');
+    assert.equal(await ui('state.lastMissionTask'), 'Goal B', 'accepted execution updates the repeated objective');
+    for (let n = 0; n < 100 && await ui('state.missionInfoPending'); n++) await pause(30);
+    await ui('document.getElementById("run-mission").click()');
+    for (let n = 0; n < 100 && (missionCommands.length < 3 || await ui('state.activeRun !== null')); n++) await pause(30);
+    assert.equal(missionCommands[2].text, 'Goal B', 'repeat sends the exact objective shown on screen');
+    assert.equal(await ui('[...document.querySelectorAll(".msg.user")].at(-1).textContent'), 'Run mission: Goal B');
+    fixtureMissionReject = true;
+    await ui('document.getElementById("message").value="Rejected goal"; document.getElementById("send").click()');
+    for (let n = 0; n < 100 && (missionCommands.length < 4 || await ui('state.activeRun !== null')); n++) await pause(30);
+    assert.equal(await ui('state.lastMissionTask'), 'Goal B', 'a rejected draft cannot replace the last accepted goal');
+    assert.equal(await ui('document.getElementById("message").value'), 'Rejected goal');
+    fixtureMissionReject = false;
+    await ui('document.getElementById("message").value=""; document.getElementById("message").dispatchEvent(new Event("input"))');
+    for (let n = 0; n < 100 && await ui('state.missionInfoPending'); n++) await pause(30);
+    const checksBefore = fixtureMissionChecks;
+    await ui('window.dispatchEvent(new Event("focus"))');
+    for (let n = 0; n < 100 && fixtureMissionChecks === checksBefore; n++) await pause(30);
+    assert.ok(fixtureMissionChecks > checksBefore, 'returning to the window refreshes Git readiness');
+
     await ui('state.activeRun=778; onEvent({type:"permission", run:778, id:551, summary:"worker a"}); onEvent({type:"permission", run:778, id:552, summary:"worker b"}); onEvent({type:"permission_resolved", id:551})');
     assert.equal(await ui('state.permissionId'), 552, 'the next concurrent approval stays actionable');
     await ui('onEvent({type:"run_done", run:778, outcome:"stopped"}); document.getElementById("composer-execution").value="solo"; document.getElementById("composer-execution").dispatchEvent(new Event("change"))');

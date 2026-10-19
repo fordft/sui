@@ -173,6 +173,11 @@ async function run() {
   await waitFor('state.activeRun === null && state.messages > 2', 'continued SSH conversation');
   assert.equal(modelRequests.length, 2);
   assert.ok(JSON.stringify(modelRequests[1].messages).includes(pixels), 'image history survives a restart over SSH');
+  // A commit made outside Desktop must enable execution without toggling modes.
+  for (const args of [['init','-q'],['config','user.email','test@example.invalid'],['config','user.name','Fixture'],['commit','--allow-empty','-qm','base']]) execFileSync('git', ['-C', workspace, ...args]);
+  await ui('document.getElementById("refresh-mission").click()');
+  await waitFor('state.missionInfo?.ready && !state.missionInfoPending && !document.getElementById("run-mission").disabled', 'Git readiness refreshes after an external commit over SSH');
+  assert.equal(modelRequests.length, 2, 'refresh checks Git without invoking a model');
   console.log('WORKSPACE_SSH_SMOKE_OK');
 }
 
