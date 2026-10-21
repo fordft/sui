@@ -14,6 +14,7 @@ let window;
 let bridge;
 let browser;
 let tunnel;
+let tunnelAttempt;
 let target;
 let localPort;
 let remotePort;
@@ -67,9 +68,13 @@ let sessionId, sessionHasHistory = false;
 const closingBridges = new Set();
 
 function stopTunnel() {
-  if (tunnel) { tunnel.kill(); tunnel = undefined; }
+  tunnelAttempt?.abort();
+  tunnelAttempt = undefined;
+  const child = tunnel;
+  tunnel = undefined;
   localPort = undefined;
   remotePort = undefined;
+  child?.kill();
 }
 
 function stopBridge() {
@@ -105,29 +110,39 @@ async function startBridge(item, resume) {
   target = item;
   bridge = child;
   let stderr = '';
-  let buffer = '';
+  let buffer = Buffer.alloc(0);
   let settled = false;
+  let failed = false;
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => fail(new Error('SUI did not start within 60 seconds.')), 60000);
     function fail(error) {
-      if (settled) return;
+      if (failed) return;
+      failed = true;
+      const connected = settled;
       settled = true;
+      buffer = Buffer.alloc(0);
       clearTimeout(timeout);
-      if (bridge === child) stopBridge();
-      reject(error);
+      const owned = bridge === child;
+      if (owned) stopBridge();
+      if (!connected) reject(error);
+      else if (owned) emit({ type: 'disconnected', message: error.message });
     }
     child.on('error', fail);
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
     child.stdout.on('data', chunk => {
-      if (bridge !== child) return;
-      buffer += chunk.toString();
-      if (buffer.length > 1024 * 1024) { fail(new Error('SUI sent an oversized response.')); return; }
-      let end;
-      while ((end = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, end);
-        buffer = buffer.slice(end + 1);
+      if (bridge !== child || failed) return;
+      let offset = 0;
+      while (offset < chunk.length) {
+        const end = chunk.indexOf(10, offset);
+        const part = chunk.subarray(offset, end < 0 ? chunk.length : end);
+        if (buffer.length + part.length > 1024 * 1024) { fail(new Error('SUI sent an oversized response.')); return; }
+        const line = buffer.length ? Buffer.concat([buffer, part]) : part;
+        if (end < 0) { buffer = line; return; }
+        buffer = Buffer.alloc(0);
+        offset = end + 1;
         let value;
-        try { value = JSON.parse(line); } catch { fail(new Error('SUI sent invalid JSON.')); return; }
+        try { value = JSON.parse(line.toString('utf8')); } catch { fail(new Error('SUI sent invalid JSON.')); return; }
+        if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.type !== 'string') { fail(new Error('SUI sent an invalid response.')); return; }
         if (!settled && value.type === 'hello') {
           settled = true;
           clearTimeout(timeout);
@@ -138,10 +153,12 @@ async function startBridge(item, resume) {
           saveConnection(target, sessionHasHistory ? sessionId : null);
           resolve(value);
         } else if (settled) {
-          if (value.type === 'run_done') { activeRun = null; sessionHasHistory = true; }
-          if (value.type === 'send_error' && !sessionHasHistory) saveConnection(target, null);
+          if (value.run === activeRun) {
+            if (value.type === 'run_done') { activeRun = null; sessionHasHistory = true; }
+            if (value.type === 'send_error') { activeRun = null; if (!sessionHasHistory) saveConnection(target, null); }
+          }
           emit(value);
-        }
+        } else { fail(new Error('SUI sent a response before its connection greeting.')); return; }
       }
     });
     child.on('close', code => {
@@ -199,7 +216,15 @@ function installRemoteSui(item) {
 }
 
 function validUrl(input) {
-  const url = new URL(input);
+  if (typeof input !== 'string' || !input.trim()) throw new Error('Enter an HTTP(S) URL.');
+  let address = input.trim();
+  const hostPort = /^(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+|\[[a-f0-9:]+\]):\d+(?:[/?#]|$)/i.test(address);
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(address) || hostPort) {
+    address = address.replace(/^\/\//, '');
+    const local = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?=[:/?#]|$)/i.test(address);
+    address = `${local ? 'http' : 'https'}://${address}`;
+  }
+  const url = new URL(address);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Use an HTTP(S) URL without embedded credentials.');
   return url.toString();
 }
@@ -249,20 +274,64 @@ async function openRemotePreview(port) {
   if (!target || target.kind !== 'ssh') throw new Error('Open an SSH project first.');
   const number = Number(port);
   if (!Number.isInteger(number) || number < 1 || number > 65535) throw new Error('Enter a remote port from 1 to 65535.');
-  stopTunnel();
-  localPort = await freePort();
-  remotePort = number;
   const host = validateHost(target.host);
-  const child = spawn('ssh', ['-N', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=12', '-L', `127.0.0.1:${localPort}:127.0.0.1:${number}`, '--', host], { stdio: 'ignore' });
-  tunnel = child;
-  child.on('error', error => emit({ type: 'browser_error', message: error.message }));
-  child.on('close', code => { if (tunnel === child) { stopTunnel(); emit({ type: 'browser_error', message: `SSH preview tunnel closed (${code}).` }); } });
-  await new Promise(resolve => setTimeout(resolve, 350));
-  if (tunnel !== child) throw new Error('SSH preview tunnel could not start.');
-  const url = `http://127.0.0.1:${localPort}/`;
-  showBrowser();
-  await browser.webContents.loadURL(url);
-  return { url, remotePort: number };
+  stopTunnel();
+  const attempt = new AbortController();
+  tunnelAttempt = attempt;
+  try {
+    const forwardedPort = await freePort();
+    if (attempt.signal.aborted) throw new Error('SSH preview cancelled.');
+    const child = spawn('ssh', ['-N', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=12', '-L', `127.0.0.1:${forwardedPort}:127.0.0.1:${number}`, '--', host], { stdio: ['ignore', 'ignore', 'pipe'] });
+    tunnel = child;
+    localPort = forwardedPort;
+    remotePort = number;
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-4000); });
+    await waitForTunnel(child, forwardedPort, attempt.signal, () => stderr.trim());
+    child.on('error', error => { if (tunnel === child) { stopTunnel(); emit({ type: 'browser_error', message: error.message }); } });
+    child.on('close', code => { if (tunnel === child) { stopTunnel(); emit({ type: 'browser_error', message: stderr.trim() || `SSH preview tunnel closed (${code}).` }); } });
+    const url = `http://127.0.0.1:${forwardedPort}/`;
+    showBrowser();
+    await browser.webContents.loadURL(url);
+    return { url, remotePort: number };
+  } catch (error) {
+    if (tunnelAttempt === attempt) stopTunnel();
+    throw error;
+  }
+}
+
+function waitForTunnel(child, port, signal, details, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let socket, retry, finished = false;
+    const timeout = setTimeout(() => finish(new Error(details() || 'SSH preview tunnel did not become ready in time.')), timeoutMs);
+    function finish(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout); clearTimeout(retry); socket?.destroy();
+      child.removeListener('error', onError); child.removeListener('close', onClose);
+      signal.removeEventListener('abort', onAbort);
+      if (error) reject(error); else resolve();
+    }
+    const onError = error => finish(error);
+    const onClose = code => finish(new Error(details() || `SSH preview tunnel closed (${code}).`));
+    const onAbort = () => finish(new Error('SSH preview cancelled.'));
+    child.once('error', onError); child.once('close', onClose);
+    signal.addEventListener('abort', onAbort, { once: true });
+    function probe() {
+      if (signal.aborted) { onAbort(); return; }
+      const current = net.createConnection({ host: '127.0.0.1', port });
+      socket = current;
+      function again() {
+        if (finished || socket !== current) return;
+        socket = undefined; current.destroy();
+        retry = setTimeout(probe, 75);
+      }
+      current.once('connect', () => { if (!finished && socket === current) finish(); });
+      current.once('error', again);
+      current.setTimeout(500, again);
+    }
+    probe();
+  });
 }
 
 const ANNOTATE_SCRIPT = `new Promise(resolve => {
@@ -337,7 +406,7 @@ function registerIpc() {
   ipcMain.handle('sui:install-remote', (_event, item) => installRemoteSui(item));
   ipcMain.handle('sui:disconnect', async () => { await stopBridge(); return true; });
   ipcMain.handle('sui:command', (_event, value) => { writeBridge(value); return true; });
-  ipcMain.handle('sui:open-browser', async (_event, url) => { showBrowser(); const address = validUrl(url); await browser.webContents.loadURL(address); return address; });
+  ipcMain.handle('sui:open-browser', async (_event, url) => { const address = validUrl(url); showBrowser(); await browser.webContents.loadURL(address); return address; });
   ipcMain.handle('sui:preview-remote', (_event, port) => openRemotePreview(port));
   ipcMain.handle('sui:browser-bounds', (_event, bounds) => { browserBounds(bounds); return true; });
   ipcMain.handle('sui:browser-show', () => { showBrowser(); return true; });

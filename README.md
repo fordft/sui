@@ -18,6 +18,10 @@ folders on the SSH host. Recent workspaces are remembered per host. See
 and the current notarization limitation.
 The terminal UI remains available.
 
+The browser preview accepts full URLs and bare addresses (`www.google.com`,
+`localhost:5173`). Bare loopback addresses use HTTP; other bare hosts use HTTPS.
+SSH previews wait for port forwarding to become ready and report startup errors.
+
 Click the model badge above the desktop composer to search all visible models
 from each connected ChatGPT account, alongside profiles configured on the host.
 Sign-in does not require selecting or pinning a model. Sui stores the account
@@ -742,6 +746,7 @@ Progress, concurrent approvals, audit results and the accepted branch/commit app
 in the transcript. Browser and web consent remain separate. Execution runs local
 commands in disposable worktrees; the conversation approval selector does not
 restrict those worker commands.
+Stop/Ctrl-C also terminates in-flight Git operations and their hook processes.
 
 Execution requires a Git working checkout with at least one commit. It starts
 from committed HEAD; uncommitted changes are not copied. Sui does not initialize

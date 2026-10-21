@@ -220,11 +220,14 @@ async function run() {
       fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-welcome.png'), (await win.capturePage()).toPNG());
     }
     const url = `http://127.0.0.1:${server.address().port}/`;
-    await win.webContents.executeJavaScript(`{document.getElementById('browser-url').value=${JSON.stringify(url)};document.getElementById('go').click()}`);
+    const address = `127.0.0.1:${server.address().port}`;
+    await win.webContents.executeJavaScript(`{document.getElementById('browser-url').value=${JSON.stringify(address)};document.getElementById('go').click()}`);
     await pause(200);
     const guest = win.contentView.children.find(view => view.webContents);
     assert.ok(guest, 'browser guest attached');
     assert.ok(guest.getBounds().width > 100, 'browser is visible in pane');
+    assert.equal(guest.webContents.getURL(), url, 'a bare loopback address loads over HTTP');
+    assert.equal(await ui('document.getElementById("browser-url").value'), url, 'the address bar keeps the normalized URL');
     await win.webContents.executeJavaScript('document.getElementById("annotate").click()');
     await pause(200);
     guest.webContents.sendInputEvent({ type: 'mouseMove', x: 100, y: 75 });

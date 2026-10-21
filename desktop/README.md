@@ -50,6 +50,10 @@ agent loop.
   and reconnects on startup. A project opens its latest meaningful chat; empty
   connection-only sessions stay out of recent chats. Interrupted tool calls
   are marked as unknown outcomes in a new fork, never rerun automatically.
+- **Browser preview:** enter a full URL or a bare address such as
+  `www.google.com` or `localhost:5173`. Bare loopback addresses use HTTP;
+  other bare hosts use HTTPS. SSH **Forward & open** waits for the tunnel
+  to listen before loading the page and reports SSH startup errors.
 - **Companion:** a slime that lives in a strip above the composer, so it never
   covers messages on its own. It runs back and forth while SUI works, bounces
   and asks `?` when it needs an approval (the buttons remain the only way to

@@ -36,6 +36,11 @@ async function freePort() {
 
 async function run() {
   modelServer = http.createServer((request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end('<html><body>SSH preview ready</body></html>');
+      return;
+    }
     let body = '';
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
@@ -70,7 +75,8 @@ async function run() {
   fs.writeFileSync(path.join(fixtureHome, '.ssh', 'hosts.conf'), `Host sui-smoke\n HostName 127.0.0.1\n Port ${port}\n User ${os.userInfo().username}\n IdentityFile ${temporary}/client-key\n IdentitiesOnly yes\n UserKnownHostsFile ${temporary}/known-hosts\n`);
   // Keep the real user's SSH config untouched. The shim only selects this
   // fixture's config; /usr/bin/ssh still owns auth, host verification and I/O.
-  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\nexec /usr/bin/ssh -F ${shellQuote(sshConfig)} "$@"\n`, { mode: 0o700 });
+  // Preview authentication deliberately takes longer than the old 350ms wait.
+  fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\ncase " $* " in *" -N "*) sleep 0.6 ;; esac\nexec /usr/bin/ssh -F ${shellQuote(sshConfig)} "$@"\n`, { mode: 0o700 });
   process.env.PATH = bin + path.delimiter + process.env.PATH;
   await pause(200);
   assert.equal(sshd.exitCode, null, `fixture SSH server started: ${serverErrors}`);
@@ -173,6 +179,13 @@ async function run() {
   await waitFor('state.activeRun === null && state.messages > 2', 'continued SSH conversation');
   assert.equal(modelRequests.length, 2);
   assert.ok(JSON.stringify(modelRequests[1].messages).includes(pixels), 'image history survives a restart over SSH');
+  // The real SSH process takes >350ms to start; load only after forwarding works.
+  await ui(`document.getElementById('remote-port').value = '${modelServer.address().port}'; previewRemote()`);
+  const preview = win.contentView.children.find(view => view.webContents);
+  assert.ok(preview, 'remote preview attached');
+  assert.equal(await preview.webContents.executeJavaScript('document.body.textContent'), 'SSH preview ready');
+  assert.match(preview.webContents.getURL(), /^http:\/\/127\.0\.0\.1:\d+\/$/);
+  assert.notEqual(new URL(preview.webContents.getURL()).port, String(modelServer.address().port), 'preview uses the forwarded local port');
   // A commit made outside Desktop must enable execution without toggling modes.
   for (const args of [['init','-q'],['config','user.email','test@example.invalid'],['config','user.name','Fixture'],['commit','--allow-empty','-qm','base']]) execFileSync('git', ['-C', workspace, ...args]);
   await ui('document.getElementById("refresh-mission").click()');

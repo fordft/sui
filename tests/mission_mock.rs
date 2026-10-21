@@ -553,6 +553,65 @@ async fn mission_cancelled_midtask() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn mission_cancelled_during_git_hook_stops_commit_and_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    let _g = LOCK.lock().await;
+    let repo = fixture_repo();
+    let base = head(&repo);
+    let port = mock(Script {
+        plan_payload: good_plan(&base),
+        worker_routes: vec![],
+        worker_first: worker_writes("out/ok.txt", "ok\n"),
+        worker_repair: json!("text"),
+        audit_verdicts: vec!["PASS".into()],
+        escalation: json!({"decision": "abort"}),
+    });
+    let mut c = cfg(port, &repo);
+    let run_dir = c.run_dir.clone();
+    let started = repo.join(".git/hook-started");
+    let survived = repo.join(".git/hook-survived");
+    let hook = repo.join(".git/hooks/pre-commit");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nprintf started > '{}'\n(sleep 1; printf survived > '{}') &\nwait\n",
+            started.display(),
+            survived.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stop = Arc::new(tokio::sync::Notify::new());
+    c.cancel = Some((stop.clone(), Arc::new(AtomicBool::new(false))));
+    let task = tokio::spawn(async move { mission::run(c).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("mission must reach the worker commit hook");
+    stop.notify_one();
+    let report = tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("Stop must not wait for the hook")
+        .unwrap()
+        .unwrap();
+    assert!(report.outcome.contains("cancelled"), "{}", report.outcome);
+    // Killing only Git leaves the hook and its background child alive.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!survived.exists(), "Git hook descendants survived Stop");
+    assert_eq!(head(&run_dir.join("worktrees/W1")), base);
+    assert_eq!(head(&repo), base);
+    assert!(repo_clean(&repo));
+    std::fs::remove_dir_all(run_dir).unwrap();
+    std::fs::remove_dir_all(repo).unwrap();
+}
+
+#[tokio::test]
 async fn mission_out_of_scope_after_commit() {
     let _g = LOCK.lock().await;
     let repo = fixture_repo();

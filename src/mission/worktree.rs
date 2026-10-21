@@ -10,13 +10,22 @@ static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// All git ops are async — they run inside the mission runtime shared
 /// with the TUI, so a blocking Command would stall unrelated tasks.
 async fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    command
         .arg("-C")
         .arg(repo)
         .args(args)
-        .output()
-        .await
-        .context("spawn git")?;
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = command.spawn().context("spawn git")?;
+    // Mission cancellation drops this future. Git's hooks must stop too,
+    // before they can finish a commit after the mission reports cancellation.
+    let _group = GitGroup(child.id());
+    let out = child.wait_with_output().await.context("wait for git")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if !out.status.success() {
         bail!(
@@ -26,6 +35,17 @@ async fn git(repo: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(stdout.trim().to_string())
+}
+
+struct GitGroup(Option<u32>);
+impl Drop for GitGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.filter(|&p| p > 0 && p <= i32::MAX as u32) {
+            // kill_on_drop covers Git itself; its hooks share this group.
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
+    }
 }
 
 pub async fn head(repo: &Path) -> Result<String> {

@@ -1081,8 +1081,7 @@ async function openBrowser(url) {
   $('browser-status').textContent = 'Opening page…';
   try {
     revealPreview();
-    await window.sui.openBrowser(url);
-    $('browser-url').value = url;
+    $('browser-url').value = await window.sui.openBrowser(url);
     $('annotate').disabled = false;
   } catch (error) { $('browser-status').textContent = error.message; }
 }
