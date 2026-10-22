@@ -13,6 +13,7 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'sui-ssh-smoke-'));
 const fixtureHome = path.join(temporary, 'desktop-home');
 const workspace = path.join(temporary, 'projects', 'งาน my app');
 const slowWorkspace = path.join(temporary, 'sui-browse-slow');
+const bridgeFailure = path.join(temporary, 'bridge-unavailable');
 fs.mkdirSync(path.join(fixtureHome, '.ssh'), { recursive: true });
 fs.mkdirSync(workspace, { recursive: true });
 fs.mkdirSync(slowWorkspace);
@@ -23,7 +24,7 @@ process.env.SUI_HOME = path.join(temporary, 'model-config');
 fs.mkdirSync(process.env.SUI_HOME);
 fs.writeFileSync(path.join(process.env.SUI_HOME, 'config.toml'), '[profiles.test]\nkind = "ollama"\nmodel = "workspace-test-model"\n', { mode: 0o600 });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-let sshd, modelServer, failed = false;
+let sshd, modelServer, failed = false, failNextRequest = false;
 const modelRequests = [];
 
 async function freePort() {
@@ -45,6 +46,12 @@ async function run() {
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       modelRequests.push(JSON.parse(body));
+      if (failNextRequest) {
+        failNextRequest = false;
+        response.writeHead(401, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { message: 'Fixture credentials expired' } }));
+        return;
+      }
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', content: 'Screenshot received.' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n');
     });
@@ -63,7 +70,7 @@ async function run() {
   // Route the standard SUI install location to the built fixture binary too,
   // so an older ~/.sui/bin/sui on the test runner cannot take precedence.
   const rewriteBinary = 's|"$HOME/.sui/bin/sui"|"' + binary.replace(/[\\&|]/g, '\\$&') + '"|g';
-  fs.writeFileSync(wrapper, `#!/bin/sh\nPATH=${shellQuote(bin)}:"$PATH"\nSUI_HOME=${shellQuote(process.env.SUI_HOME)}\nHOME=${shellQuote(remoteHome)}\nexport PATH SUI_HOME HOME\ncase "$SSH_ORIGINAL_COMMAND" in *sui-browse-slow*) sleep 1 ;; esac\nsui_fixture_command=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | sed ${shellQuote(rewriteBinary)})\nexec sh -c "$sui_fixture_command"\n`, { mode: 0o700 });
+  fs.writeFileSync(wrapper, `#!/bin/sh\nPATH=${shellQuote(bin)}:"$PATH"\nSUI_HOME=${shellQuote(process.env.SUI_HOME)}\nHOME=${shellQuote(remoteHome)}\nexport PATH SUI_HOME HOME\ncase "$SSH_ORIGINAL_COMMAND" in *sui-browse-slow*) sleep 1 ;; esac\ncase "$SSH_ORIGINAL_COMMAND" in *desktop-bridge*) if [ -f ${shellQuote(bridgeFailure)} ]; then echo 'Fixture SSH connection closed' >&2; exit 1; fi ;; esac\nsui_fixture_command=$(printf '%s' "$SSH_ORIGINAL_COMMAND" | sed ${shellQuote(rewriteBinary)})\nexec sh -c "$sui_fixture_command"\n`, { mode: 0o700 });
   const serverConfig = path.join(temporary, 'sshd-config');
   fs.writeFileSync(serverConfig, `Port ${port}\nListenAddress 127.0.0.1\nHostKey ${temporary}/host-key\nPidFile ${temporary}/sshd.pid\nAuthorizedKeysFile ${temporary}/client-key.pub\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nForceCommand ${wrapper}\n`);
   sshd = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', serverConfig], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -89,7 +96,7 @@ async function run() {
   const ui = code => win.webContents.executeJavaScript(code);
   const waitFor = async (expression, message) => {
     for (let n = 0; n < 200; n++) { if (await ui(expression)) return; await pause(30); }
-    throw new Error(message + ': ' + await ui('document.getElementById("connect-error").textContent'));
+    throw new Error(message + ': ' + await ui('JSON.stringify({connection:document.getElementById("connect-error").textContent,provider:document.getElementById("provider-error").textContent,profiles:document.getElementById("profiles-status").textContent,providerOpen:document.getElementById("provider-dialog").open,kind:document.getElementById("model-kind").value,profile:document.getElementById("setup-profile").value,model:document.getElementById("model-id").value,providerBusy,activeRun:state.activeRun})'));
   };
   await waitFor('state.hello !== null && !connectionBusy', 'saved SSH project reconnects automatically');
   const startupRun = await ui('state.hello.run_id');
@@ -191,6 +198,107 @@ async function run() {
   await ui('document.getElementById("refresh-mission").click()');
   await waitFor('state.missionInfo?.ready && !state.missionInfoPending && !document.getElementById("run-mission").disabled', 'Git readiness refreshes after an external commit over SSH');
   assert.equal(modelRequests.length, 2, 'refresh checks Git without invoking a model');
+  fs.appendFileSync(path.join(process.env.SUI_HOME, 'config.toml'), `\n[profiles.alternative]\nkind = "ollama"\nmodel = "another-workspace-model"\nimage_input = true\nbase_url = "http://127.0.0.1:${modelServer.address().port}/v1"\n`);
+  await ui('document.getElementById("message").value="Keep this draft"; document.getElementById("choose-model").click()');
+  await waitFor('document.querySelectorAll(".model-option").length === 2', 'model picker includes alternate profile');
+  await ui('[...document.querySelectorAll(".model-option")].find(button => button.textContent.includes("another-workspace-model")).click()');
+  await waitFor('state.hello?.model === "another-workspace-model" && !connectionBusy', 'model change over SSH');
+  assert.equal(modelRequests.length, 2, 'switching models makes no extra model request');
+  assert.ok(await ui('state.hello.continuation.entries.some(e => e.content.includes("SSH screenshot"))'), 'switching preserves conversation text');
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep this draft');
+  assert.equal(await ui('state.conversationMode'), 'mission');
+  await ui('document.getElementById("send").click()');
+  await waitFor('state.activeRun === null', 'continued turn after model change');
+  assert.equal(modelRequests.length, 3);
+  assert.equal(modelRequests[2].model, 'another-workspace-model');
+  assert.ok(JSON.stringify(modelRequests[2].messages).includes('SSH screenshot'));
+  assert.ok(!JSON.stringify(modelRequests[2].messages).includes(pixels), 'model handoff carries portable text rather than old image/wire state');
+  const switchedReload = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+  win.webContents.reload(); await switchedReload;
+  await waitFor('state.hello?.model === "another-workspace-model" && !connectionBusy', 'reopen after model change');
+  assert.equal(modelRequests.length, 3, 'reopening never reruns a previous turn');
+  assert.ok(await ui('state.hello.history.some(e => e.content.includes("SSH screenshot"))'));
+  // A terminal authentication error must keep both the native conversation and
+  // an unsent newer draft through the actual provider configuration flow.
+  failNextRequest = true;
+  await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'retry.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
+  await waitFor('state.images.length === 1 && !state.imagesLoading', 'failed-turn image draft');
+  await ui('document.getElementById("message").value="Retry after provider repair"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("send").click()');
+  await waitFor('state.activeRun === null && !!document.querySelector(".recovery-card")', 'terminal provider failure');
+  assert.equal(modelRequests.length, 4);
+  await ui('document.getElementById("message").value="Keep my newer draft"; [...document.querySelectorAll(".recovery-card button")].find(button => button.textContent === "Configure provider").click()');
+  await waitFor('document.getElementById("provider-dialog").open && !document.getElementById("save-model").disabled', 'repair the existing provider');
+  await ui('document.getElementById("save-model").click()');
+  await waitFor('!document.getElementById("provider-dialog").open && !document.getElementById("connect-button").disabled', 'provider saved');
+  assert.equal(await ui('document.getElementById("connect-button").textContent'), 'Resume chat');
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('state.hello !== null && !connectionBusy', 'provider repair reconnects');
+  assert.ok(await ui('state.hello.history.some(e => e.content.includes("Retry after provider repair"))'), 'provider repair must reopen the failed native conversation');
+  assert.equal(modelRequests.length, 4, 'repair never resubmits a failed request');
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep my newer draft');
+  await ui('[...document.querySelectorAll(".recovery-card button")].find(button => button.textContent === "Restore request to composer").click()');
+  assert.equal(await ui('document.getElementById("message").value'), 'Retry after provider repair\nKeep my newer draft');
+  assert.equal(await ui('state.images[0].data'), pixels, 'failed images remain available after repairing the provider');
+  assert.equal(modelRequests.length, 4);
+  await ui('document.getElementById("send").click()');
+  await waitFor('state.activeRun === null', 'user sends the restored request');
+  assert.equal(modelRequests.length, 5);
+  assert.ok(JSON.stringify(modelRequests[4].messages).includes('SSH screenshot'));
+  assert.ok(JSON.stringify(modelRequests[4].messages).includes(pixels));
+  assert.equal(JSON.stringify(modelRequests[4].messages).split(pixels).length - 1, 2, 'native resume retains the failed image history as well as the explicitly resent attachment');
+  assert.equal(await ui('state.lastSubmission'), null, 'successful requests are no longer offered for retry');
+  // A failed reconnect must not consume the saved pointer or discard a newer
+  // draft. Retry from the same connection form after the host becomes available.
+  const beforeOutage = JSON.parse(fs.readFileSync(path.join(fixtureHome, 'connection.json'), 'utf8'));
+  await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'unsent.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
+  await waitFor('state.images.length === 1 && !state.imagesLoading', 'new unsent image');
+  await ui('document.getElementById("message").value="Keep this during an outage"; configureCurrentProvider()');
+  await ui('closeProviderSetup()');
+  fs.writeFileSync(bridgeFailure, 'unavailable');
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('!connectionBusy && !state.hello && document.getElementById("connect-error").textContent.includes("Fixture SSH connection closed")', 'failed SSH reconnect');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(fixtureHome, 'connection.json'), 'utf8')), beforeOutage, 'failed startup preserves the saved chat pointer');
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep this during an outage');
+  assert.equal(await ui('state.images[0].data'), pixels);
+  assert.equal(await ui('document.getElementById("connect-button").textContent'), 'Resume chat');
+  await ui(`setWorkspace(${JSON.stringify(slowWorkspace)})`);
+  assert.equal(await ui('document.getElementById("connect-button").textContent'), 'Open workspace', 'recovery context never crosses workspace boundaries');
+  await ui(`setWorkspace(${JSON.stringify(workspace)})`);
+  fs.rmSync(bridgeFailure);
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('state.hello !== null && !connectionBusy', 'retry resumes after the outage');
+  assert.ok(await ui('state.hello.history.some(e => e.content.includes("Retry after provider repair"))'));
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep this during an outage');
+  assert.equal(await ui('state.images[0].data'), pixels);
+  assert.equal(await ui('state.lastSubmission'), null);
+  assert.equal(modelRequests.length, 5, 'reconnect does not send a draft or replay a successful request');
+  // If repairing the profile changes its model, native resume must still
+  // refuse incompatible wire state. The user can explicitly continue with text.
+  await ui('configureCurrentProvider()');
+  await ui('document.getElementById("model-id").value="repaired-workspace-model"; document.getElementById("model-id").dispatchEvent(new Event("input")); document.getElementById("save-model").click()');
+  await waitFor('!document.getElementById("provider-dialog").open && !document.getElementById("connect-button").disabled', 'changed model saved');
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('!connectionBusy && !state.hello && document.getElementById("connect-error").textContent.includes("recorded profile, model, tools or project guidance changed")', 'incompatible native history refused');
+  assert.equal(modelRequests.length, 5);
+  assert.equal(await ui('document.activeElement.textContent'), 'Continue with conversation text', 'repair action is focused even in a short window');
+  assert.equal(await ui('document.activeElement.getBoundingClientRect().bottom <= document.querySelector("#connect-dialog .dlg-foot").getBoundingClientRect().top'), true, 'repair action is visible above the connection footer');
+  if (process.env.SUI_DESKTOP_SCREENSHOT) { await pause(250); fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-repair-continuation.png'), (await win.capturePage()).toPNG()); }
+  await ui('[...document.querySelectorAll("#connect-error button")].find(button => button.textContent === "Continue with conversation text").click()');
+  await waitFor('state.hello?.model === "repaired-workspace-model" && !connectionBusy', 'explicit portable continuation after profile repair');
+  assert.ok(await ui('state.hello.continuation.entries.some(e => e.content.includes("SSH screenshot"))'));
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep this during an outage');
+  assert.equal(await ui('state.images[0].data'), pixels);
+  assert.equal(modelRequests.length, 5);
+  await ui('configureCurrentProvider();');
+  await ui('closeProviderSetup(); document.getElementById("saved-profile").value="test"; document.getElementById("saved-profile").dispatchEvent(new Event("change"))');
+  assert.equal(await ui('document.getElementById("connect-button").textContent'), 'Continue chat', 'choosing another repair profile retains portable context');
+  await ui('document.getElementById("connect-button").click()');
+  await waitFor('state.hello?.model === "workspace-test-model" && !connectionBusy', 'repair can continue with another saved profile');
+  assert.ok(await ui('state.hello.continuation.entries.some(e => e.content.includes("SSH screenshot"))'));
+  assert.equal(modelRequests.length, 5);
+  await ui('document.getElementById("new-chat").click()');
+  await waitFor('state.hello !== null && !connectionBusy && !state.hello.continuation', 'intentional new chat stays fresh');
+  assert.equal(await ui('state.hello.history.length'), 0);
   console.log('WORKSPACE_SSH_SMOKE_OK');
 }
 

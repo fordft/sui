@@ -104,9 +104,9 @@ function writeBridge(value) {
   if (value.type === 'send' || value.type === 'run_mission') { activeRun = value.run; saveConnection(target, sessionId); }
 }
 
-async function startBridge(item, resume) {
+async function startBridge(item, resume, continuation) {
   await stopBridge();
-  const child = spawnBridge(app, item, resume);
+  const child = spawnBridge(app, item, resume, continuation);
   target = item;
   bridge = child;
   let stderr = '';
@@ -162,8 +162,12 @@ async function startBridge(item, resume) {
       }
     });
     child.on('close', code => {
+      // The close event is already being delivered. Detach before fail() so
+      // stopBridge does not wait for a second close event that can never arrive.
+      const owned = bridge === child;
+      if (owned) { bridge = undefined; target = undefined; activeRun = null; stopTunnel(); }
       if (!settled) fail(new Error(stderr.includes('--desktop-protocol') ? 'Update SUI on this host to use the current model picker.' : stderr.trim() || `SUI exited with code ${code}.`));
-      else if (bridge === child) { activeRun = null; bridge = undefined; emit({ type: 'disconnected', message: stderr.trim() || `SUI exited with code ${code}.` }); }
+      else if (owned) emit({ type: 'disconnected', message: stderr.trim() || `SUI exited with code ${code}.` });
     });
   });
 }
@@ -197,7 +201,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 4 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 4 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 5 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 5 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;
@@ -362,6 +366,25 @@ function annotationUrl(url) {
   return url;
 }
 
+async function captureAnnotation(view, selection) {
+  const bounds = view.getBounds();
+  const rect = selection.rect;
+  if (!rect || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(rect[key])) || rect.width <= 0 || rect.height <= 0) throw new Error('Select a visible element or area.');
+  const x = Math.max(0, Math.floor(rect.x)), y = Math.max(0, Math.floor(rect.y));
+  const width = Math.min(bounds.width, Math.ceil(rect.x + rect.width)) - x;
+  const height = Math.min(bounds.height, Math.ceil(rect.y + rect.height)) - y;
+  if (width <= 0 || height <= 0) throw new Error('The selected area is outside the preview. Select it again.');
+  let picture = await view.webContents.capturePage({ x, y, width, height });
+  if (picture.isEmpty()) throw new Error('Could not capture the selected area. Select it again.');
+  const size = picture.getSize();
+  const scale = Math.min(1, 1600 / Math.max(size.width, size.height));
+  if (scale < 1) picture = picture.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) });
+  let bytes = picture.toPNG(), mime = 'image/png', extension = 'png';
+  if (bytes.length > 4 * 1024 * 1024) { bytes = picture.toJPEG(80); mime = 'image/jpeg'; extension = 'jpg'; }
+  if (!bytes.length || bytes.length > 4 * 1024 * 1024) throw new Error('Screenshot exceeds 4 MiB. Select a smaller area.');
+  return { image: { name: `browser-selection.${extension}`, mime, data: bytes.toString('base64'), size: bytes.length }, rect: { x, y, width, height }, resized: scale < 1 };
+}
+
 function registerIpc() {
   ipcMain.handle('sui:update-check', async () => {
     if (process.platform !== 'darwin') return { supported: false };
@@ -392,7 +415,7 @@ function registerIpc() {
     finally { if (folderBrowse === controller) folderBrowse = undefined; }
   });
   ipcMain.handle('sui:cancel-folder-browse', () => { cancelFolderBrowse(); return true; });
-  ipcMain.handle('sui:connect', (_event, item, resume) => startBridge(item, resume));
+  ipcMain.handle('sui:connect', (_event, item, resume, continuation) => startBridge(item, resume, continuation));
   ipcMain.handle('sui:configure', (_event, item, profile) => {
     if (activeRun !== null) throw new Error('Wait for the current turn to finish before changing providers.');
     return configureProfile(item, profile);
@@ -422,10 +445,15 @@ function registerIpc() {
   ipcMain.handle('sui:browser-reload', () => browser.webContents.reload());
   ipcMain.handle('sui:annotate', async () => {
     if (!browser || browser.webContents.isDestroyed() || !browser.webContents.getURL()) throw new Error('Open a page first.');
-    const selection = await browser.webContents.executeJavaScript(ANNOTATE_SCRIPT);
+    const view = browser, contents = view.webContents, url = contents.getURL();
+    const selection = await contents.executeJavaScript(ANNOTATE_SCRIPT);
     if (!selection) return null;
-    selection.url = annotationUrl(selection.url);
-    return selection;
+    if (browser !== view || contents.isDestroyed() || contents.getURL() !== url) throw new Error('The page changed. Select the area again.');
+    const captured = await captureAnnotation(view, selection);
+    if (browser !== view || contents.isDestroyed() || contents.getURL() !== url) throw new Error('The page changed during capture. Select the area again.');
+    return { kind: selection.kind === 'area' ? 'area' : 'element', url: annotationUrl(url),
+      selector: String(selection.selector || '').slice(0, 2000), text: String(selection.text || '').slice(0, 180),
+      viewport: { width: view.getBounds().width, height: view.getBounds().height }, ...captured };
   });
 }
 

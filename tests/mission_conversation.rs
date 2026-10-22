@@ -269,6 +269,23 @@ fn mission_runs_workers_with_unique_approvals_persists_results_and_preserves_che
     assert!(events.iter().any(|e| e["type"] == "task_rows"));
     assert!(events.iter().any(|e| e["type"] == "audit_result"));
     let sha = result["accepted_sha"].as_str().unwrap();
+    let directory = result["run_dir"].as_str().unwrap();
+    bridge.send(json!({"type":"review_mission","request":10,"directory":directory}));
+    let review = bridge.until("mission_review").pop().unwrap();
+    assert!(review["error"].is_null(), "{review}");
+    assert_eq!(review["data"]["candidate"], sha);
+    assert_eq!(review["data"]["base"], original);
+    assert_eq!(review["data"]["files"].as_array().unwrap().len(), 2);
+    assert!(!review["data"]["evidence"].as_array().unwrap().is_empty());
+    bridge.send(
+        json!({"type":"review_mission","request":11,"directory":directory,"file":"out/a.txt"}),
+    );
+    assert!(
+        bridge.until("mission_review").pop().unwrap()["data"]["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+ok")
+    );
     for name in ["a", "b"] {
         assert_eq!(
             git(&repo, &["show", &format!("{sha}:out/{name}.txt")]),
@@ -281,11 +298,17 @@ fn mission_runs_workers_with_unique_approvals_persists_results_and_preserves_che
     bridge.send(json!({"type":"send","run":3,"mode":"mission","text":"Explain that result"}));
     assert_eq!(bridge.until("run_done").last().unwrap()["outcome"], "done");
     bridge.close();
-    let resumed = Bridge::open(&root, Some(&id));
+    let mut resumed = Bridge::open(&root, Some(&id));
     let hello = resumed.next();
     assert_eq!(hello["type"], "hello", "{hello}");
     assert_eq!(hello["conversation_mode"], "mission");
     assert!(hello["history"].to_string().contains(sha));
+    assert_eq!(hello["mission_results"][0]["run_dir"], directory);
+    resumed.send(json!({"type":"review_mission","request":12,"directory":directory}));
+    assert_eq!(
+        resumed.until("mission_review").pop().unwrap()["data"]["candidate"],
+        sha
+    );
     resumed.close();
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -53,6 +53,15 @@ impl Discussion {
         for event in events {
             let data = &event["data"];
             match event["type"].as_str() {
+                Some("conversation_handoff") => {
+                    if let Ok(handoff) = serde_json::from_value::<crate::continuation::Continuation>(
+                        data["handoff"].clone(),
+                    ) {
+                        for entry in handoff.entries {
+                            discussion.record(&entry.role, &entry.content);
+                        }
+                    }
+                }
                 Some("task") => {
                     mission_run = data["mode"] == "mission-run";
                     raw_task = data["task"].is_string();

@@ -56,7 +56,12 @@ pub async fn run() -> Result<()> {
             let profiles = crate::config::profiles(None)?;
             json!({"type":"profiles","truncated":profiles.len() > 200,"items":profiles.into_iter().take(200).map(|(name,p)| {
                 let account = (p.kind.as_deref() == Some("chatgpt")).then(|| crate::chatgpt::summary(&name));
-                json!({"name":name,"model":p.model,"kind":p.kind,"account":account})
+                let endpoint = p.base_url.as_deref().or(match p.kind.as_deref() {
+                    Some("ollama") => Some("http://127.0.0.1:11434/v1"),
+                    Some("openai-responses" | "chat-completions") | None => Some("https://api.openai.com/v1"),
+                    _ => None,
+                }).and_then(|s| reqwest::Url::parse(s).ok()).filter(|url| matches!(url.scheme(), "http" | "https") && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none()).map(String::from);
+                json!({"name":name,"model":p.model,"kind":p.kind,"account":account,"base_url":endpoint})
             }).collect::<Vec<_>>()})
         }
         Request::Models { name, refresh } => {

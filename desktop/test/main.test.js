@@ -50,7 +50,7 @@ function fixture(t, options = {}) {
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   const api = vm.runInContext(`
     window = fixtureWindow; browser = fixtureBrowser; registerIpc();
-    ({ startBridge, stopBridge, writeBridge, validUrl, waitForTunnel, freePort, openRemotePreview, stopTunnel,
+    ({ startBridge, stopBridge, writeBridge, validUrl, waitForTunnel, freePort, openRemotePreview, stopTunnel, captureAnnotation,
       setTarget(value) { target = value; },
       state() { return { connected: !!bridge, activeRun, tunnel: !!tunnel, localPort, remotePort }; }
     })`, context);
@@ -120,6 +120,24 @@ test('an old bridge error cannot disconnect its replacement', async t => {
   assert.equal(f.events.filter(e => e.type === 'disconnected').length, 0);
 });
 
+test('a bridge exiting before hello preserves the bookmark and allows immediate retry', { timeout: 2000 }, async t => {
+  const f = fixture(t), first = await f.connect();
+  f.api.writeBridge({ type: 'send', run: 1, text: 'saved conversation' });
+  first.stdout.write('{"type":"run_done","run":1,"outcome":"done"}\n');
+  const saved = f.connection();
+  const pending = f.api.startBridge(saved.target, saved.session);
+  const rejected = assert.rejects(pending, /fixture startup failed/);
+  while (f.children.length < 2) await new Promise(setImmediate);
+  const failed = f.children.at(-1);
+  failed.stderr.write('fixture startup failed'); failed.close(255);
+  await rejected;
+  assert.equal(f.api.state().connected, false);
+  assert.deepEqual(f.connection(), saved);
+  await f.connect();
+  assert.equal(f.api.state().connected, true, 'retry must not wait for a closed process');
+  assert.equal(f.events.filter(e => e.type === 'disconnected').length, 0);
+});
+
 test('rejected submissions release provider access without stale events clearing another run', async t => {
   const f = fixture(t), child = await f.connect();
   f.api.writeBridge({ type: 'run_mission', run: 7, text: 'objective' });
@@ -150,6 +168,19 @@ test('preview normalizes bare addresses while rejecting non-web URLs and credent
     await assert.rejects(f.ipc('open-browser', input));
   }
   assert.equal(f.loads.length, loaded);
+});
+
+test('annotation screenshot is clipped to the visible preview and bounded', async t => {
+  const f = fixture(t), captures = [];
+  const picture = { isEmpty: () => false, getSize: () => ({ width: 2000, height: 1000 }),
+    resize(options) { assert.equal(options.width, 1600); return this; }, toPNG: () => Buffer.from('png') };
+  const view = { getBounds: () => ({ width: 600, height: 400 }), webContents: { capturePage: async rect => { captures.push(rect); return picture; } } };
+  const value = await f.api.captureAnnotation(view, { rect: { x: -20, y: 10, width: 700, height: 500 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(captures)), [{ x: 0, y: 10, width: 600, height: 390 }]);
+  assert.equal(value.image.data, Buffer.from('png').toString('base64')); assert.equal(value.resized, true);
+  for (const rect of [null, { x: NaN, y: 0, width: 10, height: 10 }, { x: 900, y: 0, width: 10, height: 10 }]) await assert.rejects(f.api.captureAnnotation(view, { rect }));
+  picture.toPNG = () => Buffer.alloc(4 * 1024 * 1024 + 1); picture.toJPEG = () => Buffer.from('jpeg');
+  assert.equal((await f.api.captureAnnotation(view, { rect: { x: 0, y: 0, width: 100, height: 100 } })).image.mime, 'image/jpeg');
 });
 
 test('SSH preview waits for a slow tunnel before loading the page', async t => {

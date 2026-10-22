@@ -30,8 +30,13 @@ catalog and reasoning metadata privately on the workspace host for 15 minutes;
 and a failed refresh shows an explicit warning when using older cached choices.
 
 Model switching is available between turns. Selecting a different model or
-reasoning level starts a new chat, preserves your draft, and keeps the previous
-chat in recent chats. Saved chats retain their model and reasoning level.
+reasoning level continues the conversation in a fresh native session with the
+original user text, assistant replies and historical Mission results. The draft
+is preserved; **View transferred context** shows exactly what was carried over
+and **Open previous chat** returns to the source. Tools, private reasoning,
+image pixels and approvals are not transferred or replayed. Context above
+128 KiB is refused explicitly; the original chat stays available. Saved chats
+retain their model and reasoning level, including after switching and restarting.
 ChatGPT reasoning choices and defaults come from the selected model's catalog;
 unsupported catalog modes appear disabled. Other providers use known model
 capabilities. The mode selector offers **Ask before changes**, **Auto edits**,
@@ -53,6 +58,14 @@ Reopening Desktop reconnects to the last workspace and resumes its chat;
 connection settings contain no credentials or saved approvals. A session
 interrupted during a tool call can be recovered into a fresh run with its
 outcome marked unknown. Recovery never reruns historical commands.
+
+When a provider fails, use its recovery action to repair settings or sign in
+again, then **Resume chat** to return to the saved conversation. A failed
+reconnect keeps that chat pointer and your draft attachments. If provider or
+project settings have changed, **Continue with conversation text** starts a
+compatible session with the same portable context used by model switching.
+Failed requests remain available to restore and edit after reconnecting;
+they are never sent again automatically.
 
 If an SSH host reports an older CLI, choose **Install or update SUI on SSH host**
 and retry. Desktop checks compatibility before invoking provider commands.
@@ -743,7 +756,11 @@ Git readiness refreshes after turns and when you return to the window; use
 Expand Mission options to choose worker/auditor profiles
 and one or two workers. Their default is the current model and reasoning setting.
 Progress, concurrent approvals, audit results and the accepted branch/commit appear
-in the transcript. Browser and web consent remain separate. Execution runs local
+in the transcript. Desktop **Inspect agent activity** separates live agent text
+and tool results. After execution, **Review changes & checks** opens recorded
+gates/audit results, agent journals and per-file diffs between the recorded base
+and accepted commit. These read-only views also remain available after reopening
+or changing models; no checks or old commands run again. Browser and web consent remain separate. Execution runs local
 commands in disposable worktrees; the conversation approval selector does not
 restrict those worker commands.
 Stop/Ctrl-C also terminates in-flight Git operations and their hook processes.
@@ -921,9 +938,14 @@ support explicit breakpoints or public API diagnostics.
 
 ## Known limitations
 
-- Changes tab shows status + `diff --stat`, not full diffs.
-- Per-worker transcript panes are not implemented; journals under
-  `~/.local/share/sui/runs` hold the full record.
+- The TUI Changes tab shows status + `diff --stat`; Desktop Mission review
+  provides per-file text diffs for accepted candidates. Failed runs retain
+  journals/worktrees for inspection but have no accepted candidate diff.
+- Desktop review shows up to 200 changed files, 128 KiB per diff, the latest
+  60 agent entries and 40 check/audit records, with explicit omission notices.
+  Journals under `~/.local/share/sui/runs` hold the full record. Older sessions
+  without structured Mission results retain their transcript/export, but do
+  not acquire review buttons retroactively.
 - Provider/model behavior is `UNVERIFIED` until `sui-certify` runs
   against real credentials — installation proves nothing about a
   provider's tool-calling or cache behavior.

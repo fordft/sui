@@ -50,6 +50,8 @@ pub struct Header {
 /// Every native writer holds it; recovery refuses an active writer.
 pub struct SessionLock {
     _file: File,
+    #[cfg(unix)]
+    owner: u32,
 }
 impl SessionLock {
     pub fn acquire(dir: &Path) -> Result<Self> {
@@ -78,8 +80,39 @@ impl SessionLock {
         #[cfg(not(unix))]
         bail!("session recovery requires Unix process locks");
         #[cfg(unix)]
-        Ok(Self { _file: f })
+        Ok(Self {
+            _file: f,
+            owner: std::process::id(),
+        })
     }
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.owner == std::process::id() {
+            use std::os::fd::AsRawFd;
+            // A concurrently forked child can briefly retain this open file
+            // description before exec closes it. End ownership explicitly;
+            // inherited handles must not keep a finished session locked.
+            unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn finished_session_releases_lock_even_with_an_inherited_file_description() {
+    let root = std::env::temp_dir().join(format!("sui-lock-{:032x}", rand::random::<u128>()));
+    let lock = SessionLock::acquire(&root).unwrap();
+    let inherited = lock._file.try_clone().unwrap();
+    assert!(SessionLock::acquire(&root).is_err());
+    drop(lock);
+    let reopened = SessionLock::acquire(&root).unwrap();
+    drop(inherited);
+    assert!(SessionLock::acquire(&root).is_err());
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 pub fn runs_root() -> PathBuf {
@@ -147,10 +180,12 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
         if !matches {
             continue;
         }
-        if !events
-            .iter()
-            .any(|v| matches!(v["type"].as_str(), Some("task" | "user")))
-        {
+        if !events.iter().any(|v| {
+            matches!(
+                v["type"].as_str(),
+                Some("task" | "user" | "conversation_handoff")
+            )
+        }) {
             continue;
         }
         let header = events.iter().find(|v| v["type"] == "resume_header");
@@ -166,6 +201,12 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
                     .iter()
                     .find(|v| v["type"] == "user")
                     .and_then(|v| v["data"]["content"].as_str())
+            })
+            .or_else(|| {
+                events
+                    .iter()
+                    .find(|v| v["type"] == "conversation_handoff")
+                    .and_then(|v| v["data"]["handoff"]["entries"][0]["content"].as_str())
             })
             .unwrap_or("recorded session");
         let id = dir
@@ -339,6 +380,14 @@ impl SavedSession {
                 }
             }
             match event["type"].as_str() {
+                Some("conversation_handoff") => {
+                    if turn_open || !pending.is_empty() {
+                        bail!("continuation inside an unfinished turn");
+                    }
+                    let _: crate::continuation::Continuation =
+                        serde_json::from_value(d["handoff"].clone())?;
+                    ended = true;
+                }
                 Some("turn_start") => {
                     if turn_open {
                         bail!("session has an unfinished turn; old commands will not be replayed");

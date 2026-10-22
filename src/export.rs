@@ -411,11 +411,9 @@ pub fn run_export(o: &ExportOpts) -> Result<PathBuf> {
                 }
                 "task" => agent.timeline.push(tl(ts, "task", d.clone())),
                 "task_done" => agent.timeline.push(tl(ts, "task_done", d.clone())),
-                "provider_retry" | "runtime_observation" => {
-                    agent
-                        .timeline
-                        .push(tl(ts, e["type"].as_str().unwrap(), d.clone()))
-                }
+                "provider_retry" | "runtime_observation" | "conversation_handoff" => agent
+                    .timeline
+                    .push(tl(ts, e["type"].as_str().unwrap(), d.clone())),
                 // Historical ACP journals remain readable after backend removal.
                 "acp_model" => agent.timeline.push(tl(ts, "acp_model", d.clone())),
                 "journal_error" => agent.timeline.push(tl(ts, "journal_error", d.clone())),
@@ -1250,9 +1248,14 @@ fn render_event(m: &mut String, e: &Value) {
                     .unwrap_or_default(),
             ));
         }
-        "runtime_observation" => {
+        "runtime_observation" | "conversation_handoff" => {
             m.push_str(&format!(
-                "**Runtime observation:**\n\n{}\n\n",
+                "**{}:**\n\n{}\n\n",
+                if kind == "conversation_handoff" {
+                    "Transferred conversation context"
+                } else {
+                    "Runtime observation"
+                },
                 cap(d["content"].as_str().unwrap_or(""), 1500)
             ));
         }

@@ -371,7 +371,7 @@ pub(crate) fn replay_events<'a>(
                 };
                 history = serde_json::from_value(messages).context("invalid context checkpoint")?;
             }
-            Some("user" | "runtime_observation") => {
+            Some("user" | "runtime_observation" | "conversation_handoff") => {
                 let content = if let Some(reference) = data.get("content_ref") {
                     let (_, bytes) = read_attachment(
                         path.parent().context("journal parent missing")?,

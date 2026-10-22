@@ -158,6 +158,30 @@ impl Agent {
         self.runtime_observation(&text);
     }
 
+    pub(crate) fn continue_conversation(
+        &mut self,
+        handoff: &crate::continuation::Continuation,
+    ) -> Result<()> {
+        let content = handoff.content()?;
+        self.journal.log(
+            "conversation_handoff",
+            json!({"content":content,"handoff":handoff}),
+        );
+        if self.journal.failed() {
+            return Err(anyhow!("conversation continuation could not be persisted"));
+        }
+        self.history.push(Message::User {
+            content: content.into(),
+        });
+        if let Some(discussion) = &mut self.mission_discussion {
+            for entry in &handoff.entries {
+                discussion.record(&entry.role, &entry.content);
+            }
+        }
+        self.set_mission_chat(handoff.mode == "mission");
+        Ok(())
+    }
+
     pub(crate) fn set_desktop_approval(&mut self, yolo: Option<Arc<AtomicBool>>) {
         self.desktop_yolo = yolo;
     }
@@ -326,10 +350,15 @@ impl Agent {
     /// session serialize the SAME request the original would (the certify
     /// replay check depends on this byte-identity).
     pub fn restore_history(&mut self, msgs: Vec<Message>) {
-        self.guided = !msgs.is_empty();
+        self.guided = msgs.iter().any(|message| {
+            !matches!(message,
+                Message::User { content: crate::types::UserContent::Text(text) }
+                if text.starts_with("<conversation_handoff>")
+            )
+        });
         self.latest_task = msgs.iter().rev().find(|m| matches!(m,
             Message::User { content: crate::types::UserContent::Text(text) }
-            if !text.starts_with("<runtime_observation>") && !text.starts_with("<context_checkpoint>")
+            if !text.starts_with("<runtime_observation>") && !text.starts_with("<context_checkpoint>") && !text.starts_with("<conversation_handoff>")
         )).cloned();
         self.history = msgs;
     }

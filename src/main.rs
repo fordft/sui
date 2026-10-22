@@ -17,6 +17,9 @@ enum Sub {
         profile: String,
         #[arg(long)]
         resume: Option<String>,
+        /// Continue portable conversation text with new model settings.
+        #[arg(long, conflicts_with = "resume")]
+        continue_from: Option<String>,
         #[arg(long, value_enum)]
         reasoning_effort: Option<sui::reasoning::Effort>,
         #[arg(long)]
@@ -73,7 +76,7 @@ enum Sub {
 )]
 struct Cli {
     /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=4))]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=5))]
     desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,
@@ -201,6 +204,7 @@ async fn main() -> Result<()> {
         workspace,
         profile,
         resume,
+        continue_from,
         reasoning_effort,
         model,
     }) = &cli.sub
@@ -209,6 +213,7 @@ async fn main() -> Result<()> {
             workspace,
             profile,
             resume.as_deref(),
+            continue_from.as_deref(),
             *reasoning_effort,
             model.as_deref(),
         )

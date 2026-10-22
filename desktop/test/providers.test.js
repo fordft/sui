@@ -109,3 +109,12 @@ test('catalog metadata survives the public boundary without tokens or model inst
   assert.ok(!JSON.stringify(result).includes('private-'));
   assert.ok(!JSON.stringify(requests).includes('private-'));
 });
+
+test('provider repair receives the endpoint but no credentials or credential-bearing URLs', async () => {
+  const urls = ['http://127.0.0.1:11434/v1', 'https://private-user:private-pass@example.test/v1', 'https://example.test/v1?key=private-query', 'https://example.test/#private-fragment', 'file:///private-path', 'invalid'];
+  const { service } = fixture(() => ({ type: 'profiles', items: urls.map(base_url => ({ name: 'test', model: 'test-model', kind: 'ollama', base_url, api_key: 'private-key', key_env: 'private-env' })) }));
+  const result = await service.request({ kind: 'local' }, { action: 'profiles' });
+  assert.equal(result.items[0].base_url, urls[0]);
+  assert.ok(result.items.slice(1).every(p => p.base_url === null));
+  assert.ok(!JSON.stringify(result).includes('private-'));
+});

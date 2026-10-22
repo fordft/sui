@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod plan;
 pub mod prompts;
+pub mod review;
 pub mod worktree;
 
 use anyhow::{bail, Context, Result};
@@ -1008,6 +1009,7 @@ async fn body(
         Ok(b) => b,
         Err(e) => fail!(format!("resolve repo HEAD: {e:#}")),
     };
+    journal.log("mission_base", json!({"sha":base}));
     // Control roles (orchestrator, escalation) get a scratch worktree at
     // the mission base — they can read the real tree for planning
     // context but can never write into the user's checkout. It lives

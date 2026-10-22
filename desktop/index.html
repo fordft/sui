@@ -12,6 +12,8 @@
   <script src="markdown.js" defer></script>
   <script src="pet.js" defer></script>
   <script src="ui.js" defer></script>
+  <script src="review.js" defer></script>
+  <script src="recovery.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -129,12 +131,15 @@
             <div id="annotation-card" class="annotation-card hidden">
               <div class="annotation-head"><svg class="i"><use href="#i-crosshair"/></svg><strong>Browser annotation</strong><button id="remove-annotation" class="icon-btn sm" type="button" aria-label="Remove annotation"><svg class="i"><use href="#i-x"/></svg></button></div>
               <div id="annotation-target" class="annotation-target"></div>
+              <img id="annotation-image" class="annotation-image hidden" alt="Selected browser area">
+              <button id="remove-annotation-image" type="button" class="link-btn hidden">Remove screenshot (send text only)</button>
+              <p id="annotation-image-status" class="field-help"></p>
               <textarea id="annotation-comment" placeholder="What should SUI change here?" rows="2" aria-label="Annotation comment"></textarea>
             </div>
             <div id="composer" class="composer">
               <div id="composer-context" class="composer-context hidden">
                 <button type="button" id="choose-model" class="model-pill" aria-label="Change model" aria-haspopup="dialog" title="Change model"><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span id="composer-model"></span><span aria-hidden="true">⌄</span></button>
-                <label class="composer-setting" title="Reasoning effort. Changing it starts a new chat and preserves your draft."><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="sr-only">Reasoning level</span><select id="composer-reasoning" aria-label="Reasoning level"><option value="default">Provider default</option></select></label>
+                <label class="composer-setting" title="Reasoning effort. Changing it continues this conversation with the selected reasoning level."><svg class="i" aria-hidden="true"><use href="#i-sparkle"/></svg><span class="sr-only">Reasoning level</span><select id="composer-reasoning" aria-label="Reasoning level"><option value="default">Provider default</option></select></label>
                 <label class="composer-setting" title="Auto edits approves file changes. YOLO approves all local commands and scripts, including destructive actions. Web and browser permissions remain separate."><svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span class="sr-only">Permission mode</span><select id="composer-mode" aria-label="Permission mode"><option value="ask">Ask before changes</option><option value="auto-edits">Auto edits</option><option value="yolo">YOLO</option></select></label>
                 <label class="composer-setting" title="Mission lets you discuss the objective with a coordinator before starting workers."><span class="sr-only">Conversation mode</span><select id="composer-execution" aria-label="Conversation mode"><option value="solo">Solo</option><option value="mission">Mission</option></select></label>
                 <span id="composer-target" class="composer-target"></span><button type="button" id="composer-usage" class="link-btn hidden">Using ChatGPT plan · Manage usage</button>
@@ -199,7 +204,7 @@
 
   <dialog id="model-dialog" class="dialog" aria-labelledby="model-title" aria-describedby="model-help">
     <header class="dlg-head">
-      <div class="dlg-titles"><h2 id="model-title">Change model</h2><p id="model-help">Choose from your connected accounts and model profiles. Switching starts a new chat; this chat stays in recent chats.</p></div>
+      <div class="dlg-titles"><h2 id="model-title">Change model</h2><p id="model-help">Choose from your connected accounts and model profiles. Switching carries your conversation text into the selected model. The previous chat stays in recent chats.</p></div>
       <button type="button" id="close-model-picker" class="icon-btn" aria-label="Close model picker"><svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
     </header>
     <div class="dlg-body">
@@ -209,6 +214,14 @@
       <div id="model-options" class="model-options" aria-label="Available models"></div>
     </div>
     <footer class="dlg-foot"><button type="button" id="configure-model" class="btn btn-soft">Configure a model…</button></footer>
+  </dialog>
+
+  <dialog id="mission-review" class="dialog dialog-review" aria-labelledby="review-title">
+    <header class="dlg-head"><div class="dlg-titles"><h2 id="review-title">Review Mission</h2><p>Recorded checks, agent activity and candidate changes.</p></div><button type="button" id="close-mission-review" class="btn btn-ghost">Close</button></header>
+    <div class="dlg-body">
+      <div class="review-controls"><label class="field"><span>Changed file</span><select id="review-files"></select></label><label class="field"><span>Agent journal</span><select id="review-agents"></select></label><button type="button" id="review-evidence" class="btn btn-ghost btn-sm">Checks &amp; audit</button></div>
+      <p id="review-status" class="field-help" role="status"></p><pre id="review-content" class="review-text" tabindex="0"></pre>
+    </div>
   </dialog>
 
   <dialog id="connect-dialog" class="dialog" aria-labelledby="connect-title">
@@ -258,6 +271,7 @@
         <button type="button" id="show-model-setup" class="link-btn">+ Add a provider</button>
         <p class="field-help">SSH uses your keys and host verification. New host keys are saved on first connection; changed keys are rejected.</p>
         <button type="button" id="install-remote" class="link-btn"><svg class="i"><use href="#i-download"/></svg>Install or update SUI on SSH host</button>
+        <p id="connect-context" class="field-help hidden" role="status"></p>
         <div id="connect-error" class="form-error hidden" role="alert"></div>
       </div>
       <footer class="dlg-foot"><button type="submit" id="connect-button" class="btn btn-primary btn-lg" disabled><span>Open workspace</span><svg class="i"><use href="#i-arrow-right"/></svg></button></footer>

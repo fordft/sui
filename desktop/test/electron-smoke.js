@@ -31,6 +31,12 @@ const accountModels = [
 ];
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
+  if (channel === 'sui:command' && fixtureMission && args[0].type === 'review_mission') {
+    const command = args[0];
+    const data = command.file ? { file: command.file, diff: '-before\n+after <script>plain text</script>', truncated: false } : command.agent ? { agent: command.agent, entries: [{ kind: 'tool', text: 'test passed · exit 0' }], omitted: 0 } : { result: { outcome: 'accepted', branch: 'candidate' }, base: 'base-sha', candidate: 'candidate-sha', files: ['page.txt'], agents: ['w-a.jsonl'], evidence: [{kind:'gate',text:'exit 0'}], omitted:0 };
+    setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', { type:'mission_review',request:command.request,data }));
+    return true;
+  }
   if (channel === 'sui:command' && fixtureMission && args[0].type === 'mission_info') {
     fixtureMissionChecks++;
     setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', {type:'mission_info',mission:{ready:true,profiles:[{name:'fixture-role',model:'fixture'}]}}));
@@ -75,7 +81,7 @@ ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...
     assert.equal(target.kind, 'local');
     if (request.action === 'login') {
       fixtureLogins++;
-      fs.appendFileSync(path.join(tempHome, 'config.toml'), '\n[profiles.chatgpt]\nkind = "chatgpt"\nmodel = ""\n');
+      if (fixtureLogins === 1) fs.appendFileSync(path.join(tempHome, 'config.toml'), '\n[profiles.chatgpt]\nkind = "chatgpt"\nmodel = ""\n');
       fs.mkdirSync(path.join(tempHome, 'chatgpt'), { recursive: true });
       fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.json'), JSON.stringify({ client_id: 'oaiapp_fixture', subject: 'fixture-subject', email: 'fixture@example.com', access_token: 'private-smoke-access', refresh_token: 'private-smoke-refresh', scopes: ['chatgpt.tokens.use.direct'], expires_at: Math.floor(Date.now() / 1000) + 3600 }), { mode: 0o600 });
       fs.writeFileSync(path.join(tempHome, 'chatgpt/chatgpt.models.json'), JSON.stringify({ schema: 1, account: createHash('sha256').update('oaiapp_fixture:fixture-subject').digest('hex'), fetched_at: Math.floor(Date.now() / 1000), items: accountModels }), { mode: 0o600 });
@@ -189,6 +195,18 @@ async function run() {
     assert.equal(await ui('document.getElementById("composer-model").textContent'), 'other-model');
     assert.equal(await ui('document.getElementById("message").value'), 'Keep this draft', 'switching preserves the draft');
     assert.equal(await ui('document.getElementById("model-dialog").open'), false);
+    await ui('state.lastSubmission={draft:"Original failed request",images:[],annotation:null,comment:""}; recoveryNotice("warning: no API key set")');
+    assert.equal(await ui('getComputedStyle(document.getElementById("transcript")).visibility'), 'visible', 'errors and repair buttons are visible even before the first completed turn');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) { await pause(250); fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-recovery.png'), (await win.capturePage()).toPNG()); }
+    await ui('[...document.querySelectorAll(".recovery-card button")].find(button => button.textContent === "Restore request to composer").click()');
+    assert.equal(await ui('document.getElementById("message").value'), 'Original failed request\nKeep this draft', 'recovery keeps both failed and current drafts without sending');
+    assert.equal(await ui('state.activeRun'), null);
+    await ui('[...document.querySelectorAll(".recovery-card button")].find(button => button.textContent === "Configure provider").click()');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("provider-dialog").open')); n++) await pause(30);
+    assert.equal(await ui('document.getElementById("setup-profile").value'), 'alternative', 'repair opens the existing profile');
+    assert.equal(await ui('document.getElementById("model-kind").value'), 'ollama', 'repair retains the provider transport');
+    assert.equal(await ui('document.getElementById("model-id").value'), 'other-model');
+    await ui('closeProviderSetup(); document.getElementById("connect-dialog").close(); document.getElementById("model-kind").value="chatgpt"; changeProvider(); document.getElementById("message").value="Keep this draft"; state.lastSubmission=null; state.recoveryVisible=false; transcript().replaceChildren(); setStage()');
     await ui('document.getElementById("choose-model").click()');
     for (let n = 0; n < 100; n++) {
       if (await ui('document.querySelector(".model-option[aria-current=true]") !== null')) break;
@@ -240,6 +258,22 @@ async function run() {
     const annotation = await win.webContents.executeJavaScript('document.getElementById("annotation-target").textContent');
     assert.match(annotation, /#target/);
     assert.match(annotation, /127\.0\.0\.1/);
+    assert.equal(await ui('state.annotation.image.mime'), 'image/png');
+    assert.equal(await ui('document.getElementById("annotation-image").src.startsWith("data:image/png;base64,")'), true, 'real selected pixels are visible in the draft');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-annotation.png'), (await win.capturePage()).toPNG());
+    assert.match(await ui('document.getElementById("annotation-image-status").textContent'), /image-capable/, 'unsupported model gets an explicit choice');
+    fixtureImages = true;
+    const selectedPixels = await ui('state.annotation.image.data');
+    await ui('state.hello.image_input=true; document.getElementById("message").value="Fix this area"; document.getElementById("annotation-comment").value="Use the screenshot"; updateSend(); document.getElementById("send").click()');
+    for (let n = 0; n < 100 && (imageCommands.length === 0 || await ui('state.activeRun !== null')); n++) await pause(30);
+    assert.equal(imageCommands[0].images[0].data, selectedPixels, 'annotation pixels reach the submission');
+    assert.equal(await ui('state.annotation.image.data'), selectedPixels, 'rejected submission restores selected pixels');
+    assert.equal(await ui('document.getElementById("annotation-comment").value'), 'Use the screenshot', 'rejected submission restores comment');
+    await ui('document.getElementById("remove-annotation-image").click()');
+    assert.equal(await ui('!!state.annotation.image'), false, 'user can explicitly send text only');
+    await ui('clearAnnotation(); document.getElementById("message").value=""; state.hello.image_input=false; state.messages=0; transcript().replaceChildren(); renderWelcome(); setStage()');
+    await pause(250);
+    imageCommands.length = 0; fixtureImages = false;
     const heroGeometry = await win.webContents.executeJavaScript(`({
       petBottom: document.querySelector('.pet').getBoundingClientRect().bottom,
       titleTop: document.getElementById('welcome-title').getBoundingClientRect().top
@@ -329,6 +363,20 @@ async function run() {
     assert.equal(missionCommands[1].type, 'run_mission'); assert.equal(missionCommands[1].worker_profile, 'fixture-role'); assert.equal(missionCommands[1].max_workers, 2);
     assert.equal(await ui('document.querySelector(".mission-result").textContent.includes("fixture-sha")'), true, 'runtime branch and acceptance are visible');
     assert.equal(await ui('state.missionStreams.size'), 2, 'parallel worker text stays separate');
+    await ui('document.querySelector(".worker-review").open=true; document.querySelector(".worker-review select").value="w-b"; document.querySelector(".worker-review select").dispatchEvent(new Event("change"))');
+    assert.match(await ui('document.querySelector(".worker-review pre").textContent'), /Second worker/);
+    await ui('document.querySelector(".mission-card > button").click()');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-files").options.length > 1')); n++) await pause(30);
+    assert.equal(await ui('document.getElementById("mission-review").open'), true);
+    await ui('document.getElementById("review-files").value="page.txt"; document.getElementById("review-files").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-content").textContent.includes("+after")')); n++) await pause(30);
+    assert.match(await ui('document.getElementById("review-content").textContent'), /<script>plain text<\/script>/);
+    assert.equal(await ui('document.querySelectorAll("#review-content script").length'), 0, 'diff content cannot create executable markup');
+    if (process.env.SUI_DESKTOP_SCREENSHOT) { await pause(250); fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-mission-review.png'), (await win.capturePage()).toPNG()); }
+    await ui('document.getElementById("review-agents").value="w-a.jsonl"; document.getElementById("review-agents").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-content").textContent.includes("test passed")')); n++) await pause(30);
+    assert.match(await ui('document.getElementById("review-content").textContent'), /test passed/);
+    await ui('document.getElementById("close-mission-review").click()');
     assert.equal(missionCommands[1].text, 'Goal B');
     assert.equal(await ui('state.lastMissionTask'), 'Goal B', 'accepted execution updates the repeated objective');
     for (let n = 0; n < 100 && await ui('state.missionInfoPending'); n++) await pause(30);
@@ -441,6 +489,18 @@ async function run() {
     assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft');
     assert.deepEqual(await ui('[...document.getElementById("composer-reasoning").options].filter(o => !o.disabled).map(o => o.value)'), ['default', 'medium', 'xhigh']);
     assert.equal(await ui('document.querySelector("#composer-reasoning option[value=ultra]").disabled'), true);
+    await ui('document.getElementById("composer-reasoning").value="xhigh"; document.getElementById("composer-reasoning").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100; n++) { if (await ui('state.hello?.reasoning_effort === "xhigh" && !connectionBusy')) break; await pause(30); }
+    const beforeReauth = await ui('state.hello.run_id');
+    await ui('configureCurrentProvider()');
+    await ui('document.getElementById("chatgpt-login").click()');
+    for (let n = 0; n < 100; n++) { if (fixtureLogins === 2 && await ui('!providerBusy && !document.getElementById("provider-dialog").open')) break; await pause(30); }
+    assert.equal(fixtureLogins, 2);
+    await ui('document.getElementById("connect-button").click()');
+    for (let n = 0; n < 100; n++) { if (await ui(`state.hello && state.hello.run_id !== ${JSON.stringify(beforeReauth)} && !connectionBusy`)) break; await pause(30); }
+    assert.equal(await ui('state.hello.model'), 'second-account-model', 'reauthentication keeps the selected account model even before the first turn');
+    assert.equal(await ui('state.hello.reasoning_effort'), 'xhigh', 'reauthentication keeps the selected reasoning level');
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft');
     fixtureImages = true;
     const pixels = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jEn8AAAAASUVORK5CYII=';
     await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'mac-screen.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
@@ -454,7 +514,7 @@ async function run() {
     await ui('document.querySelector(".image-attachment button").click()');
     assert.equal(await ui('state.images.length'), 0, 'attachments can be removed before sending');
     fixtureImages = false;
-    assert.equal(fixtureLogins, 1, 'switching models reuses the signed-in account');
+    assert.equal(fixtureLogins, 2, 'only explicit reauthentication requires another sign-in');
     assert.match(fs.readFileSync(path.join(tempHome, 'config.toml'), 'utf8'), /\[profiles.chatgpt\]\nkind = "chatgpt"\nmodel = ""/);
     if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-account-models.png'), (await win.capturePage()).toPNG());
     assert.equal(await ui('document.getElementById("composer-usage").classList.contains("hidden")'), false, 'ChatGPT usage control is visible beside the model');

@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld('sui', {
   pickWorkspace: () => ipcRenderer.invoke('sui:pick-workspace'),
   remoteFolders: (host, directory, hidden) => ipcRenderer.invoke('sui:remote-folders', host, directory, hidden),
   cancelFolderBrowse: () => ipcRenderer.invoke('sui:cancel-folder-browse'),
-  connect: (item, resume) => ipcRenderer.invoke('sui:connect', item, resume),
+  connect: (item, resume, continuation) => ipcRenderer.invoke('sui:connect', item, resume, continuation),
   configure: (item, profile) => ipcRenderer.invoke('sui:configure', item, profile),
   provider: (item, request) => ipcRenderer.invoke('sui:provider', item, request),
   cancelProvider: () => ipcRenderer.invoke('sui:cancel-provider'),

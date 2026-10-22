@@ -746,6 +746,30 @@ restores discussion mode and completed results without replaying workers.
 Desktop maps agent-local permission IDs to connection-wide IDs and queues prompts
 so parallel workers cannot overwrite one another's permission request.
 
+### Portable continuation and review (Desktop protocol 5)
+
+Changing model/reasoning uses `desktop-bridge --continue-from <session>` after
+the source process drains. Native session loading validates and locks the source;
+the destination gets its own identity, provider signature and frozen schemas.
+An append-only `conversation_handoff` records bounded portable conversation text
+and source lineage. No provider wire items, images, tool calls/results or approval
+state are imported. The full 128 KiB-bounded text is reviewable; overflow refuses
+the transfer rather than dropping constraints. Handoffs replay as context, not
+completion evidence, and remain recoverable even before the first new request.
+Mission discussion retains the raw handoff entries across context compaction.
+
+Structured Mission results supply the bridge's review-directory allowlist.
+Read-only review binds the journal to the selected workspace and compares the
+recorded base and accepted commit, using Git without external diff/textconv or
+optional locks. It never executes recorded acceptance commands. Agent journals,
+diffs and gate records have bounded previews with explicit omissions.
+
+Browser annotation captures pixels in the Electron main process after selection,
+clips to the visible preview and rejects a changed page. A bounded screenshot
+is a visible, removable draft image sent through the existing image path. Terminal
+error actions only navigate to repair controls or restore a draft; they neither
+resubmit requests nor authorize tools.
+
 Desktop sends the displayed objective explicitly on each execution request and
 updates its repeat value only after native acceptance. Git readiness refreshes
 after turns, on window focus and through an explicit project-status refresh.

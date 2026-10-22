@@ -256,6 +256,24 @@ pub fn start_solo(
     web: Option<Arc<crate::web::WebService>>,
     saved: Option<&crate::session::SavedSession>,
 ) -> Result<Solo> {
+    start_solo_with_continuation(
+        prof, workspace, jdir, sink, cancel, flag, session, web, saved, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_solo_with_continuation(
+    prof: Profile,
+    workspace: PathBuf,
+    jdir: PathBuf,
+    sink: Sink,
+    cancel: Arc<tokio::sync::Notify>,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    session: Arc<std::sync::atomic::AtomicBool>,
+    web: Option<Arc<crate::web::WebService>>,
+    saved: Option<&crate::session::SavedSession>,
+    continuation: Option<&crate::continuation::Continuation>,
+) -> Result<Solo> {
     config::validate_native_config(None, &workspace)?;
     let lock = crate::session::SessionLock::acquire(&jdir)?;
     let (tx, mut rx) = unbounded_channel::<SoloCommand>();
@@ -308,17 +326,14 @@ pub fn start_solo(
     agent.set_run_id(0);
     if let Some(saved) = saved {
         agent.restore_session(saved)?;
-        let mission_chat = saved
-            .events
-            .iter()
-            .rev()
-            .find(|event| event["type"] == "task")
-            .and_then(|event| event["data"]["mode"].as_str())
-            .is_some_and(|mode| mode.starts_with("mission-"));
+        let mission_chat = crate::continuation::mode(&saved.events) == "mission";
         agent.set_mission_chat(mission_chat);
         agent.jlog("session_resumed", serde_json::json!({"source": saved.id}));
     } else {
         agent.record_session(Some(prof.name.clone()))?;
+        if let Some(handoff) = continuation {
+            agent.continue_conversation(handoff)?;
+        }
     }
     tokio::spawn(async move {
         let _session_lock = lock;
@@ -440,6 +455,7 @@ async fn run_interactive_mission(agent: &mut Agent, mut cfg: mission::MissionCfg
         sha.as_deref(),
         &dir,
     ));
+    agent.jlog("mission_result", serde_json::json!({"run":run,"outcome":outcome,"branch":branch,"accepted_sha":sha,"run_dir":dir}));
     agent.jlog("turn_end", serde_json::json!({"run":run,"outcome":outcome}));
     let _ = sink.send(UiEvent::MissionResult {
         run,

@@ -93,6 +93,12 @@ enum Command {
         max_workers: usize,
     },
     MissionInfo,
+    ReviewMission {
+        request: u64,
+        directory: String,
+        file: Option<String>,
+        agent: Option<String>,
+    },
     Approve {
         id: u64,
         choice: String,
@@ -315,6 +321,7 @@ pub async fn run(
     workspace: &Path,
     profile: &str,
     resume: Option<&str>,
+    continue_from: Option<&str>,
     reasoning_effort: Option<crate::reasoning::Effort>,
     model_override: Option<&str>,
 ) -> Result<()> {
@@ -342,6 +349,15 @@ pub async fn run(
         .map(|id| {
             crate::session::SavedSession::load_desktop(&crate::session::runs_root(), id, &workspace)
         })
+        .transpose()?;
+    let source = continue_from
+        .map(|id| {
+            crate::session::SavedSession::load_desktop(&crate::session::runs_root(), id, &workspace)
+        })
+        .transpose()?;
+    let continuation = source
+        .as_ref()
+        .map(crate::continuation::Continuation::from_session)
         .transpose()?;
     let catalog = if chatgpt {
         Some(crate::chatgpt::catalog(profile, false).await?)
@@ -437,28 +453,16 @@ pub async fn run(
             crate::reasoning::Effort::Default
         },
     );
-    let (history, history_truncated): (Vec<Value>, bool) = saved
-        .as_ref()
-        .map(|session| {
-            let entries = session.events.iter().filter_map(|event| {
-                let role = match event["type"].as_str()? {
-                    "task" => "user",
-                    "assistant" | "runtime_observation" => "assistant",
-                    _ => return None,
-                };
-                let content = event["data"][if role == "user" { "task" } else { "content" }]
-                    .as_str()?;
-                (!content.is_empty()).then_some((role, content))
-            });
-            let all: Vec<_> = entries.collect();
-            let omitted = all.len() > 30 || all.iter().any(|(_, content)| content.chars().count() > 4000);
-            let rows = all.into_iter().rev().take(30).map(|(role, content)| {
-                let preview: String = content.chars().take(4000).collect();
-                json!({"role":role,"content":if preview.len() < content.len() { format!("{preview}\n… [preview truncated]") } else { preview }})
-            }).collect::<Vec<_>>().into_iter().rev().collect();
-            (rows, omitted)
-        })
+    let conversation = saved.as_ref().or(source.as_ref());
+    let all = conversation
+        .map(|s| crate::continuation::entries(&s.events))
         .unwrap_or_default();
+    let history_truncated =
+        all.len() > 30 || all.iter().any(|entry| entry.content.chars().count() > 4000);
+    let history: Vec<Value> = all.into_iter().rev().take(30).map(|entry| {
+        let preview: String = entry.content.chars().take(4000).collect();
+        json!({"role":if entry.role == "user" { "user" } else { "assistant" },"content":if preview.len() < entry.content.len() { format!("{preview}\n… [preview truncated]") } else { preview }})
+    }).collect::<Vec<_>>().into_iter().rev().collect();
     if let Some(saved) = &saved {
         if saved
             .header
@@ -485,7 +489,7 @@ pub async fn run(
     let session_allow = Arc::new(AtomicBool::new(false));
     let selected_profile = prof.clone();
     let web = Some(crate::web::WebService::new(crate::web::load_cfg(None)));
-    let solo = crate::tui::start_solo(
+    let solo = crate::tui::start_solo_with_continuation(
         prof,
         workspace.clone(),
         dir.clone(),
@@ -495,29 +499,46 @@ pub async fn run(
         session_allow.clone(),
         web.clone(),
         saved.as_ref(),
+        continuation.as_ref(),
     )?;
-    let recovered = saved.as_ref().is_some_and(|s| s.recovered);
-    let conversation_mode = saved
+    let recovered = saved
         .as_ref()
-        .and_then(|s| s.events.iter().rev().find(|e| e["type"] == "task"))
-        .and_then(|e| e["data"]["mode"].as_str())
-        .filter(|m| m.starts_with("mission-"))
-        .map(|_| "mission")
-        .unwrap_or("solo");
-    let mut last_mission_task = saved
-        .as_ref()
-        .and_then(|s| {
-            s.events.iter().rev().find(|e| {
-                e["type"] == "task"
-                    && e["data"]["mode"]
-                        .as_str()
-                        .is_some_and(|m| m.starts_with("mission-"))
-            })
-        })
-        .and_then(|e| e["data"]["task"].as_str())
+        .or(source.as_ref())
+        .is_some_and(|s| s.recovered);
+    let conversation = saved.as_ref().or(source.as_ref());
+    let conversation_mode = conversation
+        .map(|s| crate::continuation::mode(&s.events))
+        .unwrap_or("solo")
+        .to_string();
+    let mut last_mission_task = conversation
+        .map(|s| crate::continuation::last_mission_task(&s.events))
         .unwrap_or("")
         .to_string();
+    let handoff_info = continuation
+        .as_ref()
+        .map(|c| serde_json::to_value(c).expect("serializable continuation"))
+        .or_else(|| {
+            saved
+                .as_ref()
+                .and_then(|s| {
+                    s.events
+                        .iter()
+                        .rev()
+                        .find(|e| e["type"] == "conversation_handoff")
+                })
+                .map(|e| e["data"]["handoff"].clone())
+        });
+    let mission_results = saved
+        .as_ref()
+        .or(source.as_ref())
+        .map(|s| crate::continuation::mission_results(&s.events))
+        .unwrap_or_default();
+    let mut review_directories: std::collections::HashSet<String> = mission_results
+        .iter()
+        .filter_map(|r| r["run_dir"].as_str().map(String::from))
+        .collect();
     drop(saved);
+    drop(source);
     let mission = mission_info(&workspace).await;
     let (command_tx, mut command_rx) = mpsc::channel::<Result<Command, String>>(4);
     std::thread::spawn(move || {
@@ -550,7 +571,7 @@ pub async fn run(
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"conversation_mode":conversation_mode,"last_mission_task":last_mission_task,"mission":mission,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated}),
+        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"conversation_mode":conversation_mode,"last_mission_task":last_mission_task,"mission":mission,"mission_results":mission_results,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated,"continuation":handoff_info}),
     )?;
     let mut pending: std::collections::HashMap<
         u64,
@@ -585,6 +606,22 @@ pub async fn run(
                     }
                 }
                 Some(Ok(Command::MissionInfo)) => send_line(&json!({"type":"mission_info","mission":mission_info(&workspace).await}))?,
+                Some(Ok(Command::ReviewMission { request, directory, file, agent })) => {
+                    let result = async {
+                        if active.is_some() { bail!("Wait for the current turn before opening recorded Mission results"); }
+                        if !review_directories.contains(&directory) { bail!("Choose a Mission result from this conversation"); }
+                        let directory = Path::new(&directory).canonicalize()?;
+                        if !directory.starts_with(crate::session::runs_root().canonicalize()?) { bail!("Mission records are outside the runs directory"); }
+                        crate::mission::review::load(&workspace, &directory, file.as_deref(), agent.as_deref()).await
+                    }.await;
+                    let response = match result {
+                        Ok(data) => json!({"type":"mission_review","request":request,"data":data}),
+                        Err(error) => json!({"type":"mission_review","request":request,"error":error.to_string()}),
+                    };
+                    if serde_json::to_vec(&response)?.len() > 768 * 1024 {
+                        send_line(&json!({"type":"mission_review","request":request,"error":"Review exceeds the display limit; inspect the run journal or branch directly"}))?;
+                    } else { send_line(&response)?; }
+                }
                 Some(Ok(Command::RunMission { run, text, images, worker_profile, auditor_profile, max_workers })) => {
                     let objective = if text.trim().is_empty() { last_mission_task.clone() } else { text };
                     let preparation = async {
@@ -678,6 +715,9 @@ pub async fn run(
             event = event_rx.recv() => match event {
                 Some(event) => {
                     let (mut value, reply) = project_event(event);
+                    if value["type"] == "mission_result" {
+                        if let Some(directory) = value["run_dir"].as_str() { review_directories.insert(directory.to_string()); }
+                    }
                     if let Some((_, scope, reply)) = reply {
                         next_permission = next_permission.checked_add(1).context("permission sequence exhausted")?;
                         value["id"] = json!(next_permission);

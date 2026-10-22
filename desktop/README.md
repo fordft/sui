@@ -20,8 +20,13 @@ agent loop.
   visible models from connected ChatGPT accounts and the host's configured
   profiles. Each account keeps a private 15-minute catalog cache; **Refresh models**
   reloads it. Reasoning levels and defaults follow each account model's metadata.
-  Unsupported catalog modes are disabled. Switching models or reasoning starts
-  a new chat and preserves the draft; previous chats remain in recent chats.
+  Unsupported catalog modes are disabled. Switching models or reasoning carries
+  portable conversation text into a fresh native session and preserves the draft.
+  **View transferred context** shows the carried text and links back to the previous
+  chat. Original user constraints, replies and historical Mission results survive
+  repeated switches and restarts. Images, tool output, private reasoning and
+  approvals stay in the source; no old commands are rerun. Transfers over 128 KiB
+  fail explicitly, leaving the source chat available.
   Switching is disabled while a turn runs. Saved chats restore their selected
   model without changing the account profile or signing in again.
 - **Themes:** system, light, or dark, from Appearance & companion. Fonts are
@@ -50,6 +55,23 @@ agent loop.
   and reconnects on startup. A project opens its latest meaningful chat; empty
   connection-only sessions stay out of recent chats. Interrupted tool calls
   are marked as unknown outcomes in a new fork, never rerun automatically.
+- **Recovery:** terminal errors offer relevant actions: sign in/configure a
+  provider, choose a different model, manage ChatGPT usage, or reconnect to the
+  saved chat. Provider repair returns to **Resume chat**, preserving native
+  history and the selected ChatGPT model/reasoning. If the repaired settings
+  are incompatible, **Continue with conversation text** offers a new chat with
+  portable context; images, tool output and approvals remain in the original.
+  Selecting another profile in the repair form uses this continuation too.
+  A failed reconnect keeps the saved chat pointer, draft and attachments. A
+  failed request stays available to restore after reconnecting, alongside a
+  newer draft; recovery does not send it automatically. Rejected annotations
+  retain their text, comment and selected screenshot. Changing workspace or
+  choosing New chat starts a separate conversation.
+- **Mission review:** select an agent under **Inspect agent activity** during
+  execution. Afterwards, **Review changes & checks** opens runtime-recorded
+  gates, audits, agent journals and file diffs pinned to the recorded base and
+  accepted commit. Reopened conversations retain their review links. Views are
+  bounded and disclose omissions; original checkouts are never changed.
 - **Browser preview:** enter a full URL or a bare address such as
   `www.google.com` or `localhost:5173`. Bare loopback addresses use HTTP;
   other bare hosts use HTTPS. SSH **Forward & open** waits for the tunnel
@@ -166,11 +188,15 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
 5. Choose **Annotate**, click an element or drag an area, then write a comment
    beside the chat and send it. SUI receives the page URL, DOM selector, nearby
    text, viewport and selected bounds with the comment. Page text is labeled
-   untrusted. The app does not currently attach browser image bytes to the
-   model; visual inspection can be requested through SUI's existing browser
-   tool on the project host.
+   untrusted. A screenshot of the visible selected area appears in the draft
+   and is sent with your comment. Captures are scaled to at most 1600 pixels
+   on their longest edge and share the normal four-image/8 MiB submission limit.
+   Choose an image-capable model or explicitly remove the screenshot for a
+   text-only annotation. Images travel through the existing private image
+   transport and replay storage, never through connection preferences.
 
-The remote workspace must exist. The remote installation button requires HTTPS
+Desktop now requires protocol 5 on its CLI host; update both together. The
+remote workspace must exist. The remote installation button requires HTTPS
 access to GitHub Releases on that host; it installs the latest released SUI, so
 the release must include `desktop-bridge`, `desktop-setup`, and `desktop-provider`
 for this app.
@@ -236,5 +262,8 @@ bridge, opens a test web page and checks element annotation, then that the
 native preview view steps aside for dialogs and leaves with its panel. The
 workspace smoke test uses real OpenSSH, temporary keys and an isolated config
 to import a host, browse and filter remote folders, then open a workspace in
-the native bridge. CI runs both. External SSH hosts, macOS's native chooser UI
+the native bridge. It also covers provider repair after a 401, failed reconnect
+and retry, native image history, and explicit continuation after incompatible
+profile changes. The local smoke covers ChatGPT reauthentication using account
+fixtures. CI runs both. External SSH hosts, macOS's native chooser UI
 and live model requests require separate validation on those systems.

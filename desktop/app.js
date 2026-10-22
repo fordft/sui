@@ -2,7 +2,8 @@ const $ = id => document.getElementById(id);
 const state = {
   target: null, hello: null, activeRun: null, nextRun: 1, assistant: null, annotation: null,
   browserOpen: false, browserShown: false, permissionId: null, permissionSending: false, log: null, messages: 0, projects: [], profiles: null, settingsPending: false, images: [], imagesLoading: 0, pendingSubmission: null,
-  conversationMode: 'solo', lastMissionTask: '', missionInfo: null, missionInfoPending: false, activeMission: false, missionCard: null, missionStreams: new Map(), permissionQueue: []
+  conversationMode: 'solo', lastMissionTask: '', missionInfo: null, missionInfoPending: false, activeMission: false, missionCard: null, missionStreams: new Map(), permissionQueue: [],
+  sessionHasHistory: false, lastSubmission: null, recoveryVisible: false
 };
 const SUGGESTIONS = [
   { title: 'Explore code', detail: 'Find your way around a codebase', icon: 'folder', prompt: 'Explain how this codebase is organized' },
@@ -47,9 +48,10 @@ function setStatus(label, connected, busy = false) {
 }
 
 function updateSend() {
+  const hasImages = state.images.length > 0 || !!state.annotation?.image;
   const draft = $('message').value.trim() || state.annotation || state.images.length;
-  $('run-mission').disabled = !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || state.images.length > 0 || !(String($('message').value).trim() || state.lastMissionTask);
-  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (state.images.length > 0 && !state.hello?.image_input) || !draft;
+  $('run-mission').disabled = !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || hasImages || !(String($('message').value).trim() || state.lastMissionTask);
+  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (hasImages && !state.hello?.image_input) || !draft;
 }
 
 function setBusy(busy) {
@@ -83,7 +85,7 @@ function updateScrollButton() {
 }
 
 function setStage() {
-  $('stage').dataset.stage = state.messages === 0 ? 'hero' : 'chat';
+  $('stage').dataset.stage = state.messages === 0 && !state.recoveryVisible ? 'hero' : 'chat';
   updateScrollButton();
   pet().refresh();
 }
@@ -256,6 +258,7 @@ function renderSessions(items) {
 
 let folderListing = null, folderRequest = 0, hostRequest = 0, connectionBusy = false, selectedWorkspace = '';
 let dialogLocation = '';
+let connectionIntent = null;
 
 function closeFolders() {
   folderRequest++;
@@ -274,9 +277,12 @@ function setWorkspace(directory) {
 }
 
 function updateConnectForm() {
-  const item = formTarget();
+  const { item, resume, continuation } = formConnection();
   const browsing = !$('folder-browser').classList.contains('hidden');
   $('connect-button').disabled = connectionBusy || providerBusy || savedProfiles.some(p => p.name === item.profile && p.kind === 'chatgpt' && !p.account?.sharing) || browsing || !item.workspace.trim() || !item.profile || (item.kind === 'ssh' && !item.host);
+  $('connect-button').querySelector('span').textContent = continuation ? 'Continue chat' : resume ? 'Resume chat' : 'Open workspace';
+  $('connect-context').textContent = continuation ? 'Continue with conversation text. Images, tool output and approvals remain in the original chat.' : resume ? 'Return to your saved chat. Your draft stays here; nothing is sent automatically.' : '';
+  $('connect-context').classList.toggle('hidden', !resume && !continuation);
   $('browse-workspace').disabled = connectionBusy || browsing || (item.kind === 'ssh' && !item.host);
 }
 
@@ -423,7 +429,8 @@ function showConnectError(error) {
   $('connect-error').classList.remove('hidden', 'success');
 }
 
-async function showDialog(item) {
+async function showDialog(item, intent = null) {
+  connectionIntent = intent;
   if (item && providerLocation(item) !== dialogLocation) {
     resetProvider();
     savedProfiles = [];
@@ -458,6 +465,30 @@ function updateMode() {
 function formTarget() {
   const kind = document.querySelector('input[name="kind"]:checked').value;
   return { kind, host: kind === 'ssh' ? $('host').value.trim() : '', workspace: selectedWorkspace, profile: $('profile').value.trim() };
+}
+
+function formConnection() {
+  const item = formTarget();
+  const intent = sameTarget(item, connectionIntent?.target) ? connectionIntent : null;
+  if (!intent) return { item };
+  const sameProfile = item.profile === intent.target.profile;
+  // Keep an account's selected model on reauthentication. Other transports
+  // resolve their model from the repaired host profile.
+  if (sameProfile && savedProfiles.some(p => p.name === item.profile && p.kind === 'chatgpt')) {
+    item.model = intent.target.model;
+    item.reasoning_effort = intent.target.reasoning_effort;
+  }
+  const continuation = intent.continuation || (!sameProfile ? intent.resume : null);
+  return { item, resume: continuation ? null : intent.resume, continuation };
+}
+
+async function recoveryConnection(item) {
+  if (sameTarget(item, state.target) && state.hello) {
+    return { target: { ...state.target }, resume: state.sessionHasHistory ? state.hello.run_id : null };
+  }
+  if (sameTarget(item, connectionIntent?.target)) return connectionIntent;
+  const saved = await window.sui.restore();
+  return saved?.session && sameTarget(saved.target, item) ? { target: saved.target, resume: saved.session } : null;
 }
 
 async function installRemote() {
@@ -650,7 +681,7 @@ function renderModelOptions() {
       if (item.kind === 'chatgpt') target.model = item.model;
       else delete target.model;
       delete target.reasoning_effort;
-      connect(target);
+      switchModel(target);
     });
     list.append(button);
   }
@@ -703,9 +734,21 @@ async function showModelPicker() {
   await loadModelPicker();
 }
 
-async function connect(item, resume = null) {
+async function switchModel(item) {
+  const source = state.hello?.run_id;
+  const annotation = state.annotation, comment = $('annotation-comment').value;
+  await connect(item, null, state.sessionHasHistory ? source : null);
+  if (annotation) { state.annotation = annotation; $('annotation-comment').value = comment; renderAnnotation(); }
+}
+
+async function connect(item, resume = null, continuation = null) {
   if (connectionBusy || state.activeRun !== null) return;
+  const draftAnnotation = sameTarget(item, state.target) ? state.annotation : null;
+  const draftComment = $('annotation-comment').value;
+  const failedSubmission = (resume || continuation) && (resume || continuation) === state.lastSubmission?.session && sameTarget(item, state.target) ? state.lastSubmission : null;
+  const intent = { target: { ...item }, resume, continuation };
   connectionBusy = true;
+  window.SuiReview.reset();
   $('model-dialog').close();
   closeFolders();
   state.hello = null;
@@ -713,8 +756,12 @@ async function connect(item, resume = null) {
   setStatus('Connecting…', false, true);
   $('connect-button').disabled = true;
   try {
-    const hello = await window.sui.connect(item, resume);
-    Object.assign(state, { target: item, hello, activeRun: null, nextRun: 1, assistant: null, annotation: null, log: null, messages: 0 });
+    const hello = await window.sui.connect(item, resume, continuation);
+    Object.assign(state, { target: { ...item, workspace: hello.workspace }, hello, activeRun: null, nextRun: 1, assistant: null, annotation: null, log: null, messages: 0 });
+    state.sessionHasHistory = !!hello.history?.length;
+    state.lastSubmission = failedSubmission && !failedSubmission.restored ? { ...failedSubmission, session: hello.run_id } : null;
+    state.pendingSubmission = null;
+    state.recoveryVisible = false;
     $('annotation-card').classList.add('hidden');
     $('permission').classList.add('hidden');
     state.permissionId = null;
@@ -752,15 +799,38 @@ async function connect(item, resume = null) {
     setStatus(item.kind === 'ssh' ? 'SSH connected' : 'Local', true);
     transcript().replaceChildren();
     for (const message of hello.history || []) appendMessage(message.role, message.content);
+    if (hello.continuation) {
+      const context = h('details', 'worklog');
+      context.append(h('summary', '', `Continued from ${hello.continuation.model} · View transferred context`));
+      const text = h('pre', 'review-text', (hello.continuation.entries || []).map(entry => `${entry.role}:\n${entry.content}`).join('\n\n'));
+      const previous = h('button', 'btn btn-ghost btn-sm', 'Open previous chat');
+      previous.type = 'button';
+      previous.addEventListener('click', () => connect({ ...item, profile: hello.continuation.profile || item.profile }, hello.continuation.source));
+      context.append(h('p', 'field-help', 'Conversation text was transferred. Images, tool output and approvals remain in the previous chat.'), previous, text);
+      transcript().append(context);
+    }
+    for (const result of [...(hello.mission_results || [])].reverse()) {
+      const button = h('button', 'btn btn-ghost btn-sm', `Review mission · ${result.outcome}`);
+      button.type = 'button'; button.addEventListener('click', () => window.SuiReview.open(result.run_dir));
+      transcript().append(button);
+    }
     if (hello.recovered) appendNotice('This chat was interrupted. Pending tools were not rerun; inspect existing changes before retrying.', true);
+    if (state.lastSubmission) {
+      const card = h('div', 'notice recovery-card');
+      card.append(h('p', '', 'The previous request is available to restore and edit. It has not been sent again.'));
+      appendRequestRestore(card, state.lastSubmission);
+      transcript().append(card); state.recoveryVisible = true;
+    }
     renderImages();
+    if (draftAnnotation) { state.annotation = draftAnnotation; $('annotation-comment').value = draftComment; renderAnnotation(); }
     if (hello.catalog_warning) appendNotice(hello.catalog_warning, true);
-    if (hello.history_truncated) appendNotice('Earlier conversation text is omitted from this preview; SUI restored the full native session.');
+    if (hello.history_truncated) appendNotice('Earlier conversation text is omitted from this preview; the saved context remains available to SUI.');
     setStage();
     $('remote-preview').classList.toggle('hidden', item.kind !== 'ssh');
     setBusy(false);
     renderWelcome();
     $('connect-dialog').close();
+    connectionIntent = null;
     await refreshProjects();
     await window.sui.command({ type: 'list_sessions' });
     $('message').focus();
@@ -770,9 +840,22 @@ async function connect(item, resume = null) {
     setBusy(false);
     setStatus('Disconnected', false);
     renderWelcome();
-    $('connect-error').textContent = String(error.message || error);
+    if (!$('connect-dialog').open) await showDialog(item, intent);
+    else connectionIntent = intent;
+    $('connect-error').replaceChildren();
     $('connect-error').classList.remove('hidden');
-    if (!$('connect-dialog').open) showDialog(item);
+    recoveryNotice(String(error.message || error), item, $('connect-error'));
+    if (resume && String(error.message || error).includes('recorded profile, model, tools or project guidance changed')) {
+      const help = h('p', 'field-help', 'Settings changed since this chat was saved. You can continue with its conversation text; images, tool output and approvals stay in the original chat.');
+      const carry = h('button', 'btn btn-soft btn-sm', 'Continue with conversation text');
+      carry.type = 'button';
+      carry.addEventListener('click', () => {
+        const selected = formConnection();
+        if (sameTarget(selected.item, item)) connect(selected.item, null, resume);
+      });
+      $('connect-error').append(help, carry);
+      carry.focus();
+    } else $('connect-error').querySelector('button')?.focus();
   } finally { connectionBusy = false; updateConnectForm(); }
 }
 
@@ -804,8 +887,8 @@ async function addImages(files) {
   state.imagesLoading++; setBusy(false); imageError();
   try {
     const added = [];
-    let total = state.images.reduce((n, image) => n + image.size, 0);
-    if (state.images.length + files.length > 4) throw new Error('Attach at most 4 images.');
+    let total = state.images.reduce((n, image) => n + image.size, state.annotation?.image?.size || 0);
+    if (state.images.length + files.length + (state.annotation?.image ? 1 : 0) > 4) throw new Error('Attach at most 4 images, including the browser screenshot.');
     for (const file of files) {
       if (!file.size || file.size > 4 * 1024 * 1024) throw new Error('Each image must be between 1 byte and 4 MiB.');
       if (!file.name || new TextEncoder().encode(file.name).length > 255 || /[\x00-\x1f\x7f]/.test(file.name)) throw new Error('Invalid image filename.');
@@ -842,7 +925,9 @@ function restoreSubmission() {
   const submission = state.pendingSubmission;
   if (submission) {
     $('message').value = [submission.draft, $('message').value].filter(Boolean).join('\n');
-    state.images = submission.images;
+    state.images = [...submission.images];
+    if (submission.annotation) { state.annotation = submission.annotation; $('annotation-comment').value = submission.comment; renderAnnotation(); }
+    submission.restored = true;
     state.pendingSubmission = null;
     renderImages();
   }
@@ -895,6 +980,7 @@ function beginMission(run) {
   root.append(stage, tasks, audit, result);
   transcript().append(root);
   state.missionCard = { run, root, stage, tasks, audit, result };
+  state.missionCard.record = window.SuiReview.live(root);
   state.missionStreams = new Map();
   scrollToEnd();
 }
@@ -923,6 +1009,7 @@ function clearAnnotation() {
   state.annotation = null;
   $('annotation-card').classList.add('hidden');
   $('annotation-comment').value = '';
+  $('annotation-image').removeAttribute('src');
   updateSend();
   pet().refresh();
 }
@@ -930,18 +1017,20 @@ function clearAnnotation() {
 async function send(executeMission = false) {
   executeMission = executeMission === true;
   if (!state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading) return;
-  if (state.images.length && !state.hello.image_input) { imageError('Choose an image-capable model before sending images.'); return; }
+  const images = [...state.images, ...(state.annotation?.image ? [state.annotation.image] : [])];
+  if (images.length && !state.hello.image_input) { imageError('Choose an image-capable model before sending images.'); return; }
+  if (images.length > 4 || images.reduce((sum, image) => sum + image.size, 0) > 8 * 1024 * 1024) { imageError('Attach at most 4 images and 8 MiB in total, including the browser screenshot.'); return; }
   const message = $('message').value.trim();
   const comment = $('annotation-comment').value.trim();
   if (!message && !state.annotation && !state.images.length && !(executeMission && state.lastMissionTask)) return;
-  if (executeMission && state.images.length) { imageError('Send images to the coordinator before running the mission.'); return; }
+  if (executeMission && images.length) { imageError('Send images to the coordinator before running the mission.'); return; }
   if (state.annotation && !comment) { $('annotation-comment').focus(); return; }
   const text = [message, state.annotation ? formatAnnotation(state.annotation, comment) : ''].filter(Boolean).join('\n\n');
   const display = [message, state.annotation ? `◎ ${comment}` : '', ...state.images.map(image => `Attached image: ${image.name}`)].filter(Boolean).join('\n');
   const objective = executeMission ? text || state.lastMissionTask : null;
   const run = state.nextRun++;
-  const images = state.images;
-  state.pendingSubmission = { run, draft: $('message').value, images, missionObjective: executeMission ? objective : state.conversationMode === 'mission' ? text : null };
+  state.pendingSubmission = { run, session: state.hello.run_id, draft: $('message').value, images: state.images, annotation: state.annotation, comment, missionObjective: executeMission ? objective : state.conversationMode === 'mission' ? text : null };
+  state.lastSubmission = state.pendingSubmission;
   state.images = []; renderImages(); imageError();
   state.activeRun = run;
   state.assistant = null;
@@ -970,7 +1059,89 @@ function finishRun(outcome) {
   announce(ok ? 'SUI finished' : `Run ${outcome}`);
 }
 
+function restoreRequest(submission) {
+  if (!submission || state.lastSubmission !== submission || submission.restored || state.images.length || state.annotation) return false;
+  $('message').value = [submission.draft, $('message').value].filter(Boolean).join('\n');
+  state.images = [...submission.images];
+  if (submission.annotation) { state.annotation = { ...submission.annotation }; $('annotation-comment').value = submission.comment; renderAnnotation(); }
+  submission.restored = true;
+  renderImages(); window.SuiUI.autosize($('message')); return true;
+}
+
+function appendRequestRestore(container, submission) {
+  if (!submission || submission.restored) return;
+  const context = state.hello;
+  const restore = h('button', 'btn btn-ghost btn-sm', 'Restore request to composer'); restore.type = 'button';
+  restore.addEventListener('click', () => {
+    if (connectionBusy || state.activeRun !== null || state.hello !== context || state.lastSubmission !== submission) return;
+    if (state.images.length || state.annotation) { container.append(h('p', 'field-help', 'Send or remove your current attachments before restoring this request.')); return; }
+    if (restoreRequest(submission)) { $('message').focus(); restore.disabled = true; }
+  });
+  container.append(restore);
+}
+
+function recoveryNotice(message, item = state.target, container = transcript()) {
+  const card = h('div', 'notice err recovery-card');
+  card.append(h('p', '', message));
+  const controls = h('div', 'recovery-actions');
+  const context = state.hello;
+  const submission = state.lastSubmission;
+  for (const action of window.SuiRecovery.actions(message, { connected: !!state.hello, chatgpt: state.hello?.kind === 'chatgpt' || savedProfiles.some(profile => profile.name === item?.profile && profile.kind === 'chatgpt'), ssh: item?.kind === 'ssh' })) {
+    const button = h('button', 'btn btn-ghost btn-sm', action.label); button.type = 'button';
+    button.addEventListener('click', async () => {
+      if (connectionBusy || state.activeRun !== null) return;
+      if (context && state.hello && context !== state.hello) { card.remove(); return; }
+      button.disabled = true;
+      try {
+        if (action.id !== 'usage' && !$('message').value.trim()) restoreRequest(submission);
+        if (action.id === 'usage') await window.sui.manageUsage();
+        else if (action.id === 'model') await showModelPicker();
+        else if (action.id === 'configure') await configureCurrentProvider(item);
+        else if (action.id === 'connection') await showDialog(item, await recoveryConnection(item));
+        else {
+          const saved = await window.sui.restore();
+          if (saved && (!item || sameTarget(saved.target, item))) await connect(saved.target, saved.session);
+          else await showDialog(item, await recoveryConnection(item));
+        }
+      } catch (error) { card.append(h('p', 'field-help', error.message)); }
+      finally { button.disabled = false; }
+    });
+    controls.append(button);
+  }
+  appendRequestRestore(controls, submission);
+  card.append(controls); container.append(card);
+  if (container === transcript()) { state.recoveryVisible = true; setStage(); }
+  scrollToEnd();
+}
+
+async function configureCurrentProvider(item = state.target) {
+  $('model-dialog').close();
+  await showDialog(item, await recoveryConnection(item));
+  showProviderSetup();
+  const selected = savedProfiles.find(p => p.name === item?.profile);
+  if (selected?.kind === 'chatgpt') {
+    $('model-kind').value = 'chatgpt'; $('setup-profile').value = selected.name;
+    setupAccount = selected.account; updateProviderForm();
+    loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); });
+  } else if (selected) {
+    const kind = selected.kind || 'chat-completions';
+    if (!['openai-responses', 'ollama', 'chat-completions'].includes(kind)) {
+      closeProviderSetup();
+      $('profiles-status').textContent = 'This profile is managed on the workspace host. Select another saved profile or add a provider here.';
+      return;
+    }
+    $('model-kind').value = kind === 'openai-responses' && selected.base_url !== 'https://api.openai.com/v1' ? 'responses-compatible' : ['openai-responses', 'ollama', 'chat-completions'].includes(kind) ? kind : 'chat-completions';
+    changeProvider();
+    $('setup-profile').value = selected.name; $('model-id').value = selected.model || '';
+    $('model-url').value = selected.base_url || '';
+    updateProviderForm();
+  }
+  $('setup-profile').focus();
+}
+
 function onEvent(event) {
+  window.SuiReview.event(event);
+  if (state.missionCard && event.run === state.missionCard.run) state.missionCard.record?.(event);
   switch (event.type) {
     case 'request_start': acceptSubmission(event.run); break;
     case 'send_error':
@@ -1008,12 +1179,16 @@ function onEvent(event) {
       if (state.missionCard?.run === event.run) {
         state.missionCard.stage.textContent = `Mission · ${String(event.outcome).slice(0, 2000)}`;
         state.missionCard.result.textContent = `Branch: ${event.branch || 'none'}\nAccepted commit: ${event.accepted_sha || 'none'}\nRun records: ${event.run_dir}\nYour current checkout was not updated. Review the candidate branch before applying it.`;
+        const review = h('button', 'btn btn-soft btn-sm', 'Review changes & checks');
+        review.type = 'button'; review.addEventListener('click', () => window.SuiReview.open(event.run_dir));
+        state.missionCard.root.append(review);
       }
       break;
     case 'run_done': {
       const outcome = String(event.outcome || '');
       acceptSubmission(event.run);
-      if (event.run === state.activeRun) { state.activeRun = null; state.assistant = null; setBusy(false); }
+      if (['done', 'accepted'].includes(outcome) && state.lastSubmission?.run === event.run) state.lastSubmission = null;
+      if (event.run === state.activeRun) { state.sessionHasHistory = true; state.activeRun = null; state.assistant = null; setBusy(false); }
       state.pendingSubmission = null; state.activeMission = false; state.permissionQueue = [];
       clearPermission();
       finishRun(outcome);
@@ -1022,7 +1197,7 @@ function onEvent(event) {
       break;
     }
     case 'error':
-      appendNotice(event.message || 'SUI error', true);
+      recoveryNotice(event.message || 'SUI error');
       if (String(event.message).includes('subscription_sharing_usage_')) {
         appendNotice('ChatGPT plan usage is unavailable or has reached its limit. Use Manage usage beside the model picker.');
         $('composer-usage').classList.remove('hidden');
@@ -1046,7 +1221,7 @@ function onEvent(event) {
       closeLog(false, true);
       pet().setAsking(false);
       $('permission').classList.add('hidden');
-      appendNotice(event.message || 'Connection closed', true);
+      recoveryNotice(event.message || 'Connection closed');
       pet().fret();
       announce('Disconnected from SUI');
       break;
@@ -1103,8 +1278,7 @@ async function annotate() {
     const selected = await window.sui.annotate();
     if (selected) {
       state.annotation = selected;
-      $('annotation-target').textContent = `${selected.url} · ${selected.selector || 'Selected area'}`;
-      $('annotation-card').classList.remove('hidden');
+      renderAnnotation();
       pet().refresh();
       $('annotation-comment').focus();
       updateSend();
@@ -1112,6 +1286,19 @@ async function annotate() {
     } else $('browser-status').textContent = 'Annotation cancelled';
   } catch (error) { $('browser-status').textContent = error.message; }
   finally { $('annotate').disabled = false; }
+}
+
+function renderAnnotation() {
+  const selected = state.annotation;
+  if (!selected) return;
+  $('annotation-target').textContent = `${selected.url} · ${selected.selector || 'Selected area'}`;
+  $('annotation-card').classList.remove('hidden');
+  $('annotation-image').classList.toggle('hidden', !selected.image);
+  $('remove-annotation-image').classList.toggle('hidden', !selected.image);
+  if (selected.image) $('annotation-image').src = `data:${selected.image.mime};base64,${selected.image.data}`;
+  else $('annotation-image').removeAttribute('src');
+  $('annotation-image-status').textContent = selected.image ? (!state.hello?.image_input ? 'Choose an image-capable model, or remove the screenshot to send text only.' : `Screenshot included${selected.resized ? ' · Resized to fit' : ''}`) : 'Text annotation only';
+  updateSend();
 }
 
 // ── wiring ───────────────────────────────────────────────────────────────
@@ -1127,7 +1314,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('connect-form').addEventListener('submit', event => {
     event.preventDefault();
     if ($('connect-button').disabled || $('folder-browser').contains(document.activeElement)) return;
-    connect(formTarget());
+    const { item, resume, continuation } = formConnection();
+    connect(item, resume, continuation);
   });
   document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', updateMode));
   $('host-choice').addEventListener('change', selectHost);
@@ -1160,7 +1348,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   $('refresh-model-catalog').addEventListener('click', () => loadModelPicker(true));
   $('composer-reasoning').addEventListener('change', () => {
     if (!state.hello || state.activeRun !== null || state.settingsPending) return;
-    connect({ ...state.target, reasoning_effort: $('composer-reasoning').value });
+    switchModel({ ...state.target, reasoning_effort: $('composer-reasoning').value });
   });
   $('composer-mode').addEventListener('change', async () => {
     if (!state.hello || (state.activeRun !== null && state.permissionId === null) || state.settingsPending) return;
@@ -1176,20 +1364,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
   $('close-model-picker').addEventListener('click', () => $('model-dialog').close());
   $('model-filter').addEventListener('input', renderModelOptions);
-  $('configure-model').addEventListener('click', async () => {
-    $('model-dialog').close();
-    await showDialog(state.target);
-    showProviderSetup();
-    const selected = savedProfiles.find(p => p.name === state.target?.profile);
-    if (selected?.kind === 'chatgpt') {
-      $('model-kind').value = 'chatgpt';
-      $('setup-profile').value = selected.name;
-      setupAccount = selected.account;
-      updateProviderForm();
-      loadChatgptModels().catch(error => { $('chatgpt-status').textContent = String(error.message || error); });
-    }
-    $('setup-profile').focus();
-  });
+  $('configure-model').addEventListener('click', () => configureCurrentProvider());
   $('install-remote').addEventListener('click', installRemote);
   $('model-kind').addEventListener('change', changeProvider);
   for (const id of ['setup-profile', 'model-id', 'model-key', 'model-url']) $(id).addEventListener('input', () => {
@@ -1276,6 +1451,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }));
   $('remove-annotation').addEventListener('click', clearAnnotation);
+  $('remove-annotation-image').addEventListener('click', () => { if (state.annotation) { delete state.annotation.image; renderAnnotation(); } });
   $('go').addEventListener('click', () => openBrowser($('browser-url').value));
   $('browser-url').addEventListener('keydown', event => { if (event.key === 'Enter') openBrowser($('browser-url').value); });
   $('open-preview').addEventListener('click', previewRemote);

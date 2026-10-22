@@ -5,6 +5,7 @@ pub mod chatgpt;
 pub mod codex;
 pub mod config;
 pub mod context;
+pub mod continuation;
 pub mod desktop_bridge;
 mod desktop_images;
 pub mod desktop_setup;

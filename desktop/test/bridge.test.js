@@ -53,3 +53,16 @@ test('account model selection is independent of its profile and quoted on SSH', 
   assert.ok(!bridgeSpec({ isPackaged: false }, target, 'saved').args.includes('--model'));
   assert.match(remoteCommand('/tmp/work', 'chatgpt', null, 'high', target.model), /--model 'model'\\''\$\(false\)'/);
 });
+
+test('continuation selects the new model and reasoning while resume retains recorded settings', () => {
+  const target = { kind: 'local', workspace: '/tmp/work', profile: 'other', model: 'new-model', reasoning_effort: 'high' };
+  const args = bridgeSpec({ isPackaged: false }, target, null, 'session-old').args;
+  assert.equal(args[1], '5');
+  assert.ok(args.includes('--continue-from')); assert.ok(args.includes('session-old'));
+  assert.ok(args.includes('--model')); assert.ok(args.includes('--reasoning-effort'));
+  assert.ok(!args.includes('--resume'));
+  const remote = bridgeSpec({ isPackaged: false }, { ...target, kind: 'ssh', host: 'box' }, null, "session'$(false)").args.at(-1);
+  assert.match(remote, /--continue-from 'session'\\''\$\(false\)'/);
+  assert.match(remote, /--model 'new-model'/);
+  assert.throws(() => bridgeSpec({}, target, 'saved', 'other'), /resume or continuation/);
+});
