@@ -12,7 +12,7 @@
     $('review-status').textContent = 'Loading recorded evidence…';
     $('review-content').textContent = '';
     timer = setTimeout(() => { if (pending === id) { pending = ++sequence; $('review-status').textContent = 'Review timed out. Close and reopen the review to try again.'; } }, 15000);
-    try { await window.sui.command({ type: 'review_mission', request: id, directory, ...extra }); }
+    try { await window.sui.command({ type: 'review_mission', request: id, directory, ...($('review-worktree').value ? { worktree: $('review-worktree').value } : {}), ...extra }); }
     catch (error) { if (pending === id) { clearTimeout(timer); $('review-status').textContent = error.message; } }
   }
   function event(value) {
@@ -21,18 +21,21 @@
     if (value.error) { $('review-status').textContent = value.error; return; }
     const data = value.data;
     if (Object.hasOwn(data, 'diff')) {
-      $('review-status').textContent = `${data.file}${data.truncated ? ' · Diff truncated at 128 KiB; inspect the branch for the complete diff.' : ''}`;
+      $('review-status').textContent = `${data.file}${data.worktree ? ` · Current worktree: ${data.worktree} · Not an accepted result` : ''}${data.truncated ? ' · Diff truncated at 128 KiB; inspect the branch for the complete diff.' : ''}`;
       $('review-content').textContent = data.diff || 'No text diff (the file may be binary).';
     } else if (data.agent) {
       $('review-status').textContent = `${data.agent}${data.omitted ? ` · ${data.omitted} earlier entries omitted; full record in the run journal.` : ''}`;
       $('review-content').textContent = data.entries.map(row => `${row.kind}\n${row.text}`).join('\n\n');
     } else {
+      $('review-worktree').replaceChildren(...(data.worktrees || []).map(name => new Option(name, name)));
+      $('review-worktree').value = data.worktree || '';
+      $('review-worktree-label').classList.toggle('hidden', !data.worktrees?.length);
       $('review-files').replaceChildren(new Option('Choose a changed file…', ''), ...data.files.map(file => new Option(file, file)));
       $('review-agents').replaceChildren(new Option('Choose an agent…', ''), ...data.agents.map(agent => new Option(agent.replace(/\.jsonl$/, ''), agent)));
       $('review-files').disabled = !data.files.length;
       $('review-agents').disabled = !data.agents.length;
       $('review-status').textContent = `${data.result.outcome} · ${data.files.length} files${data.files_truncated ? ' (file list truncated)' : ''}${data.omitted ? ` · ${data.omitted} earlier evidence records omitted` : ''}`;
-      $('review-content').textContent = `Branch: ${data.result.branch || 'none'}\nBase: ${data.base || 'unknown'}\nCandidate: ${data.candidate || 'none'}\n\nRecorded evidence (historical; no commands are rerun):\n\n${data.evidence.map(row => `${row.kind}\n${row.text}`).join('\n\n') || 'No gate or audit records.'}`;
+      $('review-content').textContent = `${data.worktree ? `Retained worktree: ${data.worktree}\nCurrent files, including uncommitted work. These changes have not been accepted.\n` : ''}Branch: ${data.result.branch || 'none'}\nBase: ${data.base || 'unknown'}\nCandidate: ${data.candidate || 'none'}\n\nRecorded evidence (historical; no commands are rerun):\n\n${data.evidence.map(row => `${row.kind}\n${row.text}`).join('\n\n') || 'No gate or audit records.'}`;
     }
   }
   function live(root) {
@@ -71,12 +74,13 @@
     $('review-files').addEventListener('change', () => { if ($('review-files').value) request({ file: $('review-files').value }); });
     $('review-agents').addEventListener('change', () => { if ($('review-agents').value) request({ agent: $('review-agents').value }); });
     $('review-evidence').addEventListener('click', () => request());
+    $('review-worktree').addEventListener('change', () => request());
   });
   window.SuiReview = {
     reset, event, live,
     open(path) {
       directory = path;
-      $('review-files').replaceChildren(); $('review-agents').replaceChildren();
+      $('review-files').replaceChildren(); $('review-agents').replaceChildren(); $('review-worktree').replaceChildren();
       window.SuiUI.openDialog($('mission-review')); request();
     }
   };

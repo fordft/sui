@@ -249,6 +249,7 @@ fn recent_sessions_picker_preserves_drafts_and_ignores_stale_results() {
     app.sessions_loaded(
         request + 1,
         Ok(vec![sui::session::Summary {
+            conversation_id: "wrong".into(),
             profile: None,
             id: "wrong".into(),
             label: "wrong".into(),
@@ -260,6 +261,7 @@ fn recent_sessions_picker_preserves_drafts_and_ignores_stale_results() {
     app.sessions_loaded(
         request,
         Ok(vec![sui::session::Summary {
+            conversation_id: "source".into(),
             profile: None,
             id: "source".into(),
             label: "A recorded session".into(),

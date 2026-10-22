@@ -14,7 +14,7 @@ struct Bridge {
 impl Bridge {
     fn open(root: &Path, profile: &str, args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_sui"))
-            .args(["--desktop-protocol", "5", "desktop-bridge", "--workspace"])
+            .args(["--desktop-protocol", "6", "desktop-bridge", "--workspace"])
             .arg(root.join("workspace"))
             .args(["--profile", profile])
             .args(args)
@@ -85,6 +85,7 @@ fn model_continuation_is_portable_resumable_and_preserves_original_constraints()
     first.command(json!({"type":"send","run":1,"mode":"mission","text":"Build the Thai storefront. Preserve accessibility and do not change billing."}));
     assert_eq!(first.until("run_done")["outcome"], "done");
     let source = first.hello["run_id"].as_str().unwrap().to_string();
+    let original_identity = first.hello["conversation_id"].as_str().unwrap().to_string();
     first.close();
     let source_file = root
         .join(".local/share/sui/runs")
@@ -93,6 +94,14 @@ fn model_continuation_is_portable_resumable_and_preserves_original_constraints()
     let before = std::fs::read(&source_file).unwrap();
     let mut second = Bridge::open(&root, "second", &["--continue-from", &source]);
     assert_eq!(second.hello["model"], "model-two");
+    let continued_identity = second.hello["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        continued_identity, original_identity,
+        "model handoff creates a new conversation"
+    );
     assert_eq!(second.hello["approval"], "ask");
     assert_eq!(second.hello["conversation_mode"], "mission");
     assert_eq!(second.hello["continuation"]["source"], source);
@@ -115,6 +124,10 @@ fn model_continuation_is_portable_resumable_and_preserves_original_constraints()
     let continued = second.hello["run_id"].as_str().unwrap().to_string();
     second.close();
     let mut resumed = Bridge::open(&root, "second", &["--resume", &continued]);
+    assert_eq!(
+        resumed.hello["conversation_id"], continued_identity,
+        "native resume preserves the conversation identity across journal forks"
+    );
     assert_eq!(resumed.hello["conversation_mode"], "mission");
     resumed.command(json!({"type":"send","run":1,"mode":"mission","text":"Continue the plan"}));
     assert_eq!(resumed.until("run_done")["outcome"], "done");

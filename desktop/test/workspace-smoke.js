@@ -299,6 +299,82 @@ async function run() {
   await ui('document.getElementById("new-chat").click()');
   await waitFor('state.hello !== null && !connectionBusy && !state.hello.continuation', 'intentional new chat stays fresh');
   assert.equal(await ui('state.hello.history.length'), 0);
+  assert.equal(await ui('document.getElementById("message").value'), '', 'New chat has its own empty draft');
+  const reopen = async () => {
+    const loaded = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+    win.webContents.reload(); await loaded;
+    await waitFor('state.hello !== null && !connectionBusy', 'native connection restored after reload');
+  };
+  const typeDraft = text => ui(`document.getElementById('message').value=${JSON.stringify(text)}; document.getElementById('message').dispatchEvent(new Event('input'))`);
+  const attach = async () => {
+    await ui(`{ const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(${JSON.stringify(pixels)}), c => c.charCodeAt(0))], 'durable.png', { type: 'image/png' })); document.getElementById('composer').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data })); }`);
+    await waitFor('state.images.length === 1 && !state.imagesLoading', 'durable image draft');
+  };
+  // Before the first turn the native journal is not resumable. Local drafts
+  // still survive a restart, including a last keystroke before debounce fires.
+  await attach();
+  await typeDraft('Unsent project plan');
+  await reopen();
+  assert.equal(await ui('document.getElementById("message").value'), 'Unsent project plan');
+  assert.equal(await ui('state.images[0].data'), pixels);
+  assert.equal(await ui('document.getElementById("connect-dialog").open'), false);
+  assert.equal(modelRequests.length, 5, 'restoring an unsent draft makes no model request');
+  await waitFor('!!document.querySelector(".session-row[aria-current=true]")', 'unsent chat appears in recent chats');
+  await ui('document.querySelector(".session-row[aria-current=true]").parentElement.querySelector(".chat-edit").click(); document.getElementById("chat-title").value="Pinned project plan"; document.getElementById("chat-pinned").checked=true; document.getElementById("chat-edit-form").requestSubmit()');
+  await waitFor('!document.getElementById("chat-edit-dialog").open', 'chat label saved');
+  await typeDraft('Last keystroke before closing');
+  await reopen();
+  assert.equal(await ui('document.getElementById("message").value'), 'Last keystroke before closing');
+  await waitFor('document.querySelector(".session-row")?.textContent.includes("★ Pinned project plan")', 'pin and name restored first');
+  assert.equal(await ui('[...document.querySelectorAll(".session-row")].filter(r => r.textContent.includes("Pinned project plan")).length'), 1, 'unsent identity migration does not duplicate labels');
+  // A fresh chat, an existing draft and a different workspace never share
+  // composer state. Opening rows uses their saved profile and conversation.
+  await ui('document.getElementById("new-chat").click()');
+  await waitFor('state.hello !== null && !connectionBusy && document.getElementById("message").value === ""', 'fresh second draft');
+  assert.equal(await ui('state.images.length'), 0);
+  await typeDraft('Second chat draft');
+  await ui('document.getElementById("chat-filter").value="Pinned project"; document.getElementById("chat-filter").dispatchEvent(new Event("input"))');
+  assert.equal(await ui('document.querySelectorAll(".session-row").length'), 1, 'chat search filters titles');
+  await ui('document.querySelector(".session-row").click()');
+  await waitFor('!connectionBusy && document.getElementById("message").value === "Last keystroke before closing"', 'first draft restores from its row');
+  assert.equal(await ui('state.images[0].data'), pixels);
+  const originalTarget = await ui('state.target');
+  await ui(`connect({ ...state.target, workspace: ${JSON.stringify(slowWorkspace)} })`);
+  await waitFor(`!connectionBusy && state.target.workspace === ${JSON.stringify(slowWorkspace)}`, 'other workspace connects');
+  assert.equal(await ui('document.getElementById("message").value'), '');
+  assert.equal(await ui('state.images.length'), 0);
+  assert.equal(await ui('document.querySelectorAll(".session-row").length'), 0, 'local labels stay in their workspace');
+  await ui(`connect(${JSON.stringify(originalTarget)})`);
+  await waitFor(`!connectionBusy && state.target.workspace === ${JSON.stringify(workspace)}`, 'original workspace connects');
+  await waitFor('!![...document.querySelectorAll(".session-row")].find(r => r.textContent.includes("Pinned project plan"))', 'original labels return');
+  await ui('[...document.querySelectorAll(".session-row")].find(r => r.textContent.includes("Pinned project plan")).click()');
+  await waitFor('!connectionBusy && document.getElementById("message").value === "Last keystroke before closing"', 'original workspace draft preserved');
+  await ui('document.getElementById("clear-draft").click()');
+  await reopen();
+  assert.equal(await ui('document.getElementById("message").value'), '', 'cleared draft does not return after restart');
+  assert.equal(await ui('state.images.length'), 0);
+  assert.equal(modelRequests.length, 5);
+  await typeDraft('Named conversation hello');
+  await ui('document.getElementById("send").click()');
+  await waitFor('state.activeRun === null && state.sessionHasHistory', 'named conversation gets native history');
+  const stableIdentity = await ui('state.hello.conversation_id');
+  await typeDraft('Follow up on this named conversation');
+  await reopen();
+  assert.equal(await ui('state.hello.conversation_id'), stableIdentity);
+  assert.equal(await ui('document.getElementById("message").value'), 'Follow up on this named conversation');
+  await waitFor('[...document.querySelectorAll(".session-row")].filter(r => r.textContent.includes("Pinned project plan")).length === 1', 'native journal forks share one pinned name');
+  assert.equal(modelRequests.length, 6, 'restart never submits the follow-up draft');
+  const beforeSaveFailure = await ui('state.hello.run_id');
+  const chatDirectory = path.join(fixtureHome, 'chats'), backup = path.join(fixtureHome, 'chats-backup');
+  fs.renameSync(chatDirectory, backup); fs.writeFileSync(chatDirectory, 'unavailable storage');
+  try {
+    await typeDraft('Keep this even when saving fails');
+    await ui('document.getElementById("new-chat").click()');
+    await waitFor('!connectionBusy && document.getElementById("transcript").textContent.includes("Save the draft before switching chats")', 'failed save blocks navigation');
+    assert.equal(await ui('state.hello.run_id'), beforeSaveFailure);
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep this even when saving fails');
+  } finally { fs.rmSync(chatDirectory); fs.renameSync(backup, chatDirectory); }
+  await ui('SuiChats.flush()');
   console.log('WORKSPACE_SSH_SMOKE_OK');
 }
 

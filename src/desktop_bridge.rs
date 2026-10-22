@@ -98,6 +98,8 @@ enum Command {
         directory: String,
         file: Option<String>,
         agent: Option<String>,
+        #[serde(default)]
+        worktree: Option<String>,
     },
     Approve {
         id: u64,
@@ -571,7 +573,7 @@ pub async fn run(
         }
     });
     send_line(
-        &json!({"type":"hello","version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"conversation_mode":conversation_mode,"last_mission_task":last_mission_task,"mission":mission,"mission_results":mission_results,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated,"continuation":handoff_info}),
+        &json!({"type":"hello","conversation_id":solo.conversation_id,"version":env!("CARGO_PKG_VERSION"),"workspace":workspace,"profile":profile,"model":model,"model_name":model_name,"reasoning_levels":reasoning_levels,"catalog_warning":catalog.as_ref().and_then(|c| c.warning.as_ref()),"reasoning_effort":reasoning_effort,"reasoning_choices":reasoning_choices,"recovered":recovered,"conversation_mode":conversation_mode,"last_mission_task":last_mission_task,"mission":mission,"mission_results":mission_results,"approval":"ask","image_input":image_input,"kind":if chatgpt { "chatgpt" } else { "" },"run_id":dir.file_name().unwrap_or_default().to_string_lossy(),"history":history,"history_truncated":history_truncated,"continuation":handoff_info}),
     )?;
     let mut pending: std::collections::HashMap<
         u64,
@@ -606,13 +608,13 @@ pub async fn run(
                     }
                 }
                 Some(Ok(Command::MissionInfo)) => send_line(&json!({"type":"mission_info","mission":mission_info(&workspace).await}))?,
-                Some(Ok(Command::ReviewMission { request, directory, file, agent })) => {
+                Some(Ok(Command::ReviewMission { request, directory, file, agent, worktree })) => {
                     let result = async {
                         if active.is_some() { bail!("Wait for the current turn before opening recorded Mission results"); }
                         if !review_directories.contains(&directory) { bail!("Choose a Mission result from this conversation"); }
                         let directory = Path::new(&directory).canonicalize()?;
                         if !directory.starts_with(crate::session::runs_root().canonicalize()?) { bail!("Mission records are outside the runs directory"); }
-                        crate::mission::review::load(&workspace, &directory, file.as_deref(), agent.as_deref()).await
+                        crate::mission::review::load_selection(&workspace, &directory, file.as_deref(), agent.as_deref(), worktree.as_deref()).await
                     }.await;
                     let response = match result {
                         Ok(data) => json!({"type":"mission_review","request":request,"data":data}),
@@ -680,8 +682,8 @@ pub async fn run(
                 }
                 Some(Ok(Command::Stop)) => { stopped.store(true, Ordering::SeqCst); cancel.notify_waiters(); }
                 Some(Ok(Command::ListSessions)) => {
-                    let sessions = crate::session::recent(&crate::session::runs_root(), &workspace, Some(&dir))?;
-                    send_line(&json!({"type":"sessions","items":sessions.into_iter().map(|s| json!({"id":s.id,"label":s.label,"profile":s.profile})).collect::<Vec<_>>()}))?;
+                    let sessions = crate::session::recent_limit(&crate::session::runs_root(), &workspace, None, 200)?;
+                    send_line(&json!({"type":"sessions","items":sessions.into_iter().map(|s| json!({"id":s.id,"conversation_id":s.conversation_id,"label":s.label,"profile":s.profile})).collect::<Vec<_>>()}))?;
                 }
                 Some(Ok(Command::ListProfiles)) => {
                     let value = match crate::config::profiles(None) {

@@ -135,6 +135,7 @@ pub fn new_run_dir() -> Result<PathBuf> {
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub id: String,
+    pub conversation_id: String,
     pub profile: Option<String>,
     pub label: String,
 }
@@ -142,6 +143,15 @@ pub struct Summary {
 /// Bounded previews, scoped strictly to the current workspace. Older journals
 /// remain visible but need the recorded wire signature before they can resume.
 pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<Vec<Summary>> {
+    recent_limit(root, workspace, exclude, 30)
+}
+
+pub fn recent_limit(
+    root: &Path,
+    workspace: &Path,
+    exclude: Option<&Path>,
+    limit: usize,
+) -> Result<Vec<Summary>> {
     if !root.exists() {
         return Ok(vec![]);
     }
@@ -225,13 +235,17 @@ pub fn recent(root: &Path, workspace: &Path, exclude: Option<&Path>) -> Result<V
             ""
         };
         rows.push(Summary {
+            conversation_id: header
+                .and_then(|v| v["data"]["session_id"].as_str())
+                .unwrap_or(&id)
+                .to_string(),
             profile: header
                 .and_then(|v| v["data"]["profile"].as_str())
                 .map(String::from),
             label: format!("{model} · {title}{suffix}"),
             id,
         });
-        if rows.len() == 30 {
+        if rows.len() == limit.clamp(1, 200) {
             break;
         }
     }

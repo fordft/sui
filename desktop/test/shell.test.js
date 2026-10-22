@@ -54,7 +54,7 @@ test('markup stays inside the CSP: no inline script, style, or handlers', () => 
 
 test('every element id the scripts reach for exists in the page', () => {
   const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(m => m[1]));
-  for (const file of ['app.js', 'ui.js']) {
+  for (const file of ['app.js', 'ui.js', 'chats.js', 'review.js']) {
     const source = read(file);
     const used = [...source.matchAll(/\$\('([\w-]+)'\)/g), ...source.matchAll(/getElementById\('([\w-]+)'\)/g), ...source.matchAll(/\bfor \(const id of \[([^\]]+)\]/g)]
       .flatMap(m => (m[0].startsWith('for') ? [...m[1].matchAll(/'([\w-]+)'/g)].map(x => x[1]) : [m[1]]));
@@ -69,7 +69,7 @@ test('every element id the scripts reach for exists in the page', () => {
 test('the preload API covers every window.sui call the renderer makes', () => {
   const exposed = new Set([...read('preload.js').matchAll(/^\s{2}(\w+):/gm)].map(m => m[1]));
   const calls = new Set();
-  for (const file of ['app.js', 'ui.js', 'boot.js']) for (const m of read(file).matchAll(/window\.sui\??\.(\w+)/g)) calls.add(m[1]);
+  for (const file of ['app.js', 'ui.js', 'boot.js', 'chats.js', 'review.js', 'recovery.js']) for (const m of read(file).matchAll(/window\.sui\??\.(\w+)/g)) calls.add(m[1]);
   assert.ok(calls.size > 8);
   for (const call of calls) assert.ok(exposed.has(call), `window.sui.${call} is exposed by preload.js`);
 });

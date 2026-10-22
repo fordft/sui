@@ -57,7 +57,7 @@ test('account model selection is independent of its profile and quoted on SSH', 
 test('continuation selects the new model and reasoning while resume retains recorded settings', () => {
   const target = { kind: 'local', workspace: '/tmp/work', profile: 'other', model: 'new-model', reasoning_effort: 'high' };
   const args = bridgeSpec({ isPackaged: false }, target, null, 'session-old').args;
-  assert.equal(args[1], '5');
+  assert.equal(args[1], '6');
   assert.ok(args.includes('--continue-from')); assert.ok(args.includes('session-old'));
   assert.ok(args.includes('--model')); assert.ok(args.includes('--reasoning-effort'));
   assert.ok(!args.includes('--resume'));

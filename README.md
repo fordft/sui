@@ -59,6 +59,15 @@ connection settings contain no credentials or saved approvals. A session
 interrupted during a tool call can be recovered into a fresh run with its
 outcome marked unknown. Recovery never reruns historical commands.
 
+Draft text, attachments and browser annotations are saved privately on this
+device for each workspace and conversation, including chats with no sent messages.
+New chat starts with an empty composer; returning to a saved draft restores it.
+Use **Clear draft** to discard it. **Recent chats** searches names, initial-message
+previews and drafts; each row's **⋯** menu can rename or pin it. Names and pins
+stay on this device, including across native resume forks. Search covers up to
+200 recent native runs and 200 saved local chats, rather than full transcripts.
+Storage errors remain visible and prevent switching away from an unsaved draft.
+
 When a provider fails, use its recovery action to repair settings or sign in
 again, then **Resume chat** to return to the saved conversation. A failed
 reconnect keeps that chat pointer and your draft attachments. If provider or
@@ -760,7 +769,11 @@ in the transcript. Desktop **Inspect agent activity** separates live agent text
 and tool results. After execution, **Review changes & checks** opens recorded
 gates/audit results, agent journals and per-file diffs between the recorded base
 and accepted commit. These read-only views also remain available after reopening
-or changing models; no checks or old commands run again. Browser and web consent remain separate. Execution runs local
+or changing models; no checks or old commands run again. Failed or stopped runs
+also expose retained worker/integration worktrees, including uncommitted changes
+and untracked text files. Select a worktree to inspect its current files; these
+are explicitly unaccepted work, not a preserved snapshot or an applied result.
+Browser and web consent remain separate. Execution runs local
 commands in disposable worktrees; the conversation approval selector does not
 restrict those worker commands.
 Stop/Ctrl-C also terminates in-flight Git operations and their hook processes.
@@ -939,8 +952,9 @@ support explicit breakpoints or public API diagnostics.
 ## Known limitations
 
 - The TUI Changes tab shows status + `diff --stat`; Desktop Mission review
-  provides per-file text diffs for accepted candidates. Failed runs retain
-  journals/worktrees for inspection but have no accepted candidate diff.
+  provides per-file text diffs for accepted commits and current retained
+  worktrees. It does not apply or accept failed work; deleted worktrees cannot
+  be reconstructed by review.
 - Desktop review shows up to 200 changed files, 128 KiB per diff, the latest
   60 agent entries and 40 check/audit records, with explicit omission notices.
   Journals under `~/.local/share/sui/runs` hold the full record. Older sessions

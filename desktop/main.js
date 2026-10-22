@@ -8,6 +8,7 @@ const { spawnBridge, spawnSetup, validateHost } = require('./bridge');
 const updates = require('./update');
 const { sshHosts, remoteFolders } = require('./workspaces');
 const { createProviders } = require('./providers');
+const { createLibrary } = require('./library');
 const providers = createProviders({ spawn: item => spawnSetup(app, item, 'desktop-provider'), openExternal: url => shell.openExternal(url) });
 
 let window;
@@ -46,7 +47,7 @@ function rememberProject(item) {
 }
 
 function saveConnection(item, sessionId) {
-  const saved = { version: 1, target: { kind: item.kind, host: item.kind === 'ssh' ? item.host : '', workspace: item.workspace, profile: item.profile, ...(item.model ? { model: item.model } : {}), ...(item.reasoning_effort ? { reasoning_effort: item.reasoning_effort } : {}) }, session: sessionId || null };
+  const saved = { version: 1, target: { kind: item.kind, host: item.kind === 'ssh' ? item.host : '', workspace: item.workspace, profile: item.profile, ...(item.model ? { model: item.model } : {}), ...(item.reasoning_effort ? { reasoning_effort: item.reasoning_effort } : {}) }, session: sessionId || null, conversation: conversationId || null };
   const directory = app.getPath('userData');
   fs.mkdirSync(directory, { recursive: true });
   const temporary = path.join(directory, `connection-${randomUUID()}.tmp`);
@@ -64,7 +65,7 @@ function readConnection() {
     return saved.version === 1 && saved.target?.workspace && saved.target?.profile ? saved : null;
   } catch { return null; }
 }
-let sessionId, sessionHasHistory = false;
+let sessionId, conversationId, sessionHasHistory = false;
 const closingBridges = new Set();
 
 function stopTunnel() {
@@ -148,6 +149,7 @@ async function startBridge(item, resume, continuation) {
           clearTimeout(timeout);
           target = { ...item, workspace: value.workspace, model: value.model, reasoning_effort: value.reasoning_effort };
           sessionId = value.run_id;
+          conversationId = value.conversation_id || value.run_id;
           sessionHasHistory = !!value.history?.length;
           rememberProject(target);
           saveConnection(target, sessionHasHistory ? sessionId : null);
@@ -201,7 +203,7 @@ function installRemoteSui(item) {
   if (item.kind !== 'ssh') throw new Error('Remote installation requires an SSH host.');
   const host = validateHost(item.host);
   const script = fs.readFileSync(app.isPackaged ? path.join(process.resourcesPath, 'install.sh') : path.resolve(__dirname, '../install.sh'));
-  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 5 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 5 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
+  const command = 'sh -s && { "$HOME/.sui/bin/sui" --desktop-protocol 6 desktop-bridge --help >/dev/null 2>&1 && "$HOME/.sui/bin/sui" --desktop-protocol 6 desktop-provider --help >/dev/null 2>&1 || { echo "Installed SUI needs the current Desktop protocol; update SUI on this host." >&2; exit 1; }; }';
   const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=12', '--', host, command], { stdio: ['pipe', 'pipe', 'pipe'] });
   return new Promise((resolve, reject) => {
     let output = '', settled = false;
@@ -386,6 +388,14 @@ async function captureAnnotation(view, selection) {
 }
 
 function registerIpc() {
+  const library = createLibrary(app.getPath('userData'));
+  ipcMain.handle('sui:chat-read', (_event, scope) => library.read(scope));
+  ipcMain.handle('sui:chat-write', (_event, scope, patch) => { library.write(scope, patch); return true; });
+  ipcMain.handle('sui:chat-list', (_event, item) => library.list(item));
+  ipcMain.on('sui:chat-write-sync', (event, scope, patch) => {
+    try { library.write(scope, patch); event.returnValue = { ok: true }; }
+    catch (error) { event.returnValue = { error: error.message }; }
+  });
   ipcMain.handle('sui:update-check', async () => {
     if (process.platform !== 'darwin') return { supported: false };
     offeredUpdate = await updates.latest(app.getVersion(), process.arch);

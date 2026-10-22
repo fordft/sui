@@ -28,7 +28,7 @@ function fixture(t, options = {}) {
   const requireMain = createRequire(filename);
   const electron = {
     app: { whenReady: () => new Promise(() => {}), on() {}, getPath: () => home },
-    ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
+    ipcMain: { handle: (name, fn) => handlers.set(name, fn), on: (name, fn) => handlers.set(name, fn) },
     shell: {}, nativeTheme: { shouldUseDarkColors: true }
   };
   const window = {

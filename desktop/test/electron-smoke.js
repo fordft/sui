@@ -22,7 +22,8 @@ dialog.showOpenDialog = async (_window, options) => {
 // UI-only ChatGPT fixture: native OAuth/JWT/transport and private IPC are
 // exercised separately; this never opens a real account or spends plan usage.
 let fixtureChatgpt = false, fixtureLogins = 0, fixtureRefreshes = 0;
-let fixtureApproval = false, fixtureImages = false, fixtureMission = false, fixtureMissionReject = false, fixtureMissionChecks = 0;
+let fixtureApproval = false, fixtureImages = false, fixtureMission = false, fixtureMissionReject = false, fixtureMissionChecks = 0, fixtureRetained = false;
+const reviewCommands = [];
 const missionCommands = [];
 const approvalCommands = [], imageCommands = [];
 const accountModels = [
@@ -33,7 +34,9 @@ const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async (event, ...args) => {
   if (channel === 'sui:command' && fixtureMission && args[0].type === 'review_mission') {
     const command = args[0];
-    const data = command.file ? { file: command.file, diff: '-before\n+after <script>plain text</script>', truncated: false } : command.agent ? { agent: command.agent, entries: [{ kind: 'tool', text: 'test passed · exit 0' }], omitted: 0 } : { result: { outcome: 'accepted', branch: 'candidate' }, base: 'base-sha', candidate: 'candidate-sha', files: ['page.txt'], agents: ['w-a.jsonl'], evidence: [{kind:'gate',text:'exit 0'}], omitted:0 };
+    reviewCommands.push(command);
+    const worktree = fixtureRetained ? command.worktree || 'integration' : null;
+    const data = command.file ? { file: command.file, worktree, diff: '-before\n+after <script>plain text</script>', truncated: false } : command.agent ? { agent: command.agent, entries: [{ kind: 'tool', text: 'test passed · exit 0' }], omitted: 0 } : { result: { outcome: fixtureRetained ? 'failed' : 'accepted', branch: fixtureRetained ? null : 'candidate' }, base: 'base-sha', candidate: fixtureRetained ? null : 'candidate-sha', worktree, worktrees: fixtureRetained ? ['integration', 'worker-a'] : [], files: ['page.txt'], agents: ['w-a.jsonl'], evidence: [{kind:'gate',text:fixtureRetained ? 'exit 1' : 'exit 0'}], omitted:0 };
     setImmediate(() => BrowserWindow.getAllWindows()[0].webContents.send('sui:event', { type:'mission_review',request:command.request,data }));
     return true;
   }
@@ -153,7 +156,7 @@ async function run() {
     assert.equal(await ui('state.hello.approval'), 'auto-edits');
     assert.equal(await ui('state.hello.run_id'), modeRun, 'mode applies to the current chat');
     const originalRun = await ui('state.hello.run_id');
-    await ui('document.getElementById("message").value = "Reasoning draft"; connect({ ...state.target, profile: "reasoning" })');
+    await ui('document.getElementById("message").value = "Reasoning draft"; switchModel({ ...state.target, profile: "reasoning" })');
     for (let n = 0; n < 100; n++) {
       if (await ui('state.hello?.model === "gpt-6.1-sol" && !connectionBusy')) break;
       await pause(30);
@@ -169,7 +172,7 @@ async function run() {
     assert.notEqual(await ui('state.hello.run_id'), reasoningRun);
     assert.equal(await ui('document.getElementById("message").value'), 'Reasoning draft');
     if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-controls.png'), (await win.capturePage()).toPNG());
-    await ui('connect({ ...state.target, profile: "test", reasoning_effort: undefined })');
+    await ui('switchModel({ ...state.target, profile: "test", reasoning_effort: undefined })');
     for (let n = 0; n < 100; n++) {
       if (await ui('state.hello?.model === "test-model" && !connectionBusy')) break;
       await pause(30);
@@ -243,11 +246,13 @@ async function run() {
     await pause(200);
     const guest = win.contentView.children.find(view => view.webContents);
     assert.ok(guest, 'browser guest attached');
+    for (let n = 0; n < 200 && (guest.webContents.getURL() !== url || guest.webContents.isLoading()); n++) await pause(30);
     assert.ok(guest.getBounds().width > 100, 'browser is visible in pane');
     assert.equal(guest.webContents.getURL(), url, 'a bare loopback address loads over HTTP');
     assert.equal(await ui('document.getElementById("browser-url").value'), url, 'the address bar keeps the normalized URL');
     await win.webContents.executeJavaScript('document.getElementById("annotate").click()');
-    await pause(200);
+    for (let n = 0; n < 100 && !(await guest.webContents.executeJavaScript('!!document.getElementById("__sui_annotation_overlay__")')); n++) await pause(30);
+    assert.equal(await guest.webContents.executeJavaScript('!!document.getElementById("__sui_annotation_overlay__")'), true, 'annotation listeners are ready before input');
     guest.webContents.sendInputEvent({ type: 'mouseMove', x: 100, y: 75 });
     guest.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: 100, y: 75 });
     guest.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: 100, y: 75 });
@@ -256,7 +261,7 @@ async function run() {
       await pause(50);
     }
     const annotation = await win.webContents.executeJavaScript('document.getElementById("annotation-target").textContent');
-    assert.match(annotation, /#target/);
+    assert.match(annotation, /#target/, await ui('JSON.stringify({status:document.getElementById("browser-status").textContent,disabled:document.getElementById("annotate").disabled,dialogs:[...document.querySelectorAll("dialog[open]")].map(d=>d.id)})'));
     assert.match(annotation, /127\.0\.0\.1/);
     assert.equal(await ui('state.annotation.image.mime'), 'image/png');
     assert.equal(await ui('document.getElementById("annotation-image").src.startsWith("data:image/png;base64,")'), true, 'real selected pixels are visible in the draft');
@@ -264,6 +269,7 @@ async function run() {
     assert.match(await ui('document.getElementById("annotation-image-status").textContent'), /image-capable/, 'unsupported model gets an explicit choice');
     fixtureImages = true;
     const selectedPixels = await ui('state.annotation.image.data');
+    const selectedAnnotation = await ui('state.annotation');
     await ui('state.hello.image_input=true; document.getElementById("message").value="Fix this area"; document.getElementById("annotation-comment").value="Use the screenshot"; updateSend(); document.getElementById("send").click()');
     for (let n = 0; n < 100 && (imageCommands.length === 0 || await ui('state.activeRun !== null')); n++) await pause(30);
     assert.equal(imageCommands[0].images[0].data, selectedPixels, 'annotation pixels reach the submission');
@@ -347,6 +353,7 @@ async function run() {
     assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'the minimum window width has no page overflow');
     assert.equal(await ui('document.getElementById("composer-model").getBoundingClientRect().width > 0'), true, 'the model remains visible in a small window');
     assert.equal(await ui('document.getElementById("send").getBoundingClientRect().right <= innerWidth'), true, 'the send control stays inside the window');
+    assert.equal(await ui('document.getElementById("send").getBoundingClientRect().right <= document.querySelector(".chat").getBoundingClientRect().right'), true, 'the preview never covers Send in a narrow chat pane');
     fixtureMission = true;
     await ui('clearAnnotation(); setMissionInfo({ ready: true, profiles: [{name:"fixture-role", model:"fixture"}] }); document.getElementById("composer-execution").value="mission"; document.getElementById("composer-execution").dispatchEvent(new Event("change"))');
     await ui('document.getElementById("message").value="Discuss first"; document.getElementById("message").dispatchEvent(new Event("input")); document.getElementById("message").dispatchEvent(new KeyboardEvent("keydown", {key:"Enter", bubbles:true, cancelable:true}))');
@@ -377,6 +384,18 @@ async function run() {
     for (let n = 0; n < 100 && !(await ui('document.getElementById("review-content").textContent.includes("test passed")')); n++) await pause(30);
     assert.match(await ui('document.getElementById("review-content").textContent'), /test passed/);
     await ui('document.getElementById("close-mission-review").click()');
+    fixtureRetained = true;
+    await ui('SuiReview.open("/fixture/failed")');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-worktree").options.length === 2')); n++) await pause(30);
+    assert.match(await ui('document.getElementById("review-content").textContent'), /not been accepted/);
+    await ui('document.getElementById("review-worktree").value="worker-a"; document.getElementById("review-worktree").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-content").textContent.includes("Retained worktree: worker-a")')); n++) await pause(30);
+    await ui('document.getElementById("review-files").value="page.txt"; document.getElementById("review-files").dispatchEvent(new Event("change"))');
+    for (let n = 0; n < 100 && !(await ui('document.getElementById("review-status").textContent.includes("Not an accepted result")')); n++) await pause(30);
+    assert.equal(reviewCommands.at(-1).worktree, 'worker-a', 'file inspection stays on the selected retained worker');
+    assert.match(await ui('document.getElementById("review-content").textContent'), /\+after/);
+    await ui('document.getElementById("close-mission-review").click()');
+    fixtureRetained = false;
     assert.equal(missionCommands[1].text, 'Goal B');
     assert.equal(await ui('state.lastMissionTask'), 'Goal B', 'accepted execution updates the repeated objective');
     for (let n = 0; n < 100 && await ui('state.missionInfoPending'); n++) await pause(30);
@@ -417,7 +436,7 @@ async function run() {
     fixtureApproval = false;
     await ui('newChat()');
     for (let n = 0; n < 100; n++) {
-      if (await ui('state.hello !== null && document.getElementById("stage").dataset.stage === "hero"')) break;
+      if (await ui('state.hello !== null && !connectionBusy && document.getElementById("stage").dataset.stage === "hero"')) break;
       await pause(50);
     }
     await pause(200);
@@ -518,6 +537,14 @@ async function run() {
     assert.match(fs.readFileSync(path.join(tempHome, 'config.toml'), 'utf8'), /\[profiles.chatgpt\]\nkind = "chatgpt"\nmodel = ""/);
     if (process.env.SUI_DESKTOP_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.SUI_DESKTOP_SCREENSHOT).replace(/\.png$/, '-account-models.png'), (await win.capturePage()).toPNG());
     assert.equal(await ui('document.getElementById("composer-usage").classList.contains("hidden")'), false, 'ChatGPT usage control is visible beside the model');
+    await ui(`state.annotation=${JSON.stringify(selectedAnnotation)}; document.getElementById('annotation-comment').value='Saved visual feedback'; renderAnnotation()`);
+    const reopened = new Promise(resolve => win.webContents.once('did-finish-load', resolve));
+    win.webContents.reload(); await reopened;
+    for (let n = 0; n < 200; n++) { if (await ui('state.hello !== null && !connectionBusy')) break; await pause(30); }
+    assert.equal(await ui('state.annotation?.image.data'), selectedPixels, 'captured annotation pixels survive reload before autosave');
+    assert.equal(await ui('document.getElementById("annotation-comment").value'), 'Saved visual feedback');
+    assert.equal(await ui('document.getElementById("message").value'), 'Keep account draft');
+    await ui('document.getElementById("clear-draft").click()');
     win.setSize(720, 560);
     await pause(150);
     assert.equal(await ui('document.documentElement.scrollWidth <= innerWidth'), true, 'ChatGPT model and usage controls fit the narrow window');

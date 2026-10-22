@@ -50,8 +50,8 @@ function setStatus(label, connected, busy = false) {
 function updateSend() {
   const hasImages = state.images.length > 0 || !!state.annotation?.image;
   const draft = $('message').value.trim() || state.annotation || state.images.length;
-  $('run-mission').disabled = !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || hasImages || !(String($('message').value).trim() || state.lastMissionTask);
-  $('send').disabled = !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (hasImages && !state.hello?.image_input) || !draft;
+  $('run-mission').disabled = connectionBusy || !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || hasImages || !(String($('message').value).trim() || state.lastMissionTask);
+  $('send').disabled = connectionBusy || !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || (hasImages && !state.hello?.image_input) || !draft;
 }
 
 function setBusy(busy) {
@@ -243,15 +243,7 @@ function renderWelcome() {
 }
 
 function renderSessions(items) {
-  $('session-list').replaceChildren();
-  for (const item of items) {
-    const row = h('button', 'session-row', item.label);
-    row.type = 'button';
-    row.title = item.label;
-    row.addEventListener('click', () => { if (state.target) connect({ ...state.target, profile: item.profile || state.target.profile }, item.id); });
-    $('session-list').append(row);
-  }
-  if (!items.length) $('session-list').append(h('div', 'sidebar-empty', 'No earlier chats here'));
+  window.SuiChats.sessions(items);
 }
 
 // ── connection dialog ────────────────────────────────────────────────────
@@ -479,16 +471,16 @@ function formConnection() {
     item.reasoning_effort = intent.target.reasoning_effort;
   }
   const continuation = intent.continuation || (!sameProfile ? intent.resume : null);
-  return { item, resume: continuation ? null : intent.resume, continuation };
+  return { item, resume: continuation ? null : intent.resume, continuation, draftOptions: intent.draftOptions };
 }
 
 async function recoveryConnection(item) {
   if (sameTarget(item, state.target) && state.hello) {
-    return { target: { ...state.target }, resume: state.sessionHasHistory ? state.hello.run_id : null };
+    return { target: { ...state.target }, resume: state.sessionHasHistory ? state.hello.run_id : null, draftOptions: { draft: state.hello.conversation_id || state.hello.run_id, carry: true } };
   }
   if (sameTarget(item, connectionIntent?.target)) return connectionIntent;
   const saved = await window.sui.restore();
-  return saved?.session && sameTarget(saved.target, item) ? { target: saved.target, resume: saved.session } : null;
+  return saved && sameTarget(saved.target, item) ? { target: saved.target, resume: saved.session, draftOptions: { draft: saved.conversation } } : null;
 }
 
 async function installRemote() {
@@ -736,18 +728,16 @@ async function showModelPicker() {
 
 async function switchModel(item) {
   const source = state.hello?.run_id;
-  const annotation = state.annotation, comment = $('annotation-comment').value;
-  await connect(item, null, state.sessionHasHistory ? source : null);
-  if (annotation) { state.annotation = annotation; $('annotation-comment').value = comment; renderAnnotation(); }
+  await connect(item, null, state.sessionHasHistory ? source : null, { carry: true });
 }
 
-async function connect(item, resume = null, continuation = null) {
+async function connect(item, resume = null, continuation = null, draftOptions = {}) {
   if (connectionBusy || state.activeRun !== null) return;
-  const draftAnnotation = sameTarget(item, state.target) ? state.annotation : null;
-  const draftComment = $('annotation-comment').value;
-  const failedSubmission = (resume || continuation) && (resume || continuation) === state.lastSubmission?.session && sameTarget(item, state.target) ? state.lastSubmission : null;
-  const intent = { target: { ...item }, resume, continuation };
   connectionBusy = true;
+  try { await window.SuiChats.flush(); }
+  catch (error) { connectionBusy = false; appendNotice(`Save the draft before switching chats: ${error.message}`, true); return; }
+  const failedSubmission = (resume || continuation) && (resume || continuation) === state.lastSubmission?.session && sameTarget(item, state.target) ? state.lastSubmission : null;
+  const intent = { target: { ...item }, resume, continuation, draftOptions };
   window.SuiReview.reset();
   $('model-dialog').close();
   closeFolders();
@@ -815,6 +805,7 @@ async function connect(item, resume = null, continuation = null) {
       transcript().append(button);
     }
     if (hello.recovered) appendNotice('This chat was interrupted. Pending tools were not rerun; inspect existing changes before retrying.', true);
+    await window.SuiChats.load(state.target, hello, { ...draftOptions, carry: draftOptions.carry || !!continuation });
     if (state.lastSubmission) {
       const card = h('div', 'notice recovery-card');
       card.append(h('p', '', 'The previous request is available to restore and edit. It has not been sent again.'));
@@ -822,7 +813,6 @@ async function connect(item, resume = null, continuation = null) {
       transcript().append(card); state.recoveryVisible = true;
     }
     renderImages();
-    if (draftAnnotation) { state.annotation = draftAnnotation; $('annotation-comment').value = draftComment; renderAnnotation(); }
     if (hello.catalog_warning) appendNotice(hello.catalog_warning, true);
     if (hello.history_truncated) appendNotice('Earlier conversation text is omitted from this preview; the saved context remains available to SUI.');
     setStage();
@@ -856,7 +846,7 @@ async function connect(item, resume = null, continuation = null) {
       $('connect-error').append(help, carry);
       carry.focus();
     } else $('connect-error').querySelector('button')?.focus();
-  } finally { connectionBusy = false; updateConnectForm(); }
+  } finally { connectionBusy = false; updateConnectForm(); setBusy(state.activeRun !== null); }
 }
 
 // Images remain draft data until Send, then travel inside the SSH stream.
@@ -880,6 +870,7 @@ function renderImages() {
   list.classList.toggle('hidden', !state.images.length);
   if (state.images.length && state.hello && !state.hello.image_input) imageError('This chat has no image input. Choose an image-capable model or start a new chat.');
   updateSend();
+  window.SuiChats.changed();
 }
 async function addImages(files) {
   if (!state.hello || !state.hello.image_input) { imageError('Choose an image-capable model or start a new chat before attaching images.'); return; }
@@ -1012,6 +1003,7 @@ function clearAnnotation() {
   $('annotation-image').removeAttribute('src');
   updateSend();
   pet().refresh();
+  window.SuiChats.changed();
 }
 
 async function send(executeMission = false) {
@@ -1045,7 +1037,7 @@ async function send(executeMission = false) {
   const command = executeMission
     ? { type: 'run_mission', run, text: objective, worker_profile: $('mission-worker').value || null, auditor_profile: $('mission-auditor').value || null, max_workers: Number($('mission-workers').value) }
     : { type: 'send', run, text, mode: state.conversationMode, images: images.map(({ name, mime, data }) => ({ name, mime, data })) };
-  try { await window.sui.command(command); }
+  try { await window.SuiChats.flush(); await window.sui.command(command); }
   catch (error) { appendNotice(`Send failed: ${error.message}`, true); restoreSubmission(); }
 }
 
@@ -1194,6 +1186,7 @@ function onEvent(event) {
       finishRun(outcome);
       window.sui.command({ type: 'list_sessions' }).catch(() => {});
       refreshMissionInfo();
+      window.SuiChats.changed();
       break;
     }
     case 'error':
@@ -1299,6 +1292,7 @@ function renderAnnotation() {
   else $('annotation-image').removeAttribute('src');
   $('annotation-image-status').textContent = selected.image ? (!state.hello?.image_input ? 'Choose an image-capable model, or remove the screenshot to send text only.' : `Screenshot included${selected.resized ? ' · Resized to fit' : ''}`) : 'Text annotation only';
   updateSend();
+  window.SuiChats.changed();
 }
 
 // ── wiring ───────────────────────────────────────────────────────────────
@@ -1308,14 +1302,25 @@ function newChat() { if (state.target) connect(state.target); else showDialog();
 window.sui.onEvent(onEvent);
 window.addEventListener('DOMContentLoaded', async () => {
   const ui = window.SuiUI;
+  window.SuiChats.init({
+    context: () => ({ target: state.target, hello: state.hello, history: state.sessionHasHistory }),
+    draft: () => ({ text: $('message').value, images: state.images, annotation: state.annotation, comment: $('annotation-comment').value }),
+    apply: draft => {
+      $('message').value = draft.text; state.images = draft.images;
+      state.annotation = draft.annotation; $('annotation-comment').value = draft.comment;
+      if (state.annotation) renderAnnotation(); else clearAnnotation();
+      renderImages(); ui.autosize($('message'));
+    }, connect
+  });
+  for (const id of ['message', 'annotation-comment']) $(id).addEventListener('input', window.SuiChats.changed);
   ui.onLayout(syncBrowser);
   setBusy(false);
   setStage();
   $('connect-form').addEventListener('submit', event => {
     event.preventDefault();
     if ($('connect-button').disabled || $('folder-browser').contains(document.activeElement)) return;
-    const { item, resume, continuation } = formConnection();
-    connect(item, resume, continuation);
+    const { item, resume, continuation, draftOptions } = formConnection();
+    connect(item, resume, continuation, draftOptions);
   });
   document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', updateMode));
   $('host-choice').addEventListener('change', selectHost);
@@ -1464,7 +1469,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   await refreshProjects();
   const saved = await window.sui.restore();
-  if (saved) await connect(saved.target, saved.session);
+  if (saved) await connect(saved.target, saved.session, null, { draft: saved.conversation });
   else if (state.projects.length) await connect(state.projects[0], 'latest');
   else showDialog();
 });

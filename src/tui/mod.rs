@@ -109,6 +109,7 @@ fn run_dir() -> PathBuf {
 pub struct Solo {
     tx: UnboundedSender<SoloCommand>,
     sig: String, // profile+model signature; change → respawn
+    pub conversation_id: String,
 }
 enum SoloCommand {
     Turn(SoloTask),
@@ -228,6 +229,7 @@ pub fn spawn_solo(
             });
             let (tx, _) = unbounded_channel();
             Solo {
+                conversation_id: String::new(),
                 tx,
                 sig: String::new(),
             }
@@ -280,6 +282,9 @@ pub fn start_solo_with_continuation(
     let sig = solo_signature(&prof);
     let workspace_for_log = workspace.canonicalize()?.display().to_string();
     let al = crate::config::agent_limits(&workspace);
+    let conversation_id = saved
+        .map(|s| s.header.session_id.clone())
+        .unwrap_or_else(|| format!("sui-{:032x}", rand::random::<u128>()));
     let mut agent = Agent::new(
         Provider::from_profile(&prof),
         ToolContext {
@@ -303,10 +308,7 @@ pub fn start_solo_with_continuation(
             request_timeout: Duration::from_millis(al.request_timeout_ms),
         },
         Identity {
-            session_id: saved
-                .as_ref()
-                .map(|s| s.header.session_id.clone())
-                .unwrap_or_else(|| format!("sui-{:032x}", rand::random::<u128>())),
+            session_id: conversation_id.clone(),
             agent_id: saved
                 .as_ref()
                 .map(|s| s.header.agent_id.clone())
@@ -408,7 +410,11 @@ pub fn start_solo_with_continuation(
             }
         }
     });
-    Ok(Solo { tx, sig })
+    Ok(Solo {
+        tx,
+        sig,
+        conversation_id,
+    })
 }
 
 /// Serialize execution with coordinator conversation. Journal the runtime result

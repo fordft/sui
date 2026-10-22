@@ -76,7 +76,7 @@ enum Sub {
 )]
 struct Cli {
     /// Desktop protocol guard; prevents old CLIs interpreting setup as a prompt.
-    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=5))]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u32).range(1..=6))]
     desktop_protocol: Option<u32>,
     #[command(subcommand)]
     sub: Option<Sub>,

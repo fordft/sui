@@ -13,6 +13,11 @@ agent loop.
   opening one of the sidebar or preview closes the other.
 - **Project navigation:** search saved projects by name, path, or host with
   Find a project (⌘/Ctrl+K). Filtering the list keeps the current project open.
+- **Recent chats:** search names, initial-message previews, profiles and drafts.
+  Use a row's **⋯** menu to rename or pin it. Names and pins are stored on this
+  device and remain attached to the conversation when native resume creates a
+  new run journal. Search covers up to 200 recent native runs and 200 saved
+  local chats, with at most 200 matches shown and explicit limit notices.
 - **Starting and following work:** starter cards fill an editable draft without
   sending it. The composer shows the connected model, even in a narrow window.
   Jump to latest returns to the end of a long conversation when you scroll up.
@@ -53,8 +58,18 @@ agent loop.
   files on the workspace host, outside journal text and exports.
 - **Reopening:** the app saves its last connection and chat pointer privately
   and reconnects on startup. A project opens its latest meaningful chat; empty
-  connection-only sessions stay out of recent chats. Interrupted tool calls
+  connections with no draft or label stay out of recent chats. Interrupted tool calls
   are marked as unknown outcomes in a new fork, never rerun automatically.
+- **Drafts:** unsent text, images, annotation screenshots and comments persist
+  per workspace/conversation, even before the first message. Switching chats or
+  projects saves the current draft; reopening it restores that draft. New chat
+  starts empty, while model/reasoning changes carry the current draft forward.
+  **Clear draft** removes it without deleting history or its name/pin. Storage
+  failures are visible and block switching/closing while a draft cannot be saved.
+  Private files under the Electron user-data `chats/` directory use atomic saves,
+  128 KiB text/comment bounds, a 12 MiB record limit and 64 MiB total across at
+  most 1000 records; existing drafts are never evicted to make room. They stay
+  on this device, outside the host's journals and model requests until Send.
 - **Recovery:** terminal errors offer relevant actions: sign in/configure a
   provider, choose a different model, manage ChatGPT usage, or reconnect to the
   saved chat. Provider repair returns to **Resume chat**, preserving native
@@ -71,7 +86,11 @@ agent loop.
   execution. Afterwards, **Review changes & checks** opens runtime-recorded
   gates, audits, agent journals and file diffs pinned to the recorded base and
   accepted commit. Reopened conversations retain their review links. Views are
-  bounded and disclose omissions; original checkouts are never changed.
+  bounded and disclose omissions; original checkouts are never changed. Failed
+  and stopped runs offer a retained-worktree selector for current tracked and
+  untracked changes. These mutable files are labelled unaccepted. Review never
+  reruns checks, Git clean/process filters or applies changes; binary untracked
+  files have no text preview, and deleted worktrees remain unavailable.
 - **Browser preview:** enter a full URL or a bare address such as
   `www.google.com` or `localhost:5173`. Bare loopback addresses use HTTP;
   other bare hosts use HTTPS. SSH **Forward & open** waits for the tunnel
@@ -195,7 +214,11 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
    text-only annotation. Images travel through the existing private image
    transport and replay storage, never through connection preferences.
 
-Desktop now requires protocol 5 on its CLI host; update both together. The
+Desktop 0.12.10 requires protocol 6 on its CLI host (Sui 0.12.10 or newer);
+update both together. Older hosts fail before starting a session or model call.
+The new CLI still accepts older Desktop protocols, and existing journals stay
+compatible. Device-local draft files are additive; an older Desktop ignores
+them without deleting them. The
 remote workspace must exist. The remote installation button requires HTTPS
 access to GitHub Releases on that host; it installs the latest released SUI, so
 the release must include `desktop-bridge`, `desktop-setup`, and `desktop-provider`

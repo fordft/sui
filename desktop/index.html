@@ -14,6 +14,7 @@
   <script src="ui.js" defer></script>
   <script src="review.js" defer></script>
   <script src="recovery.js" defer></script>
+  <script src="chats.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -86,6 +87,8 @@
             </section>
             <section class="sb-section">
               <header class="sb-head"><h2>Recent chats</h2><button id="refresh-sessions" class="icon-btn sm" type="button" aria-label="Refresh chats" data-tip="Refresh chats"><svg class="i"><use href="#i-refresh"/></svg></button></header>
+              <label class="chat-search"><span class="sr-only">Find recent chats</span><input id="chat-filter" type="search" placeholder="Find recent chats…" autocomplete="off"></label>
+              <p id="chat-list-status" class="field-help" role="status"></p>
               <div id="session-list" class="sb-list sessions"></div>
             </section>
           </nav>
@@ -156,8 +159,12 @@
               <input id="image-picker" class="hidden" type="file" accept="image/png,image/jpeg,image/webp" multiple>
               <textarea id="message" rows="1" placeholder="Ask SUI to work on this project…" disabled aria-label="Message SUI"></textarea>
               <div class="composer-foot">
-                <span id="composer-hint" class="hint">Connect a project to start</span>
+                <div class="composer-feedback">
+                  <span id="composer-hint" class="hint">Connect a project to start</span>
+                  <span id="draft-status" class="hint" role="status"></span>
+                </div>
                 <div class="composer-actions">
+                  <button id="clear-draft" class="btn btn-ghost btn-sm hidden" type="button">Clear draft</button>
                   <button id="attach-image" class="btn btn-sm btn-ghost" type="button" title="Attach PNG, JPEG or WebP. You can also drop or paste an image.">Attach image</button>
                   <button id="stop" class="btn btn-sm btn-stop hidden" type="button"><svg class="i"><use href="#i-stop"/></svg><span>Stop</span></button>
                   <button id="run-mission" class="btn btn-sm btn-primary hidden" type="button">Run mission</button>
@@ -219,6 +226,7 @@
   <dialog id="mission-review" class="dialog dialog-review" aria-labelledby="review-title">
     <header class="dlg-head"><div class="dlg-titles"><h2 id="review-title">Review Mission</h2><p>Recorded checks, agent activity and candidate changes.</p></div><button type="button" id="close-mission-review" class="btn btn-ghost">Close</button></header>
     <div class="dlg-body">
+      <label id="review-worktree-label" class="field hidden"><span>Retained worktree — current files, not an accepted result</span><select id="review-worktree"></select></label>
       <div class="review-controls"><label class="field"><span>Changed file</span><select id="review-files"></select></label><label class="field"><span>Agent journal</span><select id="review-agents"></select></label><button type="button" id="review-evidence" class="btn btn-ghost btn-sm">Checks &amp; audit</button></div>
       <p id="review-status" class="field-help" role="status"></p><pre id="review-content" class="review-text" tabindex="0"></pre>
     </div>
@@ -278,6 +286,13 @@
     </form>
   </dialog>
 
+  <dialog id="chat-edit-dialog" class="dialog" aria-labelledby="chat-edit-title">
+    <form id="chat-edit-form" method="dialog">
+      <header class="dlg-head"><h2 id="chat-edit-title">Name and pin chat</h2><button id="close-chat-edit" class="btn btn-ghost" type="button">Close</button></header>
+      <div class="dlg-body"><label class="field"><span>Chat name</span><input id="chat-title" maxlength="120" autocomplete="off"></label><p class="field-help">Leave the name empty to use the original preview. Names and pins stay on this device.</p><label><input id="chat-pinned" type="checkbox"> Pin to the top</label><p id="chat-edit-error" class="field-help error-text" role="alert"></p></div>
+      <footer class="dlg-foot"><button type="submit" class="btn btn-primary">Save</button></footer>
+    </form>
+  </dialog>
   <dialog id="provider-dialog" class="dialog" aria-labelledby="provider-title">
     <header class="dlg-head">
       <div class="dlg-titles"><h2 id="provider-title">Add a provider</h2><p>Connect an account or configure API access on your workspace host.</p></div>

@@ -281,6 +281,18 @@ h1, h2, h3, h4, p { margin: 0; }
 .project-text small { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-row { width: 100%; padding: 7px 10px; border-radius: 8px; font-size: 13px; color: var(--text-2); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background var(--dur-1), color var(--dur-1); }
 .session-row:hover { background: var(--surface-2); color: var(--text); }
+.session-entry { display: flex; align-items: center; min-width: 0; }
+.session-entry .session-row { flex: 1; min-width: 0; }
+.session-row[aria-current="true"] { color: var(--text); background: var(--surface-2); }
+.chat-edit { flex: 0 0 28px; border-radius: 6px; color: var(--text-2); }
+.chat-edit:hover { background: var(--surface-2); }
+.chat-search input { width: 100%; margin: 4px 0; padding: 7px 10px; font-size: 12px; }
+#chat-list-status:empty { display: none; }
+.composer-feedback { flex: 1; min-width: 0; }
+.composer-feedback .hint { display: block; }
+#draft-status { font-size: 11px; }
+#draft-status:empty { display: none; }
+.error-text { color: var(--danger); }
 .sidebar-empty { padding: 6px 10px; font-size: 12.5px; color: var(--text-3); }
 .sb-foot { padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
 .sb-foot-btn { display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 8px; border-radius: 9px; color: var(--text-2); font-size: 13px; font-weight: 500; transition: background var(--dur-1), color var(--dur-1); }
@@ -292,7 +304,7 @@ h1, h2, h3, h4, p { margin: 0; }
 
 .chat { position: relative; container-type: inline-size; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); border-top: 1px solid var(--line); border-left: 1px solid var(--line); border-top-left-radius: 14px; transition: border-radius var(--dur-3) var(--ease); }
 :root[data-sidebar="closed"] .chat { border-top-left-radius: 0; border-left-color: transparent; }
-.stage { position: relative; height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto auto; }
+.stage { position: relative; height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; }
 .transcript-wrap { position: relative; min-height: 0; }
 .transcript {
   position: absolute; inset: 0; overflow-y: auto; scroll-behavior: smooth; outline: none; user-select: text;
@@ -384,7 +396,7 @@ h1, h2, h3, h4, p { margin: 0; }
 /* dock: approval, annotation, composer */
 .lane { height: var(--lane-h); }
 :root[data-pet="off"] .lane, .stage[data-stage="hero"] .lane { height: 0; }
-.dock { display: grid; gap: 10px; padding: 0 max(20px, calc((100% - var(--col)) / 2)) 20px; user-select: none; }
+.dock { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 10px; padding: 0 max(20px, calc((100% - var(--col)) / 2)) 20px; user-select: none; }
 .permission { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, var(--surface)); animation: rise var(--dur-3) var(--ease); }
 .permission-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .permission-text { min-width: 0; display: grid; gap: 2px; }
@@ -418,7 +430,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .model-pill span, .composer-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-target { flex: 1; min-width: 0; color: var(--text-3); font-size: 11px; }
 .composer textarea { display: block; width: 100%; min-height: 26px; max-height: 220px; padding: 3px 0; resize: none; border: 0; outline: none; background: none; font-size: 15px; line-height: 1.55; user-select: text; }
-.composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; }
+.composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .hint { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .send { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--primary); color: #fff; box-shadow: 0 6px 16px color-mix(in srgb, var(--primary) 34%, transparent); transition: background var(--dur-1), transform var(--dur-2) var(--ease), opacity var(--dur-1); }
