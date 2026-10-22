@@ -253,6 +253,8 @@ async function run() {
     await win.webContents.executeJavaScript('document.getElementById("annotate").click()');
     for (let n = 0; n < 100 && !(await guest.webContents.executeJavaScript('!!document.getElementById("__sui_annotation_overlay__")')); n++) await pause(30);
     assert.equal(await guest.webContents.executeJavaScript('!!document.getElementById("__sui_annotation_overlay__")'), true, 'annotation listeners are ready before input');
+    win.focus(); guest.webContents.focus();
+    await guest.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     guest.webContents.sendInputEvent({ type: 'mouseMove', x: 100, y: 75 });
     guest.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: 100, y: 75 });
     guest.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: 100, y: 75 });

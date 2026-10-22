@@ -48,6 +48,8 @@ function setStatus(label, connected, busy = false) {
 }
 
 function updateSend() {
+  $('composer').inert = connectionBusy;
+  $('annotation-card').inert = connectionBusy;
   const hasImages = state.images.length > 0 || !!state.annotation?.image;
   const draft = $('message').value.trim() || state.annotation || state.images.length;
   $('run-mission').disabled = connectionBusy || !state.hello || state.missionInfoPending || state.missionInfo?.ready !== true || state.activeRun !== null || state.settingsPending || state.imagesLoading > 0 || hasImages || !(String($('message').value).trim() || state.lastMissionTask);
@@ -732,10 +734,11 @@ async function switchModel(item) {
 }
 
 async function connect(item, resume = null, continuation = null, draftOptions = {}) {
-  if (connectionBusy || state.activeRun !== null) return;
+  if (connectionBusy || state.activeRun !== null || state.imagesLoading) return;
   connectionBusy = true;
+  updateSend();
   try { await window.SuiChats.flush(); }
-  catch (error) { connectionBusy = false; appendNotice(`Save the draft before switching chats: ${error.message}`, true); return; }
+  catch (error) { connectionBusy = false; updateSend(); appendNotice(`Save the draft before switching chats: ${error.message}`, true); return; }
   const failedSubmission = (resume || continuation) && (resume || continuation) === state.lastSubmission?.session && sameTarget(item, state.target) ? state.lastSubmission : null;
   const intent = { target: { ...item }, resume, continuation, draftOptions };
   window.SuiReview.reset();
@@ -823,7 +826,6 @@ async function connect(item, resume = null, continuation = null, draftOptions = 
     connectionIntent = null;
     await refreshProjects();
     await window.sui.command({ type: 'list_sessions' });
-    $('message').focus();
     pet().speak('connected!', 2000);
   } catch (error) {
     state.hello = null;
@@ -846,7 +848,10 @@ async function connect(item, resume = null, continuation = null, draftOptions = 
       $('connect-error').append(help, carry);
       carry.focus();
     } else $('connect-error').querySelector('button')?.focus();
-  } finally { connectionBusy = false; updateConnectForm(); setBusy(state.activeRun !== null); }
+  } finally {
+    connectionBusy = false; updateConnectForm(); setBusy(state.activeRun !== null);
+    if (state.hello) $('message').focus();
+  }
 }
 
 // Images remain draft data until Send, then travel inside the SSH stream.
@@ -1008,7 +1013,7 @@ function clearAnnotation() {
 
 async function send(executeMission = false) {
   executeMission = executeMission === true;
-  if (!state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading) return;
+  if (connectionBusy || !state.hello || state.activeRun !== null || state.settingsPending || state.imagesLoading) return;
   const images = [...state.images, ...(state.annotation?.image ? [state.annotation.image] : [])];
   if (images.length && !state.hello.image_input) { imageError('Choose an image-capable model before sending images.'); return; }
   if (images.length > 4 || images.reduce((sum, image) => sum + image.size, 0) > 8 * 1024 * 1024) { imageError('Attach at most 4 images and 8 MiB in total, including the browser screenshot.'); return; }

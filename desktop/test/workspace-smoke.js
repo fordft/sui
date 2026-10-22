@@ -375,6 +375,28 @@ async function run() {
     assert.equal(await ui('document.getElementById("message").value'), 'Keep this even when saving fails');
   } finally { fs.rmSync(chatDirectory); fs.renameSync(backup, chatDirectory); }
   await ui('SuiChats.flush()');
+  // Keyboard send must obey the same connection transition guard as buttons,
+  // including the asynchronous draft save before the old bridge is replaced.
+  await ui(`{
+    window.savedDraftFlush = SuiChats.flush;
+    let first = true;
+    SuiChats.flush = async () => {
+      if (first) { first = false; await new Promise(resolve => { window.finishDraftSave = resolve; }); }
+      return window.savedDraftFlush();
+    };
+    connect(state.target);
+    void 0;
+  }`);
+  assert.equal(await ui('connectionBusy && document.getElementById("send").disabled'), true);
+  assert.equal(await ui('document.getElementById("composer").inert && document.getElementById("annotation-card").inert'), true, 'draft controls cannot change while switching');
+  await ui('document.getElementById("message").dispatchEvent(new KeyboardEvent("keydown", {key:"Enter",bubbles:true}))');
+  assert.equal(await ui('state.activeRun'), null, 'Enter cannot start a turn during draft save or connection changes');
+  assert.equal(await ui('document.getElementById("message").value'), 'Keep this even when saving fails');
+  await ui('SuiChats.flush=window.savedDraftFlush; window.finishDraftSave()');
+  await waitFor('!connectionBusy && state.hello !== null', 'connection completes after the draft save');
+  assert.equal(await ui('document.getElementById("composer").inert'), false, 'draft editing becomes available after connection');
+  assert.equal(await ui('document.activeElement.id'), 'message', 'typing focus returns after the transition guard is released');
+  assert.equal(modelRequests.length, 6, 'connection transitions never submit a queued Enter');
   console.log('WORKSPACE_SSH_SMOKE_OK');
 }
 

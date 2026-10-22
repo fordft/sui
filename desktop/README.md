@@ -214,7 +214,7 @@ has a Windows path (caption-button overlay) that has not been run on Windows.
    text-only annotation. Images travel through the existing private image
    transport and replay storage, never through connection preferences.
 
-Desktop 0.12.10 requires protocol 6 on its CLI host (Sui 0.12.10 or newer);
+Desktop 0.12.11 requires protocol 6 on its CLI host (Sui 0.12.11 or newer);
 update both together. Older hosts fail before starting a session or model call.
 The new CLI still accepts older Desktop protocols, and existing journals stay
 compatible. Device-local draft files are additive; an older Desktop ignores
